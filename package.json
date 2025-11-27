@@ -1,0 +1,25 @@
+{
+  "name": "mlx-mlxtrain-starter-config",
+  "version": "1.0.0",
+  "description": "",
+  "main": "pipeline_runner.coffee",
+  "scripts": {
+    "pipeline": "coffee pipeline_runner.coffee"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.18.1",
+  "devDependencies": {
+    "coffeescript": "^2.7.0"
+  },
+  "dependencies": {
+    "coffee": "^5.5.1",
+    "d3-dsv": "^3.0.1",
+    "fs-extra": "^11.3.2",
+    "js-yaml": "^4.1.0",
+    "lodash": "^4.17.21",
+    "seedrandom": "^3.0.5",
+    "shell-quote": "^1.8.3"
+  }
+}

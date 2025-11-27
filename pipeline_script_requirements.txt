@@ -1,0 +1,70 @@
+# Pipeline Integration Requirements for New Scripts
+
+This document defines the rules and requirements for integrating new scripts into the build pipeline.
+Scripts must adhere to these constraints to ensure reproducibility, consistency, and configurability.
+These directives apply especially to AI-generated code and must always be considered part of the context
+when creating or updating scripts.
+
+1. Configuration-Driven Execution  
+- No hardcoded parameters.  
+- All filenames, directories, and options must come from default.config or a local override file.  
+- No command-line parameters are allowed. Scripts must only read config and environment variables.  
+- EXEC (script repo path) and PWD (run working directory) are always available as environment variables.  
+- Experimental tasks (e.g., alternate recipes like transformer_lm, bert_mlm) must be activated via override.yaml without requiring changes to EXEC.  
+
+2. File Path Resolution  
+- All paths must resolve relative to either EXEC or PWD.  
+- Inputs/outputs must be explicitly listed in config.  
+- Temporary or scratch files must be created under PWD, never /tmp or home directories.  
+- Experimental runs must keep outputs isolated under a distinct run/.../experiment_name directory defined in override.yaml.  
+
+3. I/O Consistency  
+- Inputs: Defined in config (e.g., data_contract.json, train_ready.jsonl).  
+- Outputs: Defined in config (e.g., artifacts.json, experiments.csv).  
+- Logs: Each script must write logs under PWD/logs/, recording start/end time and execution parameters.  
+
+4. Execution Rules  
+- Scripts must be self-contained, non-interactive, and deterministic (same input/config → same output).  
+- Scripts must not implement or check lockfiles. Concurrency and active-run checks are the sole responsibility of the pipeline runner.  
+- Training paradigms with different objectives (e.g., MLM vs causal LM) must define task name in config (task: value) to avoid ambiguity.  
+
+5. Integration with the Pipeline  
+- Scripts must define a clear entry point (main function) with no side effects on import.  
+- All required upstream files must be validated before execution; missing files must cause exit with error.  
+- Outputs must be declared and traceable in config, not inferred by scanning directories.  
+- Unknown task values in config must trigger a clear error rather than fallback defaults.  
+
+6. Error Handling  
+- Scripts must fail fast: missing/invalid inputs must log an error and exit with non-zero code.  
+- Scripts must validate required config keys before execution.  
+
+7. Reproducibility & Portability  
+- Scripts must record git commit hash (if available) and timestamp in logs.  
+- No assumptions about user environment, shell, or Python path—everything comes from EXEC/PWD and config.  
+- No hidden defaults: every behavior must be traceable to config or explicit script logic.  
+
+8. Checklist for New Scripts  
+- Define inputs/outputs in config.  
+- Use only EXEC and PWD for path resolution.  
+- Accept no CLI params.  
+- Write logs to PWD/logs/.  
+- Validate config keys at startup.  
+- Exit cleanly on errors.  
+- Update pipeline runner to include script in correct order.  
+- Test with both default.config and override.yaml.  
+- For experimental tasks, verify isolation (outputs under unique run dir) and correct task labeling in override.yaml.  
+- Do not include any lockfile or concurrency management (runner handles this).  
+- Always return a complete, standalone script when updating or generating code.  
+
+9. Configuration Access Standard (CFG Rule)  
+- All scripts must reference configuration exclusively through CFG.  
+  - Correct: CFG.model, CFG.data.output_dir, CFG.pipeline.steps[STEP_NAME].params  
+  - Prohibited: shortcuts such as P, STEP, STEP_CFG, or any renamed reference.  
+- All constants, parameters, and file paths must be resolved from CFG at the top of the script.  
+- The pipeline runner relies on this naming convention for static analysis, auditing, and dependency mapping.  
+- This rule ensures that grep CFG reveals every config-dependent statement in the entire repository.  
+
+Rationale:  
+Consistent use of CFG makes every script auditable and self-documenting.  
+It enables cross-repository traceability, automatic documentation generation, and uniform debugging through log introspection.  
+This policy is mandatory for all pipeline-integrated code, human or AI-authored.  

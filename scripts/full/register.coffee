@@ -1,0 +1,90 @@
+#!/usr/bin/env coffee
+###
+register.coffee — memo-native checkpoint (2025)
+------------------------------------------------
+Confirms that experiments.csv exists in memo,
+validates its header line, computes a lock_hash,
+and installs a canonical artifacts registry into memo.
+
+NEVER reads or writes the filesystem.
+NEVER falls back to fs if memo entry is missing.
+
+###
+
+path   = require 'path'
+crypto = require 'crypto'
+
+@step =
+  desc: "Register experiments.csv and record pipeline lock hash (memo-native)"
+
+  action: (M, stepName) ->
+
+    throw new Error "Missing stepName" unless stepName?
+
+    # ------------------------------------------------------------
+    # Load configuration
+    # ------------------------------------------------------------
+    cfg = M.theLowdown("experiment.yaml")?.value
+    throw new Error "Missing experiment.yaml in memo" unless cfg?
+
+    runCfg = cfg.run
+    throw new Error "Missing run section" unless runCfg?
+
+    EXP_CSV_KEY = runCfg.experiments_csv
+    throw new Error "Missing run.experiments_csv" unless EXP_CSV_KEY?
+
+    # ------------------------------------------------------------
+    # Load CSV from memo ONLY
+    # ------------------------------------------------------------
+    csvEntry = M.theLowdown(EXP_CSV_KEY)
+    throw new Error "experiments.csv not found in memo (#{EXP_CSV_KEY})" unless csvEntry?
+
+    csv = csvEntry.value
+    throw new Error "experiments.csv memo entry is empty" unless String(csv).trim().length
+
+    # ------------------------------------------------------------
+    # Validate header
+    # ------------------------------------------------------------
+    lines   = csv.trim().split(/\r?\n/)
+    header  = lines[0]?.split(',')
+    throw new Error "Invalid experiments.csv (missing header)" unless header?.length > 0
+
+    # ------------------------------------------------------------
+    # Compute lock_hash (stable pipeline checksum)
+    # ------------------------------------------------------------
+    lockHash = crypto.createHash("sha1").update(csv, "utf8").digest("hex")
+
+    M.saveThis "lock_hash", lockHash
+    M.saveThis "register:experiments_csv", EXP_CSV_KEY
+
+    console.log "Registered experiments.csv (#{lines.length - 1} row(s))"
+    console.log "lock_hash =", lockHash
+
+    # ------------------------------------------------------------
+    # Build artifacts registry
+    # ------------------------------------------------------------
+    ART_PATH = runCfg.artifacts   # e.g. "out/artifacts.json"
+    throw new Error "Missing run.artifacts" unless ART_PATH?
+
+    OUT_ROOT = path.dirname(ART_PATH)
+
+    registry =
+      created_utc: new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+      runs: [
+        {
+          model_id: runCfg.model
+          output_root: OUT_ROOT
+          adapter_dir: path.join(OUT_ROOT, "adapter")
+          fused_dir: path.join(OUT_ROOT, "fused")
+          quantized_dir: path.join(OUT_ROOT, "quantized")
+        }
+      ]
+
+    # Memo-native save; meta rule handles writing externally
+    M.saveThis ART_PATH, registry
+    M.saveThis "register:artifacts", ART_PATH
+
+    console.log "Registered artifacts at memo key:", ART_PATH
+
+    M.saveThis "done:#{stepName}", true
+    return

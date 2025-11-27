@@ -1,0 +1,174 @@
+# ============================================================
+# Celarien / SpaceStruts Pipeline Configuration (default.yaml)
+# Unified CoffeeScript-compatible schema — single-model runs
+# ============================================================
+
+run:
+  output_dir: out
+  snapshot_dir: snapshots
+  data_dir: data
+  eval_dir: eval_out
+
+  # --- Core data contracts and reports ---
+  catalog: data/data_catalog.json
+  contract: data/data_contract.json
+  report: data/data_report.json
+
+  # --- Experiment descriptors ---
+  experiments_csv: out/experiments.csv
+  experiment_manifest: out/experiment_manifest.json
+
+  # --- Model and policy assets ---
+  model: microsoft/Phi-3-mini-4k-instruct
+  format_policy: data/format_policy.json
+  policy: generation_policy.json
+
+  # --- Outputs and artifacts ---
+  fused_dir: fused_model
+  artifacts: out/artifacts.json
+
+  generations: generations
+  tokmeta: tokenizer_meta
+  ablations: eval_out/ablation_generations
+  summary: summary
+  analysis: analysis
+
+data:
+  output_dir: data
+  contract: data/data_contract.json
+  catalog: data/data_catalog.json
+  report: data/data_report.json
+
+eval:
+  output_dir: eval_out
+  policy: generation_policy.json
+  generations: generations.jsonl
+  report: report.md
+
+# ============================================================
+# Step: Prepare Experiments (single-model mode)
+# ============================================================
+
+prepare_experiments:
+  run: scripts/full/prepare_experiments.coffee
+  manifest_path: out/experiment_manifest.json
+  report: data/data_report.json
+  contract: data/data_contract.json
+  catalog: data/data_catalog.json
+  policy: generation_policy.json
+  batch_size: 1
+  grad_accum: 8
+  max_seq_length: 1024
+  learning_rate: 1e-4
+  bf16: true
+  iters_override: 0
+  epochs: 1
+
+  # Only vary seeds — model taken from run.model
+  seeds:
+    - 11
+    - 22
+    - 33
+
+manifest:
+  run: scripts/full/manifest.coffee
+  seed: 7
+
+register:
+  run: scripts/full/register.coffee
+
+prepare_data:
+  run: scripts/full/prepare_data.coffee
+  contract: data/data_contract.json
+  report: data/data_report.json
+
+prepare_prompts:
+  run: scripts/full/prepare_prompts.coffee
+  template_name: icl_minimal
+  stop_strings: ["<|endoftext|>", "\n\n"]
+  use_eos_token: false
+  contract: data/data_contract.json
+  prompt_policy: data/prompt_policy.json
+
+oracle_chat:
+  run: scripts/full/oracle_chat.coffee
+
+entropy:
+  run: scripts/full/entropy.coffee
+  params:
+    max_new_tokens: 128
+    stop_strings: ["\n\n", "==="]
+
+crawl_for_voice:
+  run: scripts/full/crawl_for_voice.coffee
+  base: celarien.com
+  valid_fraction: 0.1
+  min_story_words: 50
+  max_pages: 1000
+  pause_sec: 0.5
+  user_agent: Mozilla/5.0
+  request_timeout: 15000
+
+sanity:
+  run: scripts/full/sanity.coffee
+  ablations: ablations
+
+examination:
+  run: scripts/full/examination.coffee
+  prompts:
+    - "Share an important thought."
+    - "What truth do we often overlook?"
+  max_new_short: 64
+  max_new_long: 128
+  only_model_id: ""
+  ablations: ablations
+
+fuse:
+  run: scripts/full/fuse.coffee
+  do_fuse: true
+  q_bits: 4
+  q_group: 32
+  dtype: float16
+  dry_run: false
+
+prepare_outmd_kag:
+  run: scripts/full/prepare_outmd_kag.coffee
+  input_md: your/your.md
+  output_jsonl: out_kag.jsonl
+
+
+snapshot:
+  run: scripts/full/snapshot.coffee
+  prompts:
+    - "Finish this proverb: 'A stitch in time...'"
+    - "What lesson would a wise elder share about patience?"
+  max_new: 64
+  alt_seed: 123
+  n_shots: 3
+  min_words: 4
+  retries: 3
+
+fetch_hf_dataset:
+  desc: "Download and preprocess a HuggingFace dataset for fine-tuning."
+  run: scripts/full/fetch_hf_dataset.coffee
+  train: data/train.jsonl
+  valid: data/valid.jsonl
+  contract: data/data_contract.json
+  catalog: data/data_catalog.json
+  hf_dataset: asuender/motivational-quotes
+  subset: quotes
+  mode: notplain
+  valid_fract: 0.10
+  min_words: 5
+  max_words: 60
+  seed: 42
+
+train:
+  run: scripts/full/train.coffee
+  dry_run: false
+  only_model_id: ""
+  only_row:  "None"
+  steps_per_report: 10
+  steps_per_eval: 50
+  val_batches: 25
+  experiments_csv: out/experiments.csv

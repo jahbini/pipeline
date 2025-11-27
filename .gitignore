@@ -1,0 +1,26 @@
+# vi
+*.swp
+[12].log
+
+node_modules/
+pnpm-lock.yaml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data & outputs
+artifacts/
+data/
+data_report.json
+eval_out/
+run*/
+dist/
+
+# macOS
+.DS_Store

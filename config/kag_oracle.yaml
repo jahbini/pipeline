@@ -1,0 +1,58 @@
+###
+# kag_oracle.yaml — configuration
+###
+
+run:
+  model: microsoft/Phi-3-mini-4k-instruct     # local MLX model to query + tune
+  stories_md: /Users/theaiguy/jim_stories/jim.md    # markdown source
+  marshalled_stories: data/marshalled_stories.jsonl # md2segments output
+  marshalled_segments: data/marshalled_segments.jsonl # optional (paragraph mode)
+  stories: data/stories.jsonl                 # cleaned segments for oracle
+  kag_emotions: data/kag_emotions.jsonl       # oracle replies
+  kag_examples: data/kag_examples.jsonl       # merged replies+segments
+  merged_segments: data/merged_segments.jsonl # staging for rotation
+  train_file: loraland/train.jsonl            # LoRA train input
+  valid_file: loraland/valid.jsonl            # LoRA valid input
+  loraLand: loraland                           # directory containing train/valid
+
+  contract: data_contract.json                 # standard
+  catalog: data_catalog.json                   # standard
+  report: data_report.json                     # standard
+  prompt_policy: prompt_policy.json            # standard
+  experiments_csv: experiments.csv             # for lora_train
+  artifacts: artifacts.json                    # written under out/
+  tokmeta: tokenizer_meta.json                 # tokenizer metadata
+  output_dir: out                              # run artifacts
+  data_dir: data                               # generic data bucket
+  eval_dir: eval_out                           # optional
+
+md2segments:
+  run: kag_oracle/md2segments.coffee
+  input_md: /Users/theaiguy/jim_stories/jim.md
+  split_mode: paragraph
+
+oracle_ask:
+  run: kag_oracle/oracle_ask.coffee
+  batch_size: 10                               # number of segments per day
+
+reply_merge:
+  run: kag_oracle/reply_merge.coffee
+  # no special config
+
+rotate_merged:
+  run: kag_oracle/rotate_merged.coffee
+  # no special config
+
+lora_train:
+  run: kag_oracle/lora_train.coffee
+  epochs: 1
+  batch_size: 1
+  grad_accum: 8
+  max_seq_length: 768
+  learning_rate: 1e-4
+  iters: 100
+  bf16: false
+
+lora_fuse:
+  run: kag_oracle/lora_fuse.coffee
+  # no special config
