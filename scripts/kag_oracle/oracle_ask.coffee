@@ -43,7 +43,9 @@ NEW VERSION — compliant with M.demand + memo-native JSONL I/O
     # Load already-tagged emotion entries (JSONL)
     # (M.demand handles both existing + empty files)
     # ------------------------------------------------------------
-    emoEntry = M.demand(emoKey)
+    console.error "JIM Emotions at:", emoKey
+    emoEntry = M.theLowdown(emoKey,true)
+    console.error "JIM Emotion entries:", emoEntry
     taggedLines = emoEntry.value ? []
 
     tagged = new Set()
@@ -62,6 +64,8 @@ NEW VERSION — compliant with M.demand + memo-native JSONL I/O
       pending.push s
       break if pending.length >= batchSz
 
+    console.log "segments needing tags", pending.length
+
     if pending.length is 0
       console.log "oracle_ask: no new segments to tag."
       M.saveThis "oracle_ask:empty", true
@@ -73,7 +77,7 @@ NEW VERSION — compliant with M.demand + memo-native JSONL I/O
     # ------------------------------------------------------------
     extractJSON = (raw) ->
       return {} unless raw?
-      block = raw.match(/\{[\s\S\n]*\}/)?.[0]
+      block = raw.match(/\{[\s\S\n]*\}/)?[0]
       return {} unless block?
       try JSON.parse(block) catch then {}
 

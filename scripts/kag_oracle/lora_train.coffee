@@ -29,6 +29,7 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
     throw new Error "Missing step config" unless stepCfg?
 
     modelId   = runCfg.model
+    data_dir  = runCfg.data_dir
     landKey   = runCfg.loraLand              # <-- memo key root
     trainKey  = runCfg.train_file
     validKey  = runCfg.valid_file
@@ -69,7 +70,7 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
 
     args =
       model: modelId
-      data: landKey                     # dataset root (memo key)
+      data: data_dir
       "adapter-path": adapterKey        # memo location where MLX output goes
       "batch-size":     stepCfg.batch_size
       iters:            stepCfg.iters
@@ -81,7 +82,7 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
     # ------------------------------------------------------------
     # Run MLX LoRA training
     # ------------------------------------------------------------
-    stdout = M.callMLX "lora", args
+    stdout = M.callMLX "lora --train", args
 
     # ------------------------------------------------------------
     # Save into memo for inspection

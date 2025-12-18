@@ -76,7 +76,7 @@ class Memo
     oldResolver value if oldResolver
 
     # Call meta handler for this key
-    try entry.meta(key, value) catch e then console.error "Meta update error:",key, e.message
+    try v=entry.meta(key, value) catch e then console.error "Meta update error:",key, e.message
 
     # After notifier resolves, update stored value
     maybe.then (newval) -> entry.value = newval
@@ -286,7 +286,6 @@ class Memo
 
     args = buildArgs(cmdType, payload)
     cmd = "python"
-    console.log "JIM in pipeline", args
 
     extractJSON = (raw) ->
       return null unless raw?
@@ -358,11 +357,8 @@ createExperimentYaml = (basePath, defaultConfig, overridePath) ->
   baseDir  = path.dirname(baseAbs)
 
   recipe   = loadYamlSafe(baseAbs)
-  console.log "JIM recipe",baseAbs,recipe
   recipe   = expandIncludes(recipe, baseDir)
-  console.log "JIM recipe",baseDir,recipe
   defaults = loadYamlSafe(defaultConfig)
-  console.log "JIM defauts",defaults
   override = loadYamlSafe(overridePath)
 
   merged = deepMerge {}, defaults
@@ -586,7 +582,6 @@ main = ->
   defaultConfig = path.join(EXEC, 'config', baseRecipe+'.yaml')
   recipeInUse = path.join(EXEC, 'recipes', baseRecipe+'.yaml')
   overridePath  = path.join(process.cwd(), 'override.yaml')
-  console.log "JIM", defaultConfig, recipeInUse
 
   expPath = createExperimentYaml(recipeInUse, defaultConfig, overridePath)
   spec    = loadYamlSafe(expPath)
