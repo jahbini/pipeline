@@ -1,21 +1,29 @@
 #!/usr/bin/env coffee
 ###
 oracle_ask.coffee — Select untagged segments + query MLX emotion oracle
-NEW VERSION — compliant with M.demand + memo-native JSONL I/O
+
+Contract:
+  • Reads marshalled story segments
+  • Appends new Kag emotion rows (never truncates)
+  • If new rows are added:
+      → DOES NOT mark done
+  • If no work is done:
+      → marks done normally
 ###
 
 @step =
   desc: "Select a batch of untagged segments and query the MLX emotion oracle"
 
   action: (M, stepName) ->
+    console.log "JIM step oracke starting",stepName
 
     throw new Error "Missing stepName" unless stepName?
 
     # ------------------------------------------------------------
-    # Load config from memo
+    # Load config
     # ------------------------------------------------------------
     cfgEntry = M.theLowdown("experiment.yaml")
-    throw new Error "Missing experiment.yaml in memo" unless cfgEntry?
+    throw new Error "Missing experiment.yaml in memo" unless cfgEntry?.value?
 
     cfg     = cfgEntry.value
     runCfg  = cfg.run
@@ -24,8 +32,8 @@ NEW VERSION — compliant with M.demand + memo-native JSONL I/O
     throw new Error "Missing run section"  unless runCfg?
     throw new Error "Missing step section" unless stepCfg?
 
-    segKey = runCfg.marshalled_stories
-    emoKey = runCfg.kag_emotions
+    segKey  = runCfg.marshalled_stories
+    emoKey  = runCfg.kag_emotions
     batchSz = stepCfg.batch_size
 
     throw new Error "Missing run.marshalled_stories" unless segKey?
@@ -33,29 +41,28 @@ NEW VERSION — compliant with M.demand + memo-native JSONL I/O
     throw new Error "Missing stepCfg.batch_size"      unless batchSz?
 
     # ------------------------------------------------------------
-    # Load segments via memo-demand
+    # Load story segments
     # ------------------------------------------------------------
-    segEntry = M.demand(segKey)
+    segEntry = M.theLowdown(segKey)
     segments = segEntry.value
-    throw new Error "marshalled_stories: expected array" unless Array.isArray(segments)
+    throw new Error "marshalled_stories must be array" unless Array.isArray(segments)
 
     # ------------------------------------------------------------
-    # Load already-tagged emotion entries (JSONL)
-    # (M.demand handles both existing + empty files)
+    # Load existing Kag emotion rows (may be empty)
     # ------------------------------------------------------------
-    console.error "JIM Emotions at:", emoKey
-    emoEntry = M.theLowdown(emoKey,true)
-    console.error "JIM Emotion entries:", emoEntry
-    taggedLines = emoEntry.value ? []
+    emoEntry   = M.theLowdown(emoKey)
+    taggedRows = emoEntry.value ? []
+    throw new Error "kag_emotions must be array" unless Array.isArray(taggedRows)
 
+    # Build lookup of already-tagged segments
     tagged = new Set()
-    for obj in taggedLines
-      continue unless obj?.meta?
-      k = "#{obj.meta.doc_id}|#{obj.meta.paragraph_index}"
+    for row in taggedRows
+      continue unless row?.meta?
+      k = "#{row.meta.doc_id}|#{row.meta.paragraph_index}"
       tagged.add(k)
 
     # ------------------------------------------------------------
-    # Select batch of untagged segments
+    # Select untagged batch
     # ------------------------------------------------------------
     pending = []
     for s in segments
@@ -64,16 +71,17 @@ NEW VERSION — compliant with M.demand + memo-native JSONL I/O
       pending.push s
       break if pending.length >= batchSz
 
-    console.log "segments needing tags", pending.length
+    console.log "[oracle_ask] pending:", pending.length
 
+    # ------------------------------------------------------------
+    # Nothing to do → normal completion
+    # ------------------------------------------------------------
     if pending.length is 0
-      console.log "oracle_ask: no new segments to tag."
-      M.saveThis "oracle_ask:empty", true
-      M.saveThis "done:#{stepName}", true
+      console.log "[oracle_ask] nothing to do"
       return
 
     # ------------------------------------------------------------
-    # Helper: safely extract JSON from LLM response
+    # Helper: extract JSON from LLM output
     # ------------------------------------------------------------
     extractJSON = (raw) ->
       return {} unless raw?
@@ -82,10 +90,10 @@ NEW VERSION — compliant with M.demand + memo-native JSONL I/O
       try JSON.parse(block) catch then {}
 
     # ------------------------------------------------------------
-    # Query MLX for each pending segment
-    # (memo meta-rule persists JSONL updates automatically)
+    # Query MLX and append rows
     # ------------------------------------------------------------
-    outRows = taggedLines.slice()   # mutating copy
+    outRows = taggedRows.slice()
+    added   = 0
 
     for seg in pending
       text = seg.text ? ""
@@ -111,7 +119,14 @@ Return exactly like this:
         prompt: prompt
         "max-tokens": stepCfg.max_tokens ? 256
 
-      result = M.callMLX "generate", args
+      ###
+      console.log "M.constructor?.name =", M.constructor?.name
+      console.log "typeof M.callMLX =", typeof M.callMLX
+      console.log "own keys:", Object.keys M
+      console.log "proto keys:", Object.getOwnPropertyNames Object.getPrototypeOf M
+      ###
+
+      result   = M.callMLX "generate", args
       emotions = extractJSON result
 
       outRows.push
@@ -120,15 +135,15 @@ Return exactly like this:
           paragraph_index: meta.paragraph_index
         emotions: emotions
 
-      console.log "oracle_ask: tagged #{meta.doc_id} #{meta.paragraph_index}"
+      added += 1
+      console.log "[oracle_ask] tagged #{meta.doc_id} #{meta.paragraph_index}"
 
     # ------------------------------------------------------------
-    # Persist new emotion lines via M.saveThis
+    # Persist updated Kag file
     # ------------------------------------------------------------
     M.saveThis emoKey, outRows
 
-    # ------------------------------------------------------------
-    # Step is finished
-    # ------------------------------------------------------------
-    M.saveThis "done:#{stepName}", true
+    # IMPORTANT:
+    #   DO NOT write done:<stepName>
+    #   Runner will handle downstream invalidation on next startup
     return

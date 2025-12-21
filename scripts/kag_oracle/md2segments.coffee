@@ -31,9 +31,16 @@ path = require 'path'
     throw new Error "Missing run section"  unless runCfg?
     throw new Error "Missing step section" unless stepCfg?
 
-    inPath = stepCfg.input_md
+    inPath = runCfg.stories_md
     outKey = runCfg.marshalled_stories ? runCfg.story_segments
     mode   = stepCfg.split_mode
+    # ------------------------------------------------------------
+    # EARLY EXIT: output already exists
+    # ------------------------------------------------------------
+    existing = M.theLowdown(outKey)
+    if existing?.value? and Array.isArray(existing.value) and existing.value.length > 0
+      console.log "[md2segments] output already exists — skipping generation"
+      return
 
     throw new Error "Missing #{stepName}.input_md" unless inPath?
     throw new Error "Missing run.marshalled_stories/run.story_segments" unless outKey?
@@ -146,6 +153,4 @@ path = require 'path'
     # Persist to Memo (JSONL auto-written by meta rule)
     # ------------------------------------------------------------
     M.saveThis outKey, rows
-    M.saveThis "done:#{stepName}", true
-
     return

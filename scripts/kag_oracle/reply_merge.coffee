@@ -1,7 +1,6 @@
 #!/usr/bin/env coffee
 ###
 reply_merge.coffee — Merge MLX oracle replies into story segments
-NEW VERSION — fully memo-native with M.demand
 ###
 
 @step =
@@ -33,16 +32,19 @@ NEW VERSION — fully memo-native with M.demand
     throw new Error "Missing run.merged_segments"    unless outKey?
 
     # ------------------------------------------------------------
-    # Load inputs via M.demand()
+    # Load inputs via M.theLowdown()
     # ------------------------------------------------------------
-    segEntry = M.demand(segKey)
+    segEntry = M.theLowdown(segKey)
     segments = segEntry.value ? []
     throw new Error "marshalled_stories must be array" unless Array.isArray(segments)
 
-    emoEntry = M.demand(emoKey)
+    emoEntry = M.theLowdown(emoKey)
     replies  = emoEntry.value ? []
     throw new Error "kag_emotions must be array" unless Array.isArray(replies)
 
+    if replies.length is 0
+      console.log "[reply_merge] no oracle replies yet"
+      return
     # ------------------------------------------------------------
     # Build emotion lookup: "doc|para" → emotions object
     # ------------------------------------------------------------
@@ -74,6 +76,5 @@ NEW VERSION — fully memo-native with M.demand
     # Persist to memo; pipeline meta-rule writes JSONL
     # ------------------------------------------------------------
     M.saveThis outKey, merged
-    M.saveThis "done:#{stepName}", true
 
     return

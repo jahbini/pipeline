@@ -3,7 +3,7 @@
 lora_train.coffee — MLX LoRA incremental training (memo-native)
 
 - No filesystem access (except MLX writing adapter files itself)
-- Loads train/valid from memo via @demand
+- Loads train/valid from memo via @theLowdown
 - Uses run.loraLand *as a memo key*, not a local directory path
 - Pure MLX call through M.callMLX
 ###
@@ -29,7 +29,6 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
     throw new Error "Missing step config" unless stepCfg?
 
     modelId   = runCfg.model
-    data_dir  = runCfg.data_dir
     landKey   = runCfg.loraLand              # <-- memo key root
     trainKey  = runCfg.train_file
     validKey  = runCfg.valid_file
@@ -42,12 +41,12 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
     # ------------------------------------------------------------
     # Demand-load datasets (memo-native JSONL)
     # ------------------------------------------------------------
-    trainEntry = M.demand(trainKey)
+    trainEntry = M.theLowdown(trainKey)
     trainData  = trainEntry?.value ? []
     unless Array.isArray(trainData)
       throw new Error "train_file (#{trainKey}) must hold an array"
 
-    validEntry = M.demand(validKey)
+    validEntry = M.theLowdown(validKey)
     validData  = validEntry?.value ? []
     unless Array.isArray(validData)
       throw new Error "valid_file (#{validKey}) must hold an array"
@@ -55,6 +54,10 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
     console.log "[lora_train]"
     console.log "  train rows:", trainData.length
     console.log "  valid rows:", validData.length
+
+    if trainData.length is 0
+      console.log "[lora_train] no new training data — skipping"
+      return
 
     # ------------------------------------------------------------
     # Build MLX LoRA parameters
@@ -69,8 +72,9 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
     adapterKey = "#{landKey}/adapter"   # NOT a directory path — a memo key
 
     args =
+      train:            null
       model: modelId
-      data: data_dir
+      data: landKey
       "adapter-path": adapterKey        # memo location where MLX output goes
       "batch-size":     stepCfg.batch_size
       iters:            stepCfg.iters
@@ -82,12 +86,11 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
     # ------------------------------------------------------------
     # Run MLX LoRA training
     # ------------------------------------------------------------
-    stdout = M.callMLX "lora --train", args
+    stdout = M.callMLX "lora", args
 
     # ------------------------------------------------------------
     # Save into memo for inspection
     # ------------------------------------------------------------
     M.saveThis "#{stepName}:stdout", stdout
-    M.saveThis "done:#{stepName}", true
 
     return

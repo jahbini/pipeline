@@ -39,6 +39,17 @@ via existing meta-rules.
     adapterKey  = "#{landKey}/adapter"
     fusedKey    = "#{landKey}/fused"   # MLX will write its files here
 
+
+    # ------------------------------------------------------------
+    # Check whether adapter exists
+    # ------------------------------------------------------------
+    adapterEntry = M.theLowdown(adapterKey)
+    adapterVal   = adapterEntry?.value
+    
+    unless adapterVal?
+      console.log "[lora_fuse] no adapter present — skipping"
+      return
+
     # ------------------------------------------------------------
     # Build args for MLX fuse
     # ------------------------------------------------------------
@@ -58,6 +69,5 @@ via existing meta-rules.
     # Save results into memo for inspection
     # ------------------------------------------------------------
     M.saveThis "#{stepName}:stdout", stdout
-    M.saveThis "done:#{stepName}", true
 
     return

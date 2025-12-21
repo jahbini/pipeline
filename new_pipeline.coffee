@@ -1,7 +1,7 @@
 #!/usr/bin/env coffee
 ###
-pipeline_runner.coffee — Flat DAG Runner (CALLMLX + STATE DIR)
-==============================================================
+pipeline_runner_clean.coffee — Flat DAG Runner (CALLMLX + STATE DIR, CLEAN)
+===========================================================================
 
 Hard guarantees:
 • callMLX EXISTS and is used via Memo meta rules
@@ -12,9 +12,9 @@ Hard guarantees:
     - One file per step: state/step-<name>.json
     - State is consulted ONLY at startup
     - Runner records running/done/failed for each step
-    - restart_here is consumed at startup; downstream marked dirty
-
-This file intentionally stays close to your known-good runner.
+    - restart_here is consumed at startup; downstream state is DELETED (so old "done" can’t inhibit reruns)
+• CRITICAL FIX:
+    - Memo.saveThis resolves notifier for boolean values EVERY TIME (not just first write)
 ###
 
 fs        = require 'fs'
@@ -88,6 +88,12 @@ class StepStateStore
     fs.writeFileSync @_pathFor(n), JSON.stringify(payload, null, 2), 'utf8'
     payload
 
+  delete: (n) ->
+    p = @_pathFor(n)
+    return false unless fs.existsSync(p)
+    fs.unlinkSync(p)
+    true
+
   markRunning: (n) ->
     @write n,
       status: 'running'
@@ -107,13 +113,6 @@ class StepStateStore
       done: false
       error: String(errMsg ? 'unknown error')
       finished_at: new Date().toISOString()
-
-  markDirty: (n, why) ->
-    @write n,
-      status: 'dirty'
-      done: false
-      dirty: true
-      dirty_reason: String(why ? 'dirty')
 
   clearRestartHere: (n) ->
     st = @read(n)
@@ -159,6 +158,7 @@ class Memo
     try old?(value) catch then null
     try rv = entry.meta(key, value) catch then null
     entry.value = rv if rv?
+    @_resolve(entry, value) if value is true or value is false   # <<< CRITICAL FIX
     entry.notifier.then (nv) -> entry.value = nv if nv?
     entry
 
@@ -198,15 +198,12 @@ class Memo
   addMetaRule: (name, regex, handler) ->
     @metaRules.push {name, regex, handler}
 
-  # --------------------------------------------------------------
-  # Meta rules — INCLUDING callMLX
-  # --------------------------------------------------------------
   initializeMetaRules: (baseDir) ->
-    fs = require 'fs'
-    path = require 'path'
+    fs2 = require 'fs'
+    path2 = require 'path'
 
-    readText = (p) -> if fs.existsSync(p) then fs.readFileSync(p,'utf8') else undefined
-    writeText = (p,s) -> fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,s,'utf8')
+    readText = (p) -> if fs2.existsSync(p) then fs2.readFileSync(p,'utf8') else undefined
+    writeText = (p,s) -> fs2.mkdirSync(path2.dirname(p),{recursive:true}); fs2.writeFileSync(p,s,'utf8')
 
     readJSON = (p) -> try JSON.parse(readText(p)) catch then undefined
     readJSONL = (p) ->
@@ -228,20 +225,20 @@ class Memo
     @addMetaRule "jsonl",
       /\.jsonl$/i,
       (key, value) ->
-        dest = path.join(baseDir, key)
+        dest = path2.join(baseDir, key)
         if value is undefined
           return readJSONL(dest)
-        fs.mkdirSync(path.dirname(dest),{recursive:true})
-        fs.writeFileSync(dest,'','utf8')
+        fs2.mkdirSync(path2.dirname(dest),{recursive:true})
+        fs2.writeFileSync(dest,'','utf8')
         for t in value
-          fs.appendFileSync(dest, JSON.stringify(t)+"\n",'utf8')
+          fs2.appendFileSync(dest, JSON.stringify(t)+"\n",'utf8')
         value
 
     # ---- JSON ----
     @addMetaRule "json",
       /\.json$/i,
       (key, value) ->
-        dest = path.join(baseDir, key)
+        dest = path2.join(baseDir, key)
         if value is undefined
           return readJSON(dest)
         writeText(dest, JSON.stringify(value,null,2))
@@ -251,17 +248,14 @@ class Memo
     @addMetaRule "slash",
       /^(?=.*\/)(?!.*\.[A-Za-z0-9]{1,8}$).+$/,
       (key, value) ->
-        dest = path.join(baseDir, key)
+        dest = path2.join(baseDir, key)
         if value is undefined
           return readText(dest)
-        fs.mkdirSync(path.dirname(dest),{recursive:true})
+        fs2.mkdirSync(path2.dirname(dest),{recursive:true})
         data = if Buffer.isBuffer(value) then value else JSON.stringify(value,null,2)
-        fs.writeFileSync(dest,data)
+        fs2.writeFileSync(dest,data)
         value
 
-  # --------------------------------------------------------------
-  # callMLX — PRESERVED
-  # --------------------------------------------------------------
   callMLX: (cmdType, payload) ->
     buildArgs = (cmdType, params) ->
       args = ['-m','mlx_lm',cmdType]
@@ -271,8 +265,8 @@ class Memo
       args
 
     args = buildArgs(cmdType, payload)
-    proc = spawnSync = require('child_process').spawnSync
-    res = proc 'python', args, {encoding:'utf8'}
+    spawnSync = require('child_process').spawnSync
+    res = spawnSync 'python', args, {encoding:'utf8'}
     if res.status isnt 0
       throw new Error "MLX failed: #{res.stderr}"
     res.stdout
@@ -288,83 +282,84 @@ createExperimentYaml = (configPath, overridePath) ->
   fs.writeFileSync out, yaml.dump(merged),'utf8'
   out
 
+normalizeDeps = (d) ->
+  return [] unless d?
+  return d.slice() if Array.isArray(d)
+  return [d] if typeof d is 'string'
+  []
+
 discoverSteps = (spec) ->
   steps = {}
   for own k, v of spec
     continue unless isPlainObject(v)
     continue unless v.run? or v.run_mlx
-    steps[k] = Object.assign {}, v
-    steps[k].depends_on ?= []
-  steps
-discoverStepsBogus = (spec) ->
-  steps={}
-  for own k,v of spec when isPlainObject(v) and (v.run? or v.run_mlx)
-    steps[k]=Object.assign {},v,depends_on:(v.depends_on ? [])
+    def = Object.assign {}, v
+    def.depends_on = normalizeDeps(v.depends_on)
+    steps[k] = def
   steps
 
 toposort = (steps) ->
-  indeg={}; g={}
-  for own n of steps then indeg[n]=0; g[n]=[]
-  for own n,d of steps
-    for dep in d.depends_on
-      indeg[n]+=1; g[dep].push n
-  q=(n for own n,d of indeg when d is 0); o=[]
+  indeg = {}; g = {}
+  for own n of steps
+    indeg[n]=0; g[n]=[]
+  for own n, d of steps
+    for dep in (d.depends_on or [])
+      throw new Error "Undefined dependency '#{dep}' (by '#{n}')" unless steps[dep]?
+      indeg[n] += 1
+      g[dep].push n
+  q = (n for own n,d of indeg when d is 0)
+  o = []
   while q.length
-    n=q.shift(); o.push n
+    n = q.shift()
+    o.push n
     for m in g[n]
-      indeg[m]-=1
+      indeg[m] -= 1
       q.push(m) if indeg[m] is 0
+  if o.length isnt Object.keys(steps).length
+    throw new Error "Topo sort failed (cycle?)"
   o
 
 downstreamMap = (steps) ->
-  g={}
+  g = {}
   for own n of steps then g[n]=[]
-  for own n,d of steps
-    for dep in d.depends_on then g[dep].push n
-  console.log "JIM downstream map",steps,g
+  for own n, d of steps
+    for dep in (d.depends_on or [])
+      g[dep].push n
   g
 
 collectDownstream = (g, start) ->
-  seen=new Set()
-  stack=[start]
+  seen = new Set()
+  stack = [start]
   while stack.length
-    n=stack.pop()
+    n = stack.pop()
     continue if seen.has(n)
     seen.add(n)
-    for c in g[n] or [] then stack.push c
+    for c in (g[n] or []) then stack.push c
   Array.from(seen)
 
 terminalSteps = (steps) ->
-  dependents = new Set()
+  hasDependent = new Set()
   for own n, d of steps
-    for dep in d.depends_on or [] then dependents.add dep
-  (n for own n of steps when not dependents.has(n))
+    for dep in (d.depends_on or []) then hasDependent.add(dep)
+  (n for own n of steps when not hasDependent.has(n))
 
 # -------------------------------------------------------------------
-# Step Runner
+# Step Runner (SACRED new-style loader preserved)
 # -------------------------------------------------------------------
-isNewStyleStep=(p)-> try /\@step\s*=/.test fs.readFileSync(p,'utf8') catch then false
+isNewStyleStep = (p) ->
+  try /\@step\s*=/.test fs.readFileSync(p,'utf8') catch then false
 
-runStep=(n,def,exp,M,S,active)->
-  new Promise (res,rej)->
-    unless M.theLowdown("experiment.yaml")?.value?
-      return rej new Error "experiment.yaml missing in memo"
-
-    # If pipeline frozen, do not start new work
-    return res(false) if M.theLowdown("freeze:pipeline")?.value is true
-
+runStep = (n, def, exp, M, S, active) ->
+  new Promise (res, rej) ->
     active.count += 1
     S.markRunning n
 
     finish = (ok, errMsg=null) ->
       active.count -= 1
       if ok
-        # Restart request hook (optional; safe to ignore if never used)
         wantsRestart = M.theLowdown("restart_here:#{n}")?.value is true
         if wantsRestart
           S.markDone n, restart_here:true
-          #M.saveThis "freeze:pipeline", true
-          #M.saveThis "pipeline:restart_required", n
         else
           S.markDone n
         M.saveThis "done:#{n}", true
@@ -386,16 +381,21 @@ runStep=(n,def,exp,M,S,active)->
 
     script = path.join(EXEC,'scripts',def.run)
 
+    # ---- SACRED PATH ----
     if /\.coffee$/i.test(script) and isNewStyleStep(script)
       try delete require.cache[require.resolve(script)] catch then null
       step = require(script)?.step
+      unless step?.action?
+        finish(false, "Missing @step.action in #{script}")
+        return
       Promise.resolve(step.action(M,n))
         .then -> finish(true)
         .catch (e)-> finish(false, e.message)
       return
 
+    # legacy spawn (only for non-newstyle)
     interp = if /\.py$/i.test(script) then 'python' else 'coffee'
-    proc = spawn interp,[script],
+    proc = spawn interp, [script],
       env: Object.assign process.env,
         CFG_OVERRIDE: exp
         STEP_NAME: n
@@ -405,103 +405,86 @@ runStep=(n,def,exp,M,S,active)->
     proc.stdout.on 'data', (buf) -> process.stdout.write prefixLines("┆ #{n} | ", buf.toString())
     proc.stderr.on 'data', (buf) -> process.stderr.write prefixLines("! #{n} | ", buf.toString())
     proc.on 'error', (err) -> finish(false, err.message)
-    proc.on 'exit', (c) -> if c is 0 then finish(true) else finish(false, "exit #{c}")
+    proc.on 'exit', (c) ->
+      if c is 0 then finish(true) else finish(false, "exit #{c}")
 
 # -------------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------------
-main= ->
+main = ->
   ensureSingleInstance()
 
-  override = loadYamlSafe path.join(CWD,'override.yaml')
+  overridePath = path.join(CWD,'override.yaml')
+  override = loadYamlSafe overridePath
+  unless override.pipeline?
+    console.error "override.yaml missing pipeline"
+    process.exit(1)
+
   configPath = path.join(EXEC,'config',"#{override.pipeline}.yaml")
-  exp = createExperimentYaml configPath, path.join(CWD,'override.yaml')
+  exp = createExperimentYaml configPath, overridePath
   spec = loadYamlSafe exp
 
-  steps = discoverSteps spec
-  order = toposort steps
-  graph = downstreamMap steps
+  steps  = discoverSteps spec
+  order  = toposort steps
+  graph  = downstreamMap steps
   finals = terminalSteps steps
 
   M = new Memo()
   S = new StepStateStore path.join(CWD,'state')
-  # --- STARTUP STATE PRUNE ---------------------------------
-
-  restartAt = null
-  for n in order
-    st = S.read n
-    if st?.restart_here is true
-      restartAt = n
-      break
-
-  entry = restartAt ? restartAt :  order[0]
-
-  console.log "JIM", entry,graph
-
-  downstream = collectDownstream graph, entry
-
-  for n in downstream
-    console.log "JIM downstream",n
-    p = path.join CWD, 'state', "step-#{n}.json"
-    if fs.existsSync p
-      fs.unlinkSync p
-      console.log "🧹 pruned obsolete state:", n
-
-  # ---------------------------------------------------------
   active = {count: 0}
 
-  # REQUIRED INITIALIZATION (before any scheduling)
+  # REQUIRED INITIALIZATION (BEFORE ANY STEP RUNS)
   M.saveThis "experiment.yaml", spec
   for n in order
     M.saveThis "params/#{n}.json", steps[n]
-    M.theLowdown "done:#{n}"
-    M.theLowdown "restart_here:#{n}"
-  M.theLowdown "freeze:pipeline"
-  M.theLowdown "pipeline:restart_required"
 
-  # ---------------- STARTUP-ONLY STATE CONSULTATION ----------------
-  restartPoints = []
+  # ---------------- STARTUP: restart_here consumption + state deletion ----------------
+  chosen = null
   for n in order
     st = S.read(n)
-    if st?.restart_here is true then restartPoints.push(n)
+    if st?.restart_here is true
+      chosen = n
+      break
 
-  if restartPoints.length > 0
-    chosen = restartPoints[0]  # earliest topo marker
+  skipRestore = new Set()
+  if chosen?
     banner "🔁 restart_here detected at startup: #{chosen}"
-    affected = collectDownstream(graph, chosen)
+    affected = collectDownstream(graph, chosen)   # includes chosen and all downstream
     for a in affected
-      S.markDirty(a, "restart_from:#{chosen}")
-      M.saveThis "done:#{a}", false
-    S.clearRestartHere(chosen)
+      skipRestore.add(a)
+      if S.delete(a)
+        console.log "🧹 deleted obsolete state:", a
+    S.clearRestartHere(chosen)  # harmless if file now gone; will just no-op
 
-  # restore done/failed AFTER restart handling
-  for n in order
+  # ---------------- STARTUP: restore done/failed from state (only if NOT in skipRestore) ----------------
+  for n in order when not skipRestore.has(n)
     st = S.read(n)
     if st?.status is 'done' and st?.done is true and st?.dirty isnt true
       M.saveThis "done:#{n}", true
     else if st?.status is 'failed'
       M.saveThis "done:#{n}", false
-    else if st?.status is 'dirty'
-      M.saveThis "done:#{n}", false
+    else
+      M.theLowdown "done:#{n}"  # leave undefined
 
-  # ---------------- EXECUTION (Memo controls flow) -----------------
+  # For affected steps: ensure done key exists but remains undefined (so step WILL run)
+  for n in order when skipRestore.has(n)
+    M.theLowdown "done:#{n}"    # do NOT set true/false at startup
+
+  # ---------------- EXECUTION (DAG scheduling) ----------------
   for n in order
     do (n) ->
-      deps = steps[n].depends_on
+      deps = steps[n].depends_on or []
       start = ->
-        return if M.theLowdown("freeze:pipeline").value is true
         return if M.theLowdown("done:#{n}").value is true
         runStep(n, steps[n], exp, M, S, active).catch (e) ->
           console.error "! Step #{n} error:", e.message
-      deps.length is 0 and start() or M.waitFor (deps.map((d)->"done:#{d}")), start
+      if deps.length is 0
+        start()
+      else
+        M.waitFor (deps.map((d)->"done:#{d}")), start
 
-  # finish logic: either normal completion, or freeze+no-active
+  # ---------------- Completion tick (no hanging on unresolved Promises) ----------------
   tick = ->
-    if M.theLowdown("freeze:pipeline").value is true and active.count is 0
-      who = M.theLowdown("pipeline:restart_required").value ? "(unknown)"
-      banner "🧭 RESTART REQUIRED (requested by: #{who})"
-      process.exit(0)
-
     doneFinals = true
     anyFail = false
     for f in finals

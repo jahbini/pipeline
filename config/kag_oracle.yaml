@@ -28,7 +28,6 @@ run:
 
 md2segments:
   run: kag_oracle/md2segments.coffee
-  input_md: /Users/theaiguy/jim_stories/jim.md
   split_mode: paragraph
 
 oracle_ask:
