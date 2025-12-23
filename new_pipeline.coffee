@@ -470,12 +470,14 @@ main = ->
   for n in order when skipRestore.has(n)
     M.theLowdown "done:#{n}"    # do NOT set true/false at startup
 
+  scheduled = new Set()
   # ---------------- EXECUTION (DAG scheduling) ----------------
   for n in order
     do (n) ->
       deps = steps[n].depends_on or []
       start = ->
         return if M.theLowdown("done:#{n}").value is true
+        scheduled.add n
         runStep(n, steps[n], exp, M, S, active).catch (e) ->
           console.error "! Step #{n} error:", e.message
       if deps.length is 0
@@ -488,6 +490,7 @@ main = ->
     doneFinals = true
     anyFail = false
     for f in finals
+      continue unless scheduled.has f
       v = M.theLowdown("done:#{f}").value
       if v isnt true and v isnt false then doneFinals = false
       if v is false then anyFail = true
