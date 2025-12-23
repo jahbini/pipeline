@@ -17,5 +17,4 @@ Step 2 — transform: read input.json and write derived output
 
     M.saveThis "data/transformed.json", transformed
     console.log "[#{stepName}] wrote data/transformed.json"
-    M.saveThis "done:#{stepName}", true
     return

@@ -20,7 +20,7 @@ files:
 # Step 1 — generate input
 # ------------------------------------------------------------
 step1_setup:
-  run: scripts/test/step1_setup.coffee
+  run: test/step1_setup.coffee
   depends_on: []
   params_file: params/step1_setup.json
 
@@ -28,35 +28,35 @@ step1_setup:
 # Step 2 — transform input
 # ------------------------------------------------------------
 step2_transform:
-  run: scripts/test/step2_transform.coffee
+  run: test/step2_transform.coffee
   depends_on: [step1_setup]
 
 # ------------------------------------------------------------
 # Step 3 — derive tabular summary
 # ------------------------------------------------------------
 step3_table:
-  run: scripts/test/step3_table.coffee
+  run: test/step3_table.coffee
   depends_on: [step2_transform]
 
 # ------------------------------------------------------------
 # Step 4 — wait / synchronization test
 # ------------------------------------------------------------
 step4_wait:
-  run: scripts/test/step4_wait.coffee
+  run: test/step4_wait.coffee
   depends_on: [step3_table]
 
 # ------------------------------------------------------------
 # Step 5 — finalize outputs
 # ------------------------------------------------------------
 step5_finalize:
-  run: scripts/test/step5_finalize.coffee
+  run: test/step5_finalize.coffee
   depends_on: [step4_wait]
 
 # ------------------------------------------------------------
 # Step 6 — external curl test
 # ------------------------------------------------------------
 test6_curl:
-  run: scripts/test/step6_curl.coffee
+  run: test/step6_curl.coffee
   depends_on: [step5_finalize]
   desc: "Spawn a bash curl command to verify external process integration"
 
@@ -64,6 +64,6 @@ test6_curl:
 # Step 7 — python process test
 # ------------------------------------------------------------
 test7_python:
-  run: scripts/test/step7_python.coffee
+  run: test/step7_python.coffee
   depends_on: [test6_curl]
   desc: "Spawn a Python subprocess and capture output"

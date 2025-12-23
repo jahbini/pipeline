@@ -22,5 +22,4 @@ Step 5 — finalize: aggregate results
 
     M.saveThis "results/final_summary.json", summary
     console.log "[#{stepName}] wrote results/final_summary.json"
-    M.saveThis "done:#{stepName}", true
     return

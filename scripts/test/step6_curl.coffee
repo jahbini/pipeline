@@ -24,5 +24,4 @@ Step 6 — curl: external network test
     console.log "[#{stepName}] curl completed; length:", output.length
 
     M.saveThis "curl_result.json", { status: 'ok', output }
-    M.saveThis "done:#{stepName}", true
     return

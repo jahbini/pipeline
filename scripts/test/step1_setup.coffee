@@ -21,6 +21,4 @@ Step 1 — setup: create dummy input data (no defaults)
 
     M.saveThis "data/input.json", data
     console.log "[#{stepName}] wrote data/input.json"
-    M.saveThis "done:#{stepName}", true
-    console.log "saved the done?"
     return

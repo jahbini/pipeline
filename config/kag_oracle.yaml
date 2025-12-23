@@ -52,6 +52,6 @@ lora_train:
   iters: 100
   bf16: false
 
-lora_fuse:
-  run: kag_oracle/lora_fuse.coffee
+talk_story:
+  run: kag_oracle/talk_story.coffee
   # no special config

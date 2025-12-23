@@ -14,6 +14,5 @@ Step 4 — wait: simulate asynchronous work
       setTimeout ->
         M.saveThis "state/wait.json", payload
         console.log "[#{stepName}] completed wait phase"
-        M.saveThis "done:#{stepName}", true
         resolve()
       , 1000

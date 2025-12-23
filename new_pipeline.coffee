@@ -187,7 +187,7 @@ class Memo
       try andDo() catch then null
       return
     Promise.all(entries.map((e)-> e.notifier)).then =>
-      return if keys.some((k)-> @theLowdown(k).value is false)
+      return if keys.some((k)=> @theLowdown(k).value is false)
       try andDo() catch then null
 
   selectMetaHandler: (key) ->

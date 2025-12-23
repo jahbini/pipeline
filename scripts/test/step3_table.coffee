@@ -18,5 +18,4 @@ Step 3 — table: generate CSV summary
 
     M.saveThis "reports/summary.csv", rows
     console.log "[#{stepName}] wrote reports/summary.csv"
-    M.saveThis "done:#{stepName}", true
     return

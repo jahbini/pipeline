@@ -24,5 +24,4 @@ Step 7 — python: external interpreter test
     console.log "[#{stepName}] Python responded:", output
 
     M.saveThis "python_info.json", { status: 'ok', version: output }
-    M.saveThis "done:#{stepName}", true
     return
