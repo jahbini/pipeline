@@ -179,7 +179,6 @@ cheerio = require 'cheerio'
 
     M.saveThis "#{stepName}:train_count", train.length
     M.saveThis "#{stepName}:valid_count", valid.length
-    M.saveThis "done:#{stepName}", true
 
     log "train=#{train.length}, valid=#{valid.length}"
     log "✅ crawl_for_voice complete"

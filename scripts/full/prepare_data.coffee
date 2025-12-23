@@ -36,7 +36,7 @@ crypto = require 'crypto'
     # ----------------------------------------------------------
     # Load contract via demand()
     # ----------------------------------------------------------
-    contractEntry = M.demand(CONTRACT_KEY)
+    contractEntry = M.theLowdown(CONTRACT_KEY)
     contract = contractEntry?.value
     throw new Error "Missing contract in memo: #{CONTRACT_KEY}" unless contract?
 
@@ -187,7 +187,6 @@ crypto = require 'crypto'
 
     # Persist via memo (meta-rule to JSON)
     M.saveThis REPORT_KEY, report
-    M.saveThis "done:#{stepName}", true
     console.log "validated splits:", Object.keys(splits).join(', ')
 
     return

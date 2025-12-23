@@ -106,7 +106,6 @@ Requires:
     jsonlLines = entries.map((e)-> JSON.stringify(e))
     M.saveThis OUTPUT_JSONL_KEY, jsonlLines
     M.saveThis "out_kag:entries", entries
-    M.saveThis "done:#{stepName}", true
 
     log "Wrote #{entries.length} KAG entries to memo key #{OUTPUT_JSONL_KEY}"
     log "Completed successfully."

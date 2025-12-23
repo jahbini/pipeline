@@ -119,7 +119,6 @@ path = require 'path'
     # ----------------------------------------------------
     M.saveThis EXP_CSV, csv
     M.saveThis "prepare_kagnam_experiments:last_row", row
-    M.saveThis "done:#{stepName}", true
 
     console.log "📘 experiments.csv prepared (memo-key: #{EXP_CSV})"
     return

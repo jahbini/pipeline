@@ -84,7 +84,6 @@ path = require 'path'
     # 4. Save to memo (memo auto-JSONL writes line-by-line)
     # -------------------------------------------------------------
     M.saveThis OUT_KEY, outRows
-    M.saveThis "done:#{stepName}", true
 
     console.log "[prepare_prompts] Wrote #{outRows.length} → #{OUT_KEY}"
     return

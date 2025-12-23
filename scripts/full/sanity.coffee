@@ -55,7 +55,7 @@ _    = require 'lodash'
     # ------------------------------------------------------------
     # Load input rows from memo ONLY
     # ------------------------------------------------------------
-    entry = M.demand(ABL_KEY)
+    entry = M.theLowdown(ABL_KEY)
     rows  = entry?.value
     unless Array.isArray(rows) and rows.length > 0
       throw new Error "Memo key #{ABL_KEY} contains no rows"
@@ -126,7 +126,6 @@ _    = require 'lodash'
     M.saveThis SUM_CSV_KEY, csvOut
 
     M.saveThis "#{stepName}:summary", summary
-    M.saveThis "done:#{stepName}", true
 
     # ------------------------------------------------------------
     # Console report

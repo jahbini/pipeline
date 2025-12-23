@@ -5,7 +5,7 @@
 # All scripts expect these keys and only these keys.
 # ============================================================
 
-runu
+run:
   # Output structure (memo + regex will persist automatically)
   output_dir: out
   data_dir: data
@@ -44,7 +44,7 @@ runu
 # ------------------------------------------------------------
 
 manifest:
-  run: scripts/full/manifest.coffee
+  run: kagnam/manifest.coffee
   seed: 7
   desc: "Initialize memo with experiment.yaml"
 
@@ -64,10 +64,10 @@ merge_segments_with_kag:
   output: data/merged_segments.jsonl
 
 kag_merge:
-    run: scripts/full/merge.coffee
+    run: kagnam/merge.coffee
 # ------------------------------------------------------------
 prepare_experiments:
-  run: scripts/full/prepare_experiments.coffee
+  run: kagnam/prepare_experiments.coffee
   epochs: 1
   batch_size: 1
   grad_accum: 8
@@ -78,7 +78,7 @@ prepare_experiments:
   output: experiments.csv
 
 prepare_prompts:
-  run: scripts/full/prepare_prompts.coffee
+  run: kagnam/prepare_prompts.coffee
 
 # ------------------------------------------------------------
 prepare_data:
@@ -93,7 +93,7 @@ register:
 
 # ------------------------------------------------------------
 train:
-  run: scripts/full/train.coffee
+  run: kagnam/train.coffee
   dry_run: false
   only_model_id: ""         # blank = use run.model
   only_row: "None"          # pipeline always has 1 row

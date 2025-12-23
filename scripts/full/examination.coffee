@@ -169,5 +169,4 @@ yaml = require 'js-yaml'
 
     M.saveThis yamlKey, yaml.safeDump(grouped, {sortKeys:false})
 
-    M.saveThis "done:#{stepName}", true
     return

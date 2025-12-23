@@ -140,7 +140,6 @@ path = require 'path'
     if rows.length is 0
       console.log "train: experiments.csv has no data rows; nothing to run."
       M.saveThis "train:status", "empty"
-      M.saveThis "done:#{stepName}", true
       return
 
     todo = selectRows(rows, ONLY_MODEL_ID, ONLY_ROW)
@@ -160,6 +159,5 @@ path = require 'path'
     M.saveThis "#{stepName}:last_row", lastRow
     M.saveThis "#{stepName}:stdout",   lastOut
     M.saveThis "train:status", "done"
-    M.saveThis "done:#{stepName}", true
     console.log "\n📗 train.coffee: completed #{todo.length} row(s)."
     return

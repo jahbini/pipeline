@@ -108,5 +108,4 @@ path = require 'path'
       missing: missing
       output_key: outKey
 
-    M.saveThis "done:#{stepName}", true
     return

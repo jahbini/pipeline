@@ -200,6 +200,5 @@ yaml = require 'js-yaml'
     log "Wrote tokens → #{TOK_PATH}"
     log "Wrote summary → #{SUM_PATH}"
 
-    M.saveThis "done:#{stepName}", true
     M.saveThis "#{stepName}:paths", {tokens:TOK_PATH, summary:SUM_PATH}
     return

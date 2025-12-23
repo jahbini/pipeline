@@ -78,7 +78,6 @@ path = require 'path'
     # Save results into memo
     # -------------------------------------------------------------
     M.saveThis "train_kagnam:result", res
-    M.saveThis "done:#{stepName}", true
 
     console.log "KAG LoRA training finished."
     return

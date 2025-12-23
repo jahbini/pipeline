@@ -132,7 +132,6 @@ path = require 'path'
     # -------------------------------------------------------------
     registry.updated_utc = new Date().toISOString()
     M.saveThis ART_PATH, registry
-    M.saveThis "done:#{stepName}", true
 
     log "📘 Updated artifacts in memo."
     return

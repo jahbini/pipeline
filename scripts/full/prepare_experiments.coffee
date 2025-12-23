@@ -1,7 +1,6 @@
 #!/usr/bin/env coffee
 ###
 prepare_experiments.coffee — memo-native (single-model)
-- Reads contract, catalog, and data_report via M.demand()
 - No filesystem access except meta-rules through M.saveThis
 - Produces experiments.csv entirely inside memo
 ###
@@ -49,14 +48,14 @@ path = require 'path'
     # ----------------------------------------------------------
     # Load contract, catalog, report
     # ----------------------------------------------------------
-    contractEntry = M.demand(CONTRACT_KEY)
+    contractEntry = M.theLowdown(CONTRACT_KEY)
     contract = contractEntry?.value
     throw new Error "Missing contract memo: #{CONTRACT_KEY}" unless contract?
 
-    catalogEntry = M.demand(CATALOG_KEY)
+    catalogEntry = M.theLowdown(CATALOG_KEY)
     catalog      = catalogEntry?.value
 
-    reportEntry = M.demand(REPORT_KEY)
+    reportEntry = M.theLowdown(REPORT_KEY)
     report      = reportEntry?.value
     throw new Error "Missing data_report in memo: #{REPORT_KEY}" unless report?
 
@@ -172,7 +171,6 @@ path = require 'path'
     # ----------------------------------------------------------
     M.saveThis EXP_CSV_KEY, csv
     M.saveThis "prepare_experiments:last_row", row
-    M.saveThis "done:#{stepName}", true
 
     console.log "experiments.csv materialized → memo key #{EXP_CSV_KEY}"
     return

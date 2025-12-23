@@ -50,7 +50,7 @@ eval:
 # ============================================================
 
 prepare_experiments:
-  run: scripts/full/prepare_experiments.coffee
+  run: full/prepare_experiments.coffee
   manifest_path: out/experiment_manifest.json
   report: data/data_report.json
   contract: data/data_contract.json
@@ -71,19 +71,19 @@ prepare_experiments:
     - 33
 
 manifest:
-  run: scripts/full/manifest.coffee
+  run: full/manifest.coffee
   seed: 7
 
 register:
-  run: scripts/full/register.coffee
+  run: full/register.coffee
 
 prepare_data:
-  run: scripts/full/prepare_data.coffee
+  run: full/prepare_data.coffee
   contract: data/data_contract.json
   report: data/data_report.json
 
 prepare_prompts:
-  run: scripts/full/prepare_prompts.coffee
+  run: full/prepare_prompts.coffee
   template_name: icl_minimal
   stop_strings: ["<|endoftext|>", "\n\n"]
   use_eos_token: false
@@ -91,16 +91,16 @@ prepare_prompts:
   prompt_policy: data/prompt_policy.json
 
 oracle_chat:
-  run: scripts/full/oracle_chat.coffee
+  run: full/oracle_chat.coffee
 
 entropy:
-  run: scripts/full/entropy.coffee
+  run: full/entropy.coffee
   params:
     max_new_tokens: 128
     stop_strings: ["\n\n", "==="]
 
 crawl_for_voice:
-  run: scripts/full/crawl_for_voice.coffee
+  run: full/crawl_for_voice.coffee
   base: celarien.com
   valid_fraction: 0.1
   min_story_words: 50
@@ -110,11 +110,11 @@ crawl_for_voice:
   request_timeout: 15000
 
 sanity:
-  run: scripts/full/sanity.coffee
+  run: full/sanity.coffee
   ablations: ablations
 
 examination:
-  run: scripts/full/examination.coffee
+  run: full/examination.coffee
   prompts:
     - "Share an important thought."
     - "What truth do we often overlook?"
@@ -124,7 +124,7 @@ examination:
   ablations: ablations
 
 fuse:
-  run: scripts/full/fuse.coffee
+  run: full/fuse.coffee
   do_fuse: true
   q_bits: 4
   q_group: 32
@@ -132,13 +132,13 @@ fuse:
   dry_run: false
 
 prepare_outmd_kag:
-  run: scripts/full/prepare_outmd_kag.coffee
+  run: full/prepare_outmd_kag.coffee
   input_md: your/your.md
   output_jsonl: out_kag.jsonl
 
 
 snapshot:
-  run: scripts/full/snapshot.coffee
+  run: full/snapshot.coffee
   prompts:
     - "Finish this proverb: 'A stitch in time...'"
     - "What lesson would a wise elder share about patience?"
@@ -150,7 +150,7 @@ snapshot:
 
 fetch_hf_dataset:
   desc: "Download and preprocess a HuggingFace dataset for fine-tuning."
-  run: scripts/full/fetch_hf_dataset.coffee
+  run: full/fetch_hf_dataset.coffee
   train: data/train.jsonl
   valid: data/valid.jsonl
   contract: data/data_contract.json
@@ -164,7 +164,7 @@ fetch_hf_dataset:
   seed: 42
 
 train:
-  run: scripts/full/train.coffee
+  run: full/train.coffee
   dry_run: false
   only_model_id: ""
   only_row:  "None"

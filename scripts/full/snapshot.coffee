@@ -47,7 +47,7 @@ yaml = require 'js-yaml'
     # ---------------------------------------------------------------
     # Load artifact registry from memo
     # ---------------------------------------------------------------
-    regEntry = M.demand(ART_KEY)
+    regEntry = M.theLowdown(ART_KEY)
     registry = regEntry.value
     unless registry?.runs?
       throw new Error "Artifact registry missing or invalid in '#{ART_KEY}'"
@@ -149,7 +149,6 @@ yaml = require 'js-yaml'
     M.saveThis YAML_KEY, yaml.safeDump(grouped, {sortKeys:false})
 
     # Mark done
-    M.saveThis "done:#{stepName}", true
 
     console.log "snapshot: wrote #{allRows.length} rows"
     console.log "JSONL → #{JSONL_KEY}"

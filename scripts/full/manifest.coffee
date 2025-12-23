@@ -179,7 +179,6 @@ os      = require 'os'
     # --- Step 8: Memo update ---
     # Keep structured manifest in memo (meta-rules will also serialize if needed)
     M.saveThis 'out/run_manifest.yaml', manifest
-    M.saveThis "done:#{stepName}", true
     console.log "💾 Saved run_manifest.yaml to memo"
 
     return

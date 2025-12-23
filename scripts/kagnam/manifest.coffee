@@ -139,7 +139,6 @@ os      = require 'os'
     # Save to memo (not filesystem)
     # ------------------------------------------------------------
     M.saveThis OUT_KEY, manifest
-    M.saveThis "done:#{stepName}", true
 
     log "📗 manifest stored → #{OUT_KEY}"
     return

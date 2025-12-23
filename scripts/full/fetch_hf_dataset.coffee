@@ -213,6 +213,5 @@ for r in ds:
     # ---------------------------------------------------------
     M.saveThis(CONTRACT_KEY, data_contract)
     M.saveThis(CATALOG_KEY, data_catalog)
-    M.saveThis("done:#{stepName}", true)
 
     return

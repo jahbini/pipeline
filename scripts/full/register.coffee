@@ -86,5 +86,4 @@ crypto = require 'crypto'
 
     console.log "Registered artifacts at memo key:", ART_PATH
 
-    M.saveThis "done:#{stepName}", true
     return

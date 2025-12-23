@@ -136,7 +136,6 @@ All I/O is via @memo.
     # ------------------------------------------------------------
     M.saveThis POLICY_KEY, policy
     M.saveThis "prepare_prompts:policy", policy
-    M.saveThis "done:#{stepName}", true
 
     log "Wrote prompt policy into memo key #{POLICY_KEY}"
     log "Completed successfully."
