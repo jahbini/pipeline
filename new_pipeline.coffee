@@ -388,9 +388,13 @@ runStep = (n, def, exp, M, S, active) ->
       unless step?.action?
         finish(false, "Missing @step.action in #{script}")
         return
-      Promise.resolve(step.action(M,n))
-        .then -> finish(true)
-        .catch (e)-> finish(false, e.message)
+      try
+        pp=Promise.resolve(step.action(M,n))
+        pp.then -> finish(true)
+        pp.catch (e)-> finish(false, e.message)
+      catch e 
+        finish(false,e)
+        throw e        
       return
 
     # legacy spawn (only for non-newstyle)
@@ -503,7 +507,7 @@ main = ->
         banner "🌟 Pipeline finished (final: #{finals.join(', ')})"
         process.exit(0)
 
-    setTimeout(tick, 200)
+    setTimeout(tick, 2000)
 
   tick()
 
