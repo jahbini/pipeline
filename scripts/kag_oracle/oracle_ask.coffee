@@ -74,10 +74,13 @@ Contract:
     console.log "[oracle_ask] pending:", pending.length
 
     # ------------------------------------------------------------
-    # Nothing to do → normal completion
+    # Nothing to do → every thing has already been done
     # ------------------------------------------------------------
     if pending.length is 0
-      console.log "[oracle_ask] nothing to do"
+      M.saveThis "pipeline:shutdown",
+        by: stepName
+        reason: "no more untagged segments"
+        timestamp: new Date().toISOString()
       return
 
     # ------------------------------------------------------------

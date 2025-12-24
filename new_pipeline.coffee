@@ -121,6 +121,22 @@ class StepStateStore
     st.restart_consumed_at = new Date().toISOString()
     @write n, st
 
+  writePipelineShutdown: (info) ->
+    payload =
+      status: 'shutdown'
+      by: info.by
+      reason: info.reason
+      timestamp: info.timestamp ? new Date().toISOString()
+    fs.writeFileSync(
+      path.join(@dir, 'pipeline.json'),
+      JSON.stringify(payload, null, 2),
+      'utf8'
+    )
+
+  readPipeline: ->
+    p = path.join(@dir, 'pipeline.json')
+    return null unless fs.existsSync(p)
+    JSON.parse fs.readFileSync(p,'utf8')
 # -------------------------------------------------------------------
 # Memo with Meta-Dispatcher (CALLMLX PRESERVED)
 # -------------------------------------------------------------------
@@ -435,6 +451,14 @@ main = ->
 
   M = new Memo()
   S = new StepStateStore path.join(CWD,'state')
+
+  pipeState = S.readPipeline()
+  if pipeState?.status is 'shutdown'
+    banner "🛑 PIPELINE PREVIOUSLY SHUT DOWN"
+    console.log "  by:", pipeState.by
+    console.log "  reason:", pipeState.reason
+    process.exit(0)
+
   active = {count: 0}
 
   # REQUIRED INITIALIZATION (BEFORE ANY STEP RUNS)
@@ -491,6 +515,14 @@ main = ->
 
   # ---------------- Completion tick (no hanging on unresolved Promises) ----------------
   tick = ->
+    sd = M.theLowdown("pipeline:shutdown").value
+    if sd?
+      S.writePipelineShutdown sd
+      banner "🛑 PIPELINE SHUTDOWN"
+      console.log "  by:", sd.by
+      console.log "  reason:", sd.reason
+      process.exit(0)
+
     doneFinals = true
     anyFail = false
     for f in finals
