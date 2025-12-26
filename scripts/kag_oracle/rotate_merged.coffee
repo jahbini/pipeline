@@ -105,6 +105,8 @@ Continue in the same voice, with emotional honesty and human warmth.
     # ------------------------------------------------------------
     newValid = oldValid.concat(oldTrain)
 
+    newValid = newTrain if newValid.length == 0
+
     console.log "[rotate_merged]"
     console.log "  merged rows:", mergedRows.length
     console.log "  new train pairs:", newTrain.length

@@ -131,6 +131,7 @@ Return exactly like this:
 
       result   = M.callMLX "generate", args
       emotions = extractJSON result
+      console.log "JIM emotions", result, emotions
 
       outRows.push
         meta:
