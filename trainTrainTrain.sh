@@ -1,5 +1,5 @@
 #!/bin/bash
-for i in $(seq 1 9); do
+for i in $(seq 1 29); do
   echo "$i"
 echo "Counter=$i"
 touch ./logs/pipeline_"$i".log

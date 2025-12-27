@@ -128,13 +128,13 @@ class StepStateStore
       reason: info.reason
       timestamp: info.timestamp ? new Date().toISOString()
     fs.writeFileSync(
-      path.join(@dir, 'pipeline.json'),
+      path.join('.', 'pipeline.json'),
       JSON.stringify(payload, null, 2),
       'utf8'
     )
 
   readPipeline: ->
-    p = path.join(@dir, 'pipeline.json')
+    p = path.join('.', 'pipeline.json')
     return null unless fs.existsSync(p)
     JSON.parse fs.readFileSync(p,'utf8')
 # -------------------------------------------------------------------
@@ -382,6 +382,10 @@ runStep = (n, def, exp, M, S, active) ->
         res(true)
       else
         S.markFailed n, errMsg ? "failed"
+        S.writePipelineShutdown
+          status: 'shutdown'
+          by: n
+          reason: errMsg ? "failed"
         M.saveThis "done:#{n}", false
         rej new Error(String(errMsg ? "failed"))
 
