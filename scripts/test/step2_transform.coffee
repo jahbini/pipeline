@@ -7,14 +7,17 @@ Step 2 — transform: read input.json and write derived output
   desc: 'Transform input.json into doubled numeric output.'
 
   action: (M, stepName) ->
-    input = M.theLowdown("data/input.json").value
+    inputName = M.getStepParam stepName, "input"
+    input = (M.theLowdown inputName).value
+    xformedName = M.getStepParam stepName, "transformed"
+   
     unless input?
-      throw new Error "[#{stepName}] Missing memo key data/input.json"
+      throw new Error "[#{stepName}] Missing memo key input"
 
     transformed =
       greeting: "#{input.greeting}, world!"
       doubled: input.value * 2
 
-    M.saveThis "data/transformed.json", transformed
-    console.log "[#{stepName}] wrote data/transformed.json"
+    M.saveThis xformedName, transformed
+    console.log "[#{stepName}] wrote ", xformedName
     return

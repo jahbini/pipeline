@@ -1,55 +1,50 @@
 #!/usr/bin/env coffee
 ###
-lora_train.coffee — MLX LoRA incremental training (memo-native)
-
-- No filesystem access (except MLX writing adapter files itself)
-- Loads train/valid from memo via @theLowdown
-- Uses run.loraLand *as a memo key*, not a local directory path
-- Pure MLX call through M.callMLX
+lora_train.coffee — MLX LoRA incremental training (step-param native)
+Assumes M.getStepParam(stepName, key) is present and authoritative.
 ###
 
 @step =
-  desc: "Run MLX LoRA incremental training using memo-loaded train/valid sets"
+  desc: "Run MLX LoRA incremental training using step-local params"
 
   action: (M, stepName) ->
 
     throw new Error "Missing stepName" unless stepName?
 
     # ------------------------------------------------------------
-    # Load configuration
+    # Required scalar params (step-local, global fallback handled by Memo)
     # ------------------------------------------------------------
-    cfgEntry = M.theLowdown("experiment.yaml")
-    throw new Error "Missing experiment.yaml" unless cfgEntry?
+    batchSize    = M.getStepParam stepName, 'batch_size'
+    iters        = M.getStepParam stepName, 'iters'
+    maxSeqLength = M.getStepParam stepName, 'max_seq_length'
+    learningRate = M.getStepParam stepName, 'learning_rate'
 
-    cfg     = cfgEntry.value
-    runCfg  = cfg.run
-    stepCfg = cfg[stepName]
-
-    throw new Error "Missing run section"  unless runCfg?
-    throw new Error "Missing step config" unless stepCfg?
-
-    modelId   = runCfg.model
-    landKey   = runCfg.loraLand              # <-- memo key root
-    trainKey  = runCfg.train_file
-    validKey  = runCfg.valid_file
-
-    unless modelId? then throw new Error "Missing run.model"
-    unless landKey?  then throw new Error "Missing run.loraLand"
-    unless trainKey? then throw new Error "Missing run.train_file"
-    unless validKey? then throw new Error "Missing run.valid_file"
+    for v, k in [[batchSize,'batch_size'],[iters,'iters'],[maxSeqLength,'max_seq_length'],[learningRate,'learning_rate']]
+      throw new Error "Missing #{stepName}.#{k}" unless v?
 
     # ------------------------------------------------------------
-    # Demand-load datasets (memo-native JSONL)
+    # Required file / key params
     # ------------------------------------------------------------
-    trainEntry = M.theLowdown(trainKey)
-    trainData  = trainEntry?.value ? []
+    trainKey = M.getStepParam stepName, 'train_file'
+    validKey = M.getStepParam stepName, 'valid_file'
+    landKey  = M.getStepParam stepName, 'loraLand'
+    modelId  = M.getStepParam stepName, 'model'
+
+    throw new Error "Missing #{stepName}.train_file" unless trainKey?
+    throw new Error "Missing #{stepName}.valid_file" unless validKey?
+    throw new Error "Missing #{stepName}.loraLand"   unless landKey?
+    throw new Error "Missing model"                  unless modelId?
+
+    # ------------------------------------------------------------
+    # Load datasets (memo-native)
+    # ------------------------------------------------------------
+    trainData = M.theLowdown(trainKey).value ? []
+    validData = M.theLowdown(validKey).value ? []
+
     unless Array.isArray(trainData)
-      throw new Error "train_file (#{trainKey}) must hold an array"
-
-    validEntry = M.theLowdown(validKey)
-    validData  = validEntry?.value ? []
+      throw new Error "#{trainKey} must be an array"
     unless Array.isArray(validData)
-      throw new Error "valid_file (#{validKey}) must hold an array"
+      throw new Error "#{validKey} must be an array"
 
     console.log "[lora_train]"
     console.log "  train rows:", trainData.length
@@ -60,37 +55,22 @@ lora_train.coffee — MLX LoRA incremental training (memo-native)
       return
 
     # ------------------------------------------------------------
-    # Build MLX LoRA parameters
-    #
-    # We give MLX:
-    #   --model
-    #   --data      (the key it should load: loraLand)
-    #   --adapter-path (landKey + '/adapter')
-    #
-    # MLX’s meta-rule will write out adapter safetensors for us.
+    # MLX args
     # ------------------------------------------------------------
-    adapterKey = "#{landKey}/adapter"   # NOT a directory path — a memo key
+    adapterKey = "#{landKey}/adapter"
 
     args =
-      train:            null
+      train: null
       model: modelId
       data: landKey
-      "adapter-path": adapterKey        # memo location where MLX output goes
-      "batch-size":     stepCfg.batch_size
-      iters:            stepCfg.iters
-      "max-seq-length": stepCfg.max_seq_length
-      "learning-rate":  stepCfg.learning_rate
+      "adapter-path": adapterKey
+      "batch-size": batchSize
+      iters: iters
+      "max-seq-length": maxSeqLength
+      "learning-rate": learningRate
 
     console.log "[lora_train] MLX args:", args
 
-    # ------------------------------------------------------------
-    # Run MLX LoRA training
-    # ------------------------------------------------------------
     stdout = M.callMLX "lora", args
-
-    # ------------------------------------------------------------
-    # Save into memo for inspection
-    # ------------------------------------------------------------
     M.saveThis "#{stepName}:stdout", stdout
-
     return

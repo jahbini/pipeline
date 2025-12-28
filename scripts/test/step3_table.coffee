@@ -7,15 +7,17 @@ Step 3 — table: generate CSV summary
   desc: 'Create tabular summary from transformed data.'
 
   action: (M, stepName) ->
-    t = M.theLowdown("data/transformed.json").value
+    summary = M.getStepParam stepName, "summary"
+    t = M.getStepParam stepName, "transformed"
+    t = M.theLowdown t
     unless t?
-      throw new Error "[#{stepName}] Missing memo key data/transformed.json"
+      throw new Error "[#{stepName}] Missing memo key transformed"
 
     rows = [
       { key: "greeting", val: t.greeting }
       { key: "doubled",  val: t.doubled }
     ]
 
-    M.saveThis "reports/summary.csv", rows
-    console.log "[#{stepName}] wrote reports/summary.csv"
+    M.saveThis summary, rows
+    console.log "[#{stepName}] wrote", summary
     return

@@ -9,61 +9,59 @@ run:
   params_dir: params
 
 files:
-  input: data/input.json
-  transformed: data/transformed.json
   table: data/table.json
   finalized: data/finalized.json
-  curl_result: data/curl_result.json
-  python_result: data/python_result.json
 
 # ------------------------------------------------------------
 # Step 1 — generate input
 # ------------------------------------------------------------
 step1_setup:
   run: test/step1_setup.coffee
-  depends_on: []
-  params_file: params/step1_setup.json
+  greeting: Hello
 
 # ------------------------------------------------------------
 # Step 2 — transform input
 # ------------------------------------------------------------
 step2_transform:
   run: test/step2_transform.coffee
-  depends_on: [step1_setup]
+  input: data/input.json
+  transformed: data/transformed.json
 
 # ------------------------------------------------------------
 # Step 3 — derive tabular summary
 # ------------------------------------------------------------
 step3_table:
   run: test/step3_table.coffee
-  depends_on: [step2_transform]
+  transformed: data/transformed.json
+  summary: data/report.csv
 
 # ------------------------------------------------------------
 # Step 4 — wait / synchronization test
 # ------------------------------------------------------------
 step4_wait:
   run: test/step4_wait.coffee
-  depends_on: [step3_table]
 
 # ------------------------------------------------------------
 # Step 5 — finalize outputs
 # ------------------------------------------------------------
 step5_finalize:
   run: test/step5_finalize.coffee
-  depends_on: [step4_wait]
+  transformed: data/transformed.json
+  input: data/input.json
+  wait: data/wait.json
 
 # ------------------------------------------------------------
 # Step 6 — external curl test
 # ------------------------------------------------------------
 test6_curl:
   run: test/step6_curl.coffee
-  depends_on: [step5_finalize]
   desc: "Spawn a bash curl command to verify external process integration"
+  curl_result: data/curl_result.json
 
 # ------------------------------------------------------------
 # Step 7 — python process test
 # ------------------------------------------------------------
 test7_python:
   run: test/step7_python.coffee
-  depends_on: [test6_curl]
   desc: "Spawn a Python subprocess and capture output"
+  python_result: data/python_result.json

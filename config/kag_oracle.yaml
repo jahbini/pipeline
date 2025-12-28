@@ -4,13 +4,9 @@
 
 run:
   model: microsoft/Phi-3-mini-4k-instruct     # local MLX model to query + tune
-  stories_md: /Users/theaiguy/jim_stories/jim.md    # markdown source
-  marshalled_stories: data/marshalled_stories.jsonl # md2segments output
   marshalled_segments: data/marshalled_segments.jsonl # optional (paragraph mode)
   stories: data/stories.jsonl                 # cleaned segments for oracle
-  kag_emotions: data/kag_emotions.jsonl       # oracle replies
   kag_examples: data/kag_examples.jsonl       # merged replies+segments
-  merged_segments: data/merged_segments.jsonl # staging for rotation
   train_file: loraland/train.jsonl            # LoRA train input
   valid_file: loraland/valid.jsonl            # LoRA valid input
   loraLand: loraland                           # directory containing train/valid
@@ -29,17 +25,31 @@ run:
 md2segments:
   run: kag_oracle/md2segments.coffee
   split_mode: paragraph
+  stories_md: /Users/theaiguy/jim_stories/jim.md    # markdown source
+  marshalled_stories: data/marshalled_stories.jsonl # md2segments output
 
 oracle_ask:
   run: kag_oracle/oracle_ask.coffee
   batch_size: 10                               # number of segments per day
+  marshalled_stories: data/marshalled_stories.jsonl # md2segments output
+  kag_emotions: data/kag_emotions.jsonl       # oracle replies
+  max_tokens: 256
 
 reply_merge:
   run: kag_oracle/reply_merge.coffee
+  marshalled_stories: data/marshalled_stories.jsonl # md2segments output
+  kag_emotions: data/kag_emotions.jsonl       # oracle replies
+  merged_segments: data/merged_segments.jsonl # staging for rotation
   # no special config
 
 rotate_merged:
   run: kag_oracle/rotate_merged.coffee
+  merged_segments: data/merged_segments.jsonl # staging for rotation
+  marshalled_stories: data/marshalled_stories.jsonl # md2segments output
+  kag_emotions: data/kag_emotions.jsonl       # oracle replies
+  train_file: loraland/train.jsonl
+  valid_file: loraland/valid.jsonl
+  loraLand: loraland
   # no special config
 
 lora_train:
@@ -52,6 +62,24 @@ lora_train:
   iters: 100
   bf16: false
 
+  train_file: loraland/train.jsonl
+  valid_file: loraland/valid.jsonl
+  loraLand: loraland
+
 talk_story:
   run: kag_oracle/talk_story.coffee
-  # no special config
+  adapterKey: loraland/adapter
+  maxTokens: 800
+  topP: 0.9
+  temp: 0.7
+  prompt:
+    prompt: |
+      You are a storyteller. Take the voice Pomon and finish the story. Here is the start of the story:
+      Pomon and Roman are sitting on the shore with me. As we talk, a porpoise raises its head from the lagoon and chirps softly.
+      Roman startles, looks very concerned, jumps to his feet, and runs toward the beach shouting,
+      "It's the octopus! Don't wait up." And he dives into the water and disappears beneath the surface.
+
+      I look at Pomon. She smiles and says, "That's what it's like to be married to a shape-shifter.
+      He loves the sea, and sometimes he even becomes whatever sea creature calls him."
+
+      She goes on to say:

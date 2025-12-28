@@ -1,7 +1,8 @@
 #!/usr/bin/env coffee
 ###
-test_generate.coffee — sanity-check generation using base model + LoRA adapter
+talk_story.coffee — sanity-check generation using base model + LoRA adapter
 Runs MLX generate BEFORE fuse.
+(STEP-PARAM NATIVE)
 ###
 
 @step =
@@ -9,37 +10,26 @@ Runs MLX generate BEFORE fuse.
 
   action: (M, stepName) ->
 
+    throw new Error "Missing stepName" unless stepName?
+    throw new Error "Memo missing getStepParam()" unless typeof M.getStepParam is 'function'
+
     # ------------------------------------------------------------
-    # Load experiment config
+    # Load params ONLY
     # ------------------------------------------------------------
-    cfgEntry = M.theLowdown("experiment.yaml")
-    throw new Error "Missing experiment.yaml" unless cfgEntry?.value?
+    modelId = M.getStepParam stepName, 'model'
+    landKey = M.getStepParam stepName, 'loraLand'
+    adapterKey  = M.getStepParam stepName, 'adapterKey'
+    maxTokens  = M.getStepParam stepName, 'maxTokens'
+    topP  = M.getStepParam stepName, 'topP'
+    temp  = M.getStepParam stepName, 'temp'
 
-    cfg    = cfgEntry.value
-    runCfg = cfg.run
-
-    modelId = runCfg.model
-    landKey = runCfg.loraLand
-
-    unless modelId? then throw new Error "Missing run.model"
-    unless landKey?  then throw new Error "Missing run.loraLand"
-
-    adapterKey = "#{landKey}/adapter"
+    throw new Error "Missing model"    unless modelId?
+    throw new Error "Missing loraLand" unless landKey?
 
     # ------------------------------------------------------------
     # Story prompt
     # ------------------------------------------------------------
-    prompt = """
-You are a storyteller. Take the voice Pomon and finish the story. Here is the start of the story:
-Pomon and Roman are sitting on the shore with me.  As we talk, a porpoise raises its head from the lagoon and chirps softly.
-Roman startles, looks very concerned, jumps to his feet, and runs toward the beach shouting,
-"It's the octopus! Don't wait up." And he dives into the water and disappears beneath the surface.
-
-I look at Pomon.  She smiles and says, "That's what it's like to be married to a shape-shifter.
-He loves the sea, and sometimes he even becomes whatever sea creature calls him."
-
-She goes on to say:
-""".trim()
+    prompt = M.getStepParam stepName, "prompt"
 
     # ------------------------------------------------------------
     # MLX generate args (adapter applied)
@@ -48,11 +38,11 @@ She goes on to say:
       model: modelId
       prompt: prompt
       "adapter-path": adapterKey
-      "max-tokens": 800
-      temp: 0.7
-      "top-p": 0.9
+      "max-tokens": maxTokens
+      temp: temp
+      "top-p": topP
 
-    console.log "\n=== TEST GENERATION (PRE-FUSE) ===\n"
+    console.log "=== GENERATION ==="
     console.log prompt
     console.log "\n--- model output ---\n"
 
@@ -61,7 +51,7 @@ She goes on to say:
     console.log out
 
     # ------------------------------------------------------------
-    # Save output for inspection (optional but useful)
+    # Save output for inspection
     # ------------------------------------------------------------
     M.saveThis "#{stepName}:prompt", prompt
     M.saveThis "#{stepName}:output", out

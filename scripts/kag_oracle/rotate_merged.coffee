@@ -11,24 +11,12 @@ Each training example:
 
   action: (M, stepName) ->
 
-    throw new Error "Missing stepName" unless stepName?
-
     # ------------------------------------------------------------
     # Load config from memo
     # ------------------------------------------------------------
-    cfgEntry = M.theLowdown("experiment.yaml")
-    throw new Error "Missing experiment.yaml in memo" unless cfgEntry?
-
-    cfg     = cfgEntry.value
-    runCfg  = cfg.run
-    stepCfg = cfg[stepName] ? {}
-
-    for k in ['merged_segments','train_file','valid_file']
-      throw new Error "Missing run.#{k}" unless runCfg[k]?
-
-    mergedKey = runCfg.merged_segments
-    trainKey  = runCfg.train_file
-    validKey  = runCfg.valid_file
+    mergedKey = M.getStepParam stepName, 'merged_segments'
+    trainKey = M.getStepParam stepName, 'train_file'
+    validKey = M.getStepParam stepName, 'valid_file'
 
     # ------------------------------------------------------------
     # Load merged + existing train/valid (memo-first)

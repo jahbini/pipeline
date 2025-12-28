@@ -1,80 +1,59 @@
 #!/usr/bin/env coffee
 ###
 oracle_ask.coffee — Select untagged segments + query MLX emotion oracle
-
-Contract:
-  • Reads marshalled story segments
-  • Appends new Kag emotion rows (never truncates)
-  • If new rows are added:
-      → DOES NOT mark done
-  • If no work is done:
-      → marks done normally
+(STEP-PARAM NATIVE)
 ###
 
 @step =
   desc: "Select a batch of untagged segments and query the MLX emotion oracle"
 
   action: (M, stepName) ->
-    console.log "JIM step oracke starting",stepName
-
-    throw new Error "Missing stepName" unless stepName?
+    throw new Error "Memo missing getStepParam()" unless typeof M.getStepParam is 'function'
 
     # ------------------------------------------------------------
-    # Load config
+    # Load params ONLY
     # ------------------------------------------------------------
-    cfgEntry = M.theLowdown("experiment.yaml")
-    throw new Error "Missing experiment.yaml in memo" unless cfgEntry?.value?
+    segKey   = M.getStepParam stepName, 'marshalled_stories'
+    emoKey   = M.getStepParam stepName, 'kag_emotions'
+    batchSz  = M.getStepParam stepName, 'batch_size'
+    modelId  = M.getStepParam stepName, 'model'
+    maxTok   = M.getStepParam stepName, 'max_tokens' ? 256
 
-    cfg     = cfgEntry.value
-    runCfg  = cfg.run
-    stepCfg = cfg[stepName]
-
-    throw new Error "Missing run section"  unless runCfg?
-    throw new Error "Missing step section" unless stepCfg?
-
-    segKey  = runCfg.marshalled_stories
-    emoKey  = runCfg.kag_emotions
-    batchSz = stepCfg.batch_size
-
-    throw new Error "Missing run.marshalled_stories" unless segKey?
-    throw new Error "Missing run.kag_emotions"        unless emoKey?
-    throw new Error "Missing stepCfg.batch_size"      unless batchSz?
+    throw new Error "Missing marshalled_stories" unless segKey?
+    throw new Error "Missing kag_emotions"       unless emoKey?
+    throw new Error "Missing batch_size"         unless batchSz?
+    throw new Error "Missing model"              unless modelId?
 
     # ------------------------------------------------------------
     # Load story segments
     # ------------------------------------------------------------
-    segEntry = M.theLowdown(segKey)
-    segments = segEntry.value
+    segments = M.theLowdown(segKey).value
     throw new Error "marshalled_stories must be array" unless Array.isArray(segments)
 
     # ------------------------------------------------------------
-    # Load existing Kag emotion rows (may be empty)
+    # Load existing emotion rows
     # ------------------------------------------------------------
-    emoEntry   = M.theLowdown(emoKey)
-    taggedRows = emoEntry.value ? []
+    taggedRows = M.theLowdown(emoKey).value ? []
     throw new Error "kag_emotions must be array" unless Array.isArray(taggedRows)
 
-    # Build lookup of already-tagged segments
     tagged = new Set()
-    for row in taggedRows
-      continue unless row?.meta?
-      k = "#{row.meta.doc_id}|#{row.meta.paragraph_index}"
-      tagged.add(k)
+    for row in taggedRows when row?.meta?
+      tagged.add "#{row.meta.doc_id}|#{row.meta.paragraph_index}"
 
     # ------------------------------------------------------------
-    # Select untagged batch
+    # Select pending batch
     # ------------------------------------------------------------
     pending = []
     for s in segments
-      key = "#{s.meta?.doc_id}|#{s.meta?.paragraph_index}"
-      continue if tagged.has(key)
+      k = "#{s.meta?.doc_id}|#{s.meta?.paragraph_index}"
+      continue if tagged.has k
       pending.push s
       break if pending.length >= batchSz
 
     console.log "[oracle_ask] pending:", pending.length
 
     # ------------------------------------------------------------
-    # Nothing to do → every thing has already been done
+    # No work left → SHUTDOWN SIGNAL
     # ------------------------------------------------------------
     if pending.length is 0
       M.saveThis "pipeline:shutdown",
@@ -84,29 +63,27 @@ Contract:
       return
 
     # ------------------------------------------------------------
-    # Helper: extract JSON from LLM output
+    # Helpers
     # ------------------------------------------------------------
     extractJSON = (raw) ->
       return {} unless raw?
-      block = raw.match(/\{[\s\S\n]*\}/)?[0]
-      return {} unless block?
-      try JSON.parse(block) catch then {}
+      blk = raw.match(/\{[\s\S]*\}/)?[0]
+      try JSON.parse(blk) catch then {}
 
     # ------------------------------------------------------------
-    # Query MLX and append rows
+    # Query MLX + append
     # ------------------------------------------------------------
     outRows = taggedRows.slice()
-    added   = 0
 
     for seg in pending
       text = seg.text ? ""
       meta = seg.meta ? {}
 
       prompt = """
-You are a classifier. Given this sample <<< #{text} >>> classify each emotion with classification of:
-"none", "mild", "moderate", "strong", "extreme".
+You are a classifier. Given this sample <<< #{text} >>> classify each emotion as:
+"none", "mild", "moderate", "strong", or "extreme".
 
-Return exactly like this:
+Return exactly:
 {
   "anger": classification,
   "fear": classification,
@@ -118,20 +95,12 @@ Return exactly like this:
 """
 
       args =
-        model: runCfg.model
+        model: modelId
         prompt: prompt
-        "max-tokens": stepCfg.max_tokens ? 256
+        "max-tokens": maxTok
 
-      ###
-      console.log "M.constructor?.name =", M.constructor?.name
-      console.log "typeof M.callMLX =", typeof M.callMLX
-      console.log "own keys:", Object.keys M
-      console.log "proto keys:", Object.getOwnPropertyNames Object.getPrototypeOf M
-      ###
-
-      result   = M.callMLX "generate", args
-      emotions = extractJSON result
-      console.log "JIM emotions", result, emotions
+      raw      = M.callMLX "generate", args
+      emotions = extractJSON raw
 
       outRows.push
         meta:
@@ -139,15 +108,10 @@ Return exactly like this:
           paragraph_index: meta.paragraph_index
         emotions: emotions
 
-      added += 1
       console.log "[oracle_ask] tagged #{meta.doc_id} #{meta.paragraph_index}"
 
     # ------------------------------------------------------------
-    # Persist updated Kag file
+    # Persist (append-only semantics)
     # ------------------------------------------------------------
     M.saveThis emoKey, outRows
-
-    # IMPORTANT:
-    #   DO NOT write done:<stepName>
-    #   Runner will handle downstream invalidation on next startup
     return

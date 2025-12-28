@@ -1,70 +1,52 @@
 #!/usr/bin/env coffee
 ###
 reply_merge.coffee — Merge MLX oracle replies into story segments
+(STEP-PARAM NATIVE)
 ###
 
 @step =
   desc: "Merge oracle emotion replies into marshalled story segments (memo-native)"
 
   action: (M, stepName) ->
+    # ------------------------------------------------------------
+    # Load params ONLY
+    # ------------------------------------------------------------
+    segKey = M.getStepParam stepName, 'marshalled_stories'
+    emoKey = M.getStepParam stepName, 'kag_emotions'
+    outKey = M.getStepParam stepName, 'merged_segments'
 
-    throw new Error "Missing stepName" unless stepName?
+    throw new Error "Missing marshalled_stories" unless segKey?
+    throw new Error "Missing kag_emotions"       unless emoKey?
+    throw new Error "Missing merged_segments"    unless outKey?
 
     # ------------------------------------------------------------
-    # Load config from memo
+    # Load inputs
     # ------------------------------------------------------------
-    cfgEntry = M.theLowdown("experiment.yaml")
-    throw new Error "Missing experiment.yaml in memo" unless cfgEntry?
+    segments = M.theLowdown(segKey).value ? []
+    replies  = M.theLowdown(emoKey).value ? []
 
-    cfg     = cfgEntry.value
-    runCfg  = cfg.run
-    stepCfg = cfg[stepName]
-
-    throw new Error "Missing run section"  unless runCfg?
-    throw new Error "Missing step config" unless stepCfg?
-
-    segKey = runCfg.marshalled_stories
-    emoKey = runCfg.kag_emotions
-    outKey = runCfg.merged_segments
-
-    throw new Error "Missing run.marshalled_stories" unless segKey?
-    throw new Error "Missing run.kag_emotions"       unless emoKey?
-    throw new Error "Missing run.merged_segments"    unless outKey?
-
-    # ------------------------------------------------------------
-    # Load inputs via M.theLowdown()
-    # ------------------------------------------------------------
-    segEntry = M.theLowdown(segKey)
-    segments = segEntry.value ? []
     throw new Error "marshalled_stories must be array" unless Array.isArray(segments)
-
-    emoEntry = M.theLowdown(emoKey)
-    replies  = emoEntry.value ? []
-    throw new Error "kag_emotions must be array" unless Array.isArray(replies)
+    throw new Error "kag_emotions must be array"       unless Array.isArray(replies)
 
     if replies.length is 0
       console.log "[reply_merge] no oracle replies yet"
       return
-    # ------------------------------------------------------------
-    # Build emotion lookup: "doc|para" → emotions object
-    # ------------------------------------------------------------
-    lookup = Object.create(null)
-
-    for r in replies
-      continue unless r?.meta?
-      id = "#{r.meta.doc_id}|#{r.meta.paragraph_index}"
-      lookup[id] = r.emotions
 
     # ------------------------------------------------------------
-    # Merge — only segments that have matching oracle data
+    # Build lookup
+    # ------------------------------------------------------------
+    lookup = Object.create null
+    for r in replies when r?.meta?
+      lookup["#{r.meta.doc_id}|#{r.meta.paragraph_index}"] = r.emotions
+
+    # ------------------------------------------------------------
+    # Merge
     # ------------------------------------------------------------
     merged = []
-
     for s in segments
       id = "#{s.meta?.doc_id}|#{s.meta?.paragraph_index}"
       emos = lookup[id]
       continue unless emos?
-
       merged.push
         meta: s.meta
         prompt: s.text ? s.prompt
@@ -73,8 +55,7 @@ reply_merge.coffee — Merge MLX oracle replies into story segments
     console.log "[reply_merge] merged segments:", merged.length
 
     # ------------------------------------------------------------
-    # Persist to memo; pipeline meta-rule writes JSONL
+    # Persist
     # ------------------------------------------------------------
     M.saveThis outKey, merged
-
     return

@@ -7,19 +7,21 @@ Step 5 — finalize: aggregate results
   desc: 'Aggregate upstream results into final summary.'
 
   action: (M, stepName) ->
-    input  = M.theLowdown("data/input.json").value
-    trans  = M.theLowdown("data/transformed.json").value
-    waited = M.theLowdown("state/wait.json").value
-
-    unless input? and trans? and waited?
-      throw new Error "[#{stepName}] Missing prerequisite memo data"
+    input  = M.getStepParam stepName, "input"
+    trans  = M.getStepParam stepName, "transformed"
+    waitFor = M.getStepParam stepName, "wait"
+    input = M.theLowdown input
+    trans = M.theLowdown trans
+    waited = M.theLowdown waitFor
+    # if no value wait for that memo entry to be filled
+    waited = await waited.notifier unless waited.value
 
     summary =
       original:  input.value
-      doubled:   trans.doubled
-      waited:    waited.done
+      doubled:   trans.value
+      waited:    waited
       timestamp: new Date().toISOString()
 
-    M.saveThis "results/final_summary.json", summary
-    console.log "[#{stepName}] wrote results/final_summary.json"
+    M.saveThis "data/final_summary.json", summary
+    console.log "[#{stepName}] wrote data/final_summary.json"
     return

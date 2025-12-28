@@ -7,12 +7,7 @@ Step 1 — setup: create dummy input data (no defaults)
   desc: 'Generate initial input data for downstream tests.'
 
   action: (M, stepName) ->
-    cfg = M.theLowdown('experiment.yaml').value
-    stepCfg = cfg?[stepName]
-    unless stepCfg?
-      throw new Error "[#{stepName}] Missing configuration section in experiment.yaml"
-
-    greeting = stepCfg.greeting
+    greeting = M.getStepParam stepName, 'greeting'
     unless greeting?
       throw new Error "[#{stepName}] Missing required key 'greeting'"
 

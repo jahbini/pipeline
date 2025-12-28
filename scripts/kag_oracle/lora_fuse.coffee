@@ -3,49 +3,47 @@
 lora_fuse.coffee — fuse LoRA adapter → fused-model
 Memo-native, restart-safe, no filesystem usage.
 
+Uses ONLY step params (no experiment.yaml).
+Relies on Memo helper(s):
+  • M.getStepParam(stepName, "run.model")
+  • M.getStepParam(stepName, "run.loraLand")
+
 MLX will read from:
-   run.loraLand/adapter
+   <run.loraLand>/adapter
 
 MLX will write fused model into:
-   run.loraLand/fused
+   <run.loraLand>/fused
 via existing meta-rules.
 ###
 
 @step =
-  desc: "Fuse MLX LoRA adapter into a new fused model (memo-native)"
+  desc: "Fuse MLX LoRA adapter into a new fused model (params-only, memo-native)"
 
   action: (M, stepName) ->
 
     throw new Error "Missing stepName" unless stepName?
 
     # ------------------------------------------------------------
-    # Load experiment config
+    # Pull required params (NO experiment.yaml)
     # ------------------------------------------------------------
-    cfgEntry = M.theLowdown("experiment.yaml")
-    throw new Error "Missing experiment.yaml" unless cfgEntry?
+    modelId = M.getStepParam stepName, "run.model"
+    landKey = M.getStepParam stepName, "run.loraLand"
 
-    cfg     = cfgEntry.value
-    runCfg  = cfg.run
-    stepCfg = cfg[stepName] ? {}
-
-    throw new Error "Missing run section" unless runCfg?
-    throw new Error "Missing run.model"    unless runCfg.model?
-    throw new Error "Missing run.loraLand" unless runCfg.loraLand?
+    throw new Error "Missing param run.model" unless modelId?
+    throw new Error "Missing param run.loraLand" unless landKey?
 
     # ------------------------------------------------------------
-    # All memo-native locations
+    # Memo-native locations
     # ------------------------------------------------------------
-    landKey     = runCfg.loraLand
-    adapterKey  = "#{landKey}/adapter"
-    fusedKey    = "#{landKey}/fused"   # MLX will write its files here
-
+    adapterKey = "#{landKey}/adapter"
+    fusedKey   = "#{landKey}/fused"
 
     # ------------------------------------------------------------
-    # Check whether adapter exists
+    # Check whether adapter exists (memo + meta-read)
     # ------------------------------------------------------------
-    adapterEntry = M.theLowdown(adapterKey)
+    adapterEntry = M.theLowdown adapterKey
     adapterVal   = adapterEntry?.value
-    
+
     unless adapterVal?
       console.log "[lora_fuse] no adapter present — skipping"
       return
@@ -54,14 +52,14 @@ via existing meta-rules.
     # Build args for MLX fuse
     # ------------------------------------------------------------
     args =
-      model: runCfg.model
+      model: modelId
       "adapter-path": adapterKey
       "save-path": fusedKey
 
     console.log "[lora_fuse] args:", args
 
     # ------------------------------------------------------------
-    # Run the MLX fuse command
+    # Run the MLX fuse command (synchronous)
     # ------------------------------------------------------------
     stdout = M.callMLX "fuse", args
 

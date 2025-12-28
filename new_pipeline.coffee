@@ -211,6 +211,24 @@ class Memo
       return r.handler
     (k,v)-> return
 
+  # ------------------------------------------------------------
+  # Parameter resolution (authoritative)
+  # ------------------------------------------------------------
+  getStepParam: (stepName, key, defaultValue = undefined) ->
+    stepParams =
+      @theLowdown("params/#{stepName}.json").value ? {}
+
+    globalParams =
+      @theLowdown("params/_global.json").value ? {}
+
+    if stepParams.hasOwnProperty key
+      return stepParams[key]
+
+    if globalParams.hasOwnProperty key
+      return globalParams[key]
+
+    return defaultValue
+
   addMetaRule: (name, regex, handler) ->
     @metaRules.push {name, regex, handler}
 
@@ -433,7 +451,25 @@ runStep = (n, def, exp, M, S, active) ->
       if c is 0 then finish(true) else finish(false, "exit #{c}")
 
 # -------------------------------------------------------------------
-# MAIN
+# ADD THIS TO pipeline_runner_clean.coffee
+# Creates params/_global.json and installs M.getStepParam
+# -------------------------------------------------------------------
+
+# --- after Memo class definition, BEFORE main() ---
+
+installGetStepParam = (M) ->
+  M.getStepParam = (stepName, key) ->
+    stepP = M.theLowdown("params/#{stepName}.json")?.value
+    return stepP[key] if stepP? and stepP[key]?
+
+    globalP = M.theLowdown("params/_global.json")?.value
+    return globalP[key] if globalP? and globalP[key]?
+
+    undefined
+
+
+# -------------------------------------------------------------------
+# MODIFY main()
 # -------------------------------------------------------------------
 main = ->
   ensureSingleInstance()
@@ -456,6 +492,18 @@ main = ->
   M = new Memo()
   S = new StepStateStore path.join(CWD,'state')
 
+  # ---------------- GLOBAL PARAMS (AUTHORITATIVE) ----------------
+  globalParams = spec.run ? {}
+  fs.mkdirSync(path.join(CWD,'params'), {recursive:true})
+  fs.writeFileSync(
+    path.join(CWD,'params','_global.json'),
+    JSON.stringify(globalParams, null, 2),
+    'utf8'
+  )
+  M.saveThis "params/_global.json", globalParams
+
+  installGetStepParam M
+
   pipeState = S.readPipeline()
   if pipeState?.status is 'shutdown'
     banner "🛑 PIPELINE PREVIOUSLY SHUT DOWN"
@@ -465,12 +513,12 @@ main = ->
 
   active = {count: 0}
 
-  # REQUIRED INITIALIZATION (BEFORE ANY STEP RUNS)
-  M.saveThis "experiment.yaml", spec
+  # ---------------- STEP PARAMS ----------------
   for n in order
     M.saveThis "params/#{n}.json", steps[n]
 
-  # ---------------- STARTUP: restart_here consumption + state deletion ----------------
+  # ---- remainder of main() UNCHANGED ----
+  # (startup restore, scheduling, tick loop, etc.)
   chosen = null
   for n in order
     st = S.read(n)

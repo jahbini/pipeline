@@ -23,5 +23,5 @@ Step 6 — curl: external network test
     output = result.stdout.trim()
     console.log "[#{stepName}] curl completed; length:", output.length
 
-    M.saveThis "curl_result.json", { status: 'ok', output }
+    M.saveThis "data/curl_result.json", { status: 'ok', output }
     return
