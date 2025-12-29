@@ -5,10 +5,6 @@ manifest.coffee — Pipeline-native
 Captures environment info (Apple Silicon / MLX),
 locks dependencies (pip freeze → requirements.lock),
 and writes run_manifest.yaml / run_manifest.json.
-
-All configuration comes from @memo['experiment.yaml'].
-Never uses process.env for config. Expects the runner to call
-step.action(M, stepName).
 ###
 
 fs      = require 'fs'
@@ -22,24 +18,13 @@ os      = require 'os'
   desc: "Capture environment info and create manifest"
 
   action: (M, stepName) ->
-
-    throw new Error "Missing stepName" unless stepName?
-
-    expEntry = M.theLowdown('experiment.yaml')
-    throw new Error "Missing experiment.yaml in memo" unless expEntry?
-
-    exp = expEntry.value
-    run = exp?.run or {}
-    stepCfg = exp?[stepName]
-
-    unless run?
-      throw new Error "Missing 'run' section in experiment.yaml"
-
-    OUT_DIR       = path.resolve(run.output_dir)
-    LOCKFILE      = path.join(OUT_DIR, 'requirements.lock')
-    MANIFEST_YAML = path.join(OUT_DIR, 'run_manifest.yaml')
-    MANIFEST_JSON = path.join(OUT_DIR, 'run_manifest.json')
-    SEED          = stepCfg?.seed
+    params = (M.theLowdown "params/#{stepName}.json").value
+    out_dir = M.getStepParam stepName, "output_dir"
+    OUT_DIR       = path.resolve(M.getStepParam stepName, "output_dir")
+    LOCKFILE      = params.requirements_lock
+    MANIFEST_YAML = params.manifest + ".yaml"
+    MANIFEST_JSON = params.manifest + ".json"
+    SEED          = params.seed
 
     # --- Utility helpers (sync) ---
     safeRun = (cmd) ->

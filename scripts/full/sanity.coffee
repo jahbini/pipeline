@@ -22,32 +22,16 @@ _    = require 'lodash'
   desc: "Aggregate and summarize ablation results (memo-native)"
 
   action: (M, stepName) ->
-
-    throw new Error "Missing stepName argument" unless stepName?
-
-    # ------------------------------------------------------------
-    # Load configuration
-    # ------------------------------------------------------------
-    cfg = M?.theLowdown?("experiment.yaml")?.value
-    throw new Error "Missing experiment.yaml in memo" unless cfg?
-
-    stepCfg = cfg[stepName]
-    throw new Error "Missing step config for '#{stepName}'" unless stepCfg?
-
-    runCfg = cfg.run
-    throw new Error "Missing run section" unless runCfg?
-
+    params = (M.theLowdown "params/#{stepName}.json").value
     # Required:
-    #    stepCfg.ablations_jsonl   ← memo key containing JSONL array of rows
-    #    stepCfg.ablations_name    ← base name for summary outputs
-    unless stepCfg.ablations_jsonl?
-      throw new Error "Missing #{stepName}.ablations_jsonl (memo key)"
+    #    params.ablations_jsonl   ← memo key containing JSONL array of rows
+    #    params.ablations_name    ← base name for summary outputs
+    unless params.ablations?
+      throw new Error "Missing #{stepName}.ablations (memo key)"
 
-    unless stepCfg.ablations_name?
-      throw new Error "Missing #{stepName}.ablations_name (base for summary keys)"
 
-    ABL_KEY     = stepCfg.ablations_jsonl      # memo key to read input rows
-    BASE_NAME   = stepCfg.ablations_name       # "abl_123" → summary keys derived
+    ABL_KEY     = params.ablations + ".jsonl"      # memo key to read input rows
+    BASE_NAME   = params.ablations       # "abl_123" → summary keys derived
 
     SUM_JSON_KEY = "#{BASE_NAME}_summary.json"
     SUM_CSV_KEY  = "#{BASE_NAME}_summary.csv"
@@ -56,7 +40,7 @@ _    = require 'lodash'
     # Load input rows from memo ONLY
     # ------------------------------------------------------------
     entry = M.theLowdown(ABL_KEY)
-    rows  = entry?.value
+    rows  = entry.value || await entry.notifier
     unless Array.isArray(rows) and rows.length > 0
       throw new Error "Memo key #{ABL_KEY} contains no rows"
 

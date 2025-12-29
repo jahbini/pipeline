@@ -18,20 +18,9 @@ crypto = require 'crypto'
   desc: "Register experiments.csv and record pipeline lock hash (memo-native)"
 
   action: (M, stepName) ->
+    params = M.theLowdown "params/#{stepName}.json"
 
-    throw new Error "Missing stepName" unless stepName?
-
-    # ------------------------------------------------------------
-    # Load configuration
-    # ------------------------------------------------------------
-    cfg = M.theLowdown("experiment.yaml")?.value
-    throw new Error "Missing experiment.yaml in memo" unless cfg?
-
-    runCfg = cfg.run
-    throw new Error "Missing run section" unless runCfg?
-
-    EXP_CSV_KEY = runCfg.experiments_csv
-    throw new Error "Missing run.experiments_csv" unless EXP_CSV_KEY?
+    EXP_CSV_KEY = params.experiments_csv
 
     # ------------------------------------------------------------
     # Load CSV from memo ONLY
@@ -39,7 +28,7 @@ crypto = require 'crypto'
     csvEntry = M.theLowdown(EXP_CSV_KEY)
     throw new Error "experiments.csv not found in memo (#{EXP_CSV_KEY})" unless csvEntry?
 
-    csv = csvEntry.value
+    csv = csvEntry.value ||  await csvEntry.notifier
     throw new Error "experiments.csv memo entry is empty" unless String(csv).trim().length
 
     # ------------------------------------------------------------
@@ -63,7 +52,7 @@ crypto = require 'crypto'
     # ------------------------------------------------------------
     # Build artifacts registry
     # ------------------------------------------------------------
-    ART_PATH = runCfg.artifacts   # e.g. "out/artifacts.json"
+    ART_PATH = M.getStepParam stepName, "artifacts"  # e.g. "out/artifacts.json"
     throw new Error "Missing run.artifacts" unless ART_PATH?
 
     OUT_ROOT = path.dirname(ART_PATH)
@@ -72,7 +61,7 @@ crypto = require 'crypto'
       created_utc: new Date().toISOString().replace(/\.\d+Z$/, 'Z')
       runs: [
         {
-          model_id: runCfg.model
+          model_id: M.getStepParam stepName, "model"
           output_root: OUT_ROOT
           adapter_dir: path.join(OUT_ROOT, "adapter")
           fused_dir: path.join(OUT_ROOT, "fused")

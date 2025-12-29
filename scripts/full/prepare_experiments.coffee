@@ -12,51 +12,38 @@ path = require 'path'
 
   action: (M, stepName) ->
 
-    throw new Error "Missing stepName" unless stepName?
+    params = (M.theLowdown "params/#{stepName}.json").value
 
     # ----------------------------------------------------------
-    # Load experiment.yaml
-    # ----------------------------------------------------------
-    expEntry = M.theLowdown("experiment.yaml")
-    throw new Error "Missing experiment.yaml in memo" unless expEntry?
-    cfg = expEntry.value
-
-    run = cfg.run
-    throw new Error "Missing run section" unless run?
-
-    stepCfg = cfg[stepName]
-    throw new Error "Missing step config #{stepName}" unless stepCfg?
-
-    # ----------------------------------------------------------
-    # Required run.* keys
+    # Required params.* keys
     # ----------------------------------------------------------
     reqRunKeys = [
       'contract','catalog','report',
-      'output_dir','experiments_csv','model'
+      'output_dir','experiments_csv'
     ]
 
     for k in reqRunKeys
-      throw new Error "Missing run.#{k}" unless run[k]?
+      throw new Error "Missing params.#{k}" unless params[k]?
 
-    CONTRACT_KEY = run.contract
-    CATALOG_KEY  = run.catalog
-    REPORT_KEY   = run.report
-    OUT_DIR      = run.output_dir        # pure logical — no fs
-    EXP_CSV_KEY  = run.experiments_csv   # memo key only
-    MODEL_ID     = run.model
+    CONTRACT_KEY = params.contract
+    CATALOG_KEY  = params.catalog
+    REPORT_KEY   = params.report
+    OUT_DIR      = params.output_dir        # pure logical — no fs
+    EXP_CSV_KEY  = params.experiments_csv   # memo key only
+    MODEL_ID     = M.getStepParam stepName, "model"
 
     # ----------------------------------------------------------
     # Load contract, catalog, report
     # ----------------------------------------------------------
     contractEntry = M.theLowdown(CONTRACT_KEY)
-    contract = contractEntry?.value
+    contract = contractEntry.value || await contractEntry.notifier
     throw new Error "Missing contract memo: #{CONTRACT_KEY}" unless contract?
 
     catalogEntry = M.theLowdown(CATALOG_KEY)
-    catalog      = catalogEntry?.value
+    catalog      = catalogEntry.value || await catalogEntry.notifier
 
     reportEntry = M.theLowdown(REPORT_KEY)
-    report      = reportEntry?.value
+    report      = reportEntry.value || await reportEntry.notifier
     throw new Error "Missing data_report in memo: #{REPORT_KEY}" unless report?
 
     # ----------------------------------------------------------
@@ -105,15 +92,15 @@ path = require 'path'
       'max_seq_length','learning_rate','bf16','iters_override'
     ]
     for k in requiredStepKeys
-      throw new Error "Missing #{k} in step '#{stepName}'" unless stepCfg[k]?
+      throw new Error "Missing #{k} in step '#{stepName}'" unless params[k]?
 
-    EPOCHS         = parseInt(stepCfg.epochs)
-    BATCH_SIZE     = parseInt(stepCfg.batch_size)
-    GRAD_ACCUM     = parseInt(stepCfg.grad_accum)
-    MAX_SEQ_LENGTH = parseInt(stepCfg.max_seq_length)
-    LEARNING_RATE  = parseFloat(stepCfg.learning_rate)
-    BF16           = if String(stepCfg.bf16).toLowerCase() in ['1','true'] then 1 else 0
-    ITERS_OVERRIDE = parseInt(stepCfg.iters_override)
+    EPOCHS         = parseInt(params.epochs)
+    BATCH_SIZE     = parseInt(params.batch_size)
+    GRAD_ACCUM     = parseInt(params.grad_accum)
+    MAX_SEQ_LENGTH = parseInt(params.max_seq_length)
+    LEARNING_RATE  = parseFloat(params.learning_rate)
+    BF16           = if String(params.bf16).toLowerCase() in ['1','true'] then 1 else 0
+    ITERS_OVERRIDE = parseInt(params.iters_override)
 
     # ----------------------------------------------------------
     # Compute number of gradient steps

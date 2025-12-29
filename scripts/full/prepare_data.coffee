@@ -2,7 +2,6 @@
 ###
 prepare_data.coffee — memo-native version (final)
 -------------------------------------------------
-Reads contract + dataset lines via M.demand().
 Performs validation + basic stats.
 Writes report through M.saveThis().
 ###
@@ -13,31 +12,15 @@ crypto = require 'crypto'
   desc: "Validate and analyze dataset files to produce data_report.json"
 
   action: (M, stepName) ->
-    throw new Error "Missing stepName" unless stepName?
-
-    # ----------------------------------------------------------
-    # Load experiment + configs
-    # ----------------------------------------------------------
-    expEntry = M.theLowdown('experiment.yaml')
-    throw new Error "Missing experiment.yaml" unless expEntry?
-    cfg = expEntry.value
-
-    runCfg  = cfg.run
-    throw new Error "Missing global run section" unless runCfg?
-
-    stepCfg = cfg[stepName]
-    throw new Error "Missing step config for '#{stepName}'" unless stepCfg?
-
-    CONTRACT_KEY = stepCfg.contract
-    REPORT_KEY   = stepCfg.report
+    params = (M.theLowdown "params/#{stepName}.json").value
+    CONTRACT_KEY = params.contract
+    REPORT_KEY   = params.report
     throw new Error "Missing #{stepName}.contract" unless CONTRACT_KEY?
     throw new Error "Missing #{stepName}.report"   unless REPORT_KEY?
 
     # ----------------------------------------------------------
-    # Load contract via demand()
-    # ----------------------------------------------------------
     contractEntry = M.theLowdown(CONTRACT_KEY)
-    contract = contractEntry?.value
+    contract = contractEntry.value || await contractEntry.notifier
     throw new Error "Missing contract in memo: #{CONTRACT_KEY}" unless contract?
 
     # ----------------------------------------------------------
@@ -166,7 +149,8 @@ crypto = require 'crypto'
       chosen = fileKey.chosen
       dataKey = "data/#{chosen}"
 
-      dataEntry = M.demand(dataKey)
+      dataEntry = M.theLowdown(dataKey)
+      dataEntry = dataEntry.value || await dataEntry.notifier
       throw new Error "Missing dataset for split #{split} (#{dataKey})" unless dataEntry?
 
       # dataEntry.value is an array of parsed JSON objects already

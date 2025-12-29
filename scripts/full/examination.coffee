@@ -12,28 +12,20 @@ yaml = require 'js-yaml'
 
   action: (M, stepName) ->
 
-    # ---------------------------------------------------------------
-    # Load experiment.yaml from memo
-    # ---------------------------------------------------------------
-    cfg = M.theLowdown('experiment.yaml')?.value
-    throw new Error "Missing experiment.yaml" unless cfg?
-
-    stepCfg = cfg[stepName]
-    runCfg  = cfg.run
-    throw new Error "Missing step config '#{stepName}'" unless stepCfg?
-    throw new Error "Missing run section in config" unless runCfg?
-
-    PROMPTS       = stepCfg.prompts or []
-    ABLATIONS     = stepCfg.ablations
-    MAX_SHORT     = stepCfg.max_new_short
-    MAX_LONG      = stepCfg.max_new_long
-    ONLY_MODEL_ID = stepCfg.only_model_id
+    params = (M.theLowdown "params/#{stepName}.json").value
+    PROMPTS       = M.getStepParam stepName, "prompts"
+    ABLATIONS     = M.getStepParam stepName, "ablations"
+    MAX_SHORT     = M.getStepParam stepName, "max_new_short"
+    MAX_LONG      = M.getStepParam stepName, "max_new_long"
+    ONLY_MODEL_ID = M.getStepParam stepName, "only_model_id"
+    regMemo = M.getStepParam stepName, "artifacts"
 
     # ---------------------------------------------------------------
     # Artifact registry: memo only
     # ---------------------------------------------------------------
-    reg = M.theLowdown(runCfg.artifacts)?.value
-    throw new Error "Missing artifacts in memo: #{runCfg.artifacts}" unless reg?
+    reg = M.theLowdown regMemo
+    reg = reg.value || await reg.notifier
+    throw new Error "Missing artifacts in memo: #{reg}" unless reg?
 
     runs = reg.runs or []
     throw new Error "No runs in artifacts" unless runs.length

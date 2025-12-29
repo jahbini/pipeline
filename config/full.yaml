@@ -25,7 +25,6 @@ run:
 
   # --- Outputs and artifacts ---
   fused_dir: fused_model
-  artifacts: out/artifacts.json
 
   generations: generations
   tokmeta: tokenizer_meta
@@ -42,7 +41,6 @@ data:
 eval:
   output_dir: eval_out
   policy: generation_policy.json
-  generations: generations.jsonl
   report: report.md
 
 # ============================================================
@@ -51,11 +49,12 @@ eval:
 
 prepare_experiments:
   run: full/prepare_experiments.coffee
-  manifest_path: out/experiment_manifest.json
+  experiments_csv: out/experiments.csv
   report: data/data_report.json
   contract: data/data_contract.json
   catalog: data/data_catalog.json
   policy: generation_policy.json
+  output_dir: eval_out
   batch_size: 1
   grad_accum: 8
   max_seq_length: 1024
@@ -72,10 +71,14 @@ prepare_experiments:
 
 manifest:
   run: full/manifest.coffee
+  output_dir: eval_out
+  manifest: out/experiment_manifest
+  requirements_lock: out/requirements.lock
   seed: 7
 
 register:
   run: full/register.coffee
+  experiments_csv: out/experiments.csv
 
 prepare_data:
   run: full/prepare_data.coffee
@@ -90,14 +93,15 @@ prepare_prompts:
   contract: data/data_contract.json
   prompt_policy: data/prompt_policy.json
 
-oracle_chat:
-  run: full/oracle_chat.coffee
-
 entropy:
   run: full/entropy.coffee
-  params:
-    max_new_tokens: 128
-    stop_strings: ["\n\n", "==="]
+  max_new_tokens: 128
+  stop_strings: ["\n\n", "==="]
+  generations: generations
+  entropy_tokens: eval/entropy_tokens
+  entropy_summary: eval/entropy_summary
+  policy: eval/generation_policy.json
+  artifacts: out/artifacts.json
 
 crawl_for_voice:
   run: full/crawl_for_voice.coffee
@@ -122,9 +126,11 @@ examination:
   max_new_long: 128
   only_model_id: ""
   ablations: ablations
+  artifacts: out/artifacts.json
 
 fuse:
   run: full/fuse.coffee
+  artifacts: out/artifacts.json
   do_fuse: true
   q_bits: 4
   q_group: 32
@@ -143,18 +149,21 @@ snapshot:
     - "Finish this proverb: 'A stitch in time...'"
     - "What lesson would a wise elder share about patience?"
   max_new: 64
+  artifacts: out/artifacts.json
+  only_model_id: ""
   alt_seed: 123
   n_shots: 3
   min_words: 4
   retries: 3
+  generations: generations
 
 fetch_hf_dataset:
   desc: "Download and preprocess a HuggingFace dataset for fine-tuning."
   run: full/fetch_hf_dataset.coffee
   train: data/train.jsonl
   valid: data/valid.jsonl
-  contract: data/data_contract.json
   catalog: data/data_catalog.json
+  contract: data/data_contract.json
   hf_dataset: asuender/motivational-quotes
   subset: quotes
   mode: notplain

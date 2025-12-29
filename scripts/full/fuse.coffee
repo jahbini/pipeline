@@ -19,26 +19,14 @@ path = require 'path'
   desc: "Fuse LoRA adapters and quantize models (memo-native MLX)"
 
   action: (M, stepName) ->
-
-    throw new Error "Missing stepName argument" unless stepName?
-
-    # -------------------------------------------------------------
-    # Load config
-    # -------------------------------------------------------------
-    cfg = M.theLowdown('experiment.yaml')?.value
-    throw new Error "Missing experiment.yaml in memo" unless cfg?
-
-    stepCfg = cfg[stepName]
-    throw new Error "Missing step config '#{stepName}'" unless stepCfg?
-
-    runCfg = cfg.run
-    throw new Error "Missing run section" unless runCfg?
+    params = (M.theLowdown "params/#{stepName}.json").value
 
     # -------------------------------------------------------------
     # Load artifacts registry (MUST be in memo)
     # -------------------------------------------------------------
-    ART_PATH = runCfg.artifacts
-    registry = M.theLowdown(ART_PATH)?.value
+    ART_PATH = params.artifacts
+    reg = M.theLowdown(ART_PATH)
+    registry = reg.value || await reg.notifier
     throw new Error "Missing #{ART_PATH} in memo" unless registry?
 
     runs = registry.runs or []
@@ -47,11 +35,11 @@ path = require 'path'
     # -------------------------------------------------------------
     # Step parameters
     # -------------------------------------------------------------
-    DO_FUSE = !!stepCfg.do_fuse
-    DRY_RUN = !!stepCfg.dry_run
-    Q_BITS  = parseInt(stepCfg.q_bits  or 4)
-    Q_GROUP = parseInt(stepCfg.q_group or 32)
-    DTYPE   = stepCfg.dtype or 'float16'
+    DO_FUSE = !!params.do_fuse
+    DRY_RUN = !!params.dry_run
+    Q_BITS  = parseInt(params.q_bits  or 4)
+    Q_GROUP = parseInt(params.q_group or 32)
+    DTYPE   = params.dtype or 'float16'
 
     log = (msg) -> console.log "[fuse] #{msg}"
 

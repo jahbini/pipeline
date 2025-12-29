@@ -16,38 +16,28 @@ path = require 'path'
   desc: "Run MLX LoRA trainings based on experiments.csv (memo-native, simplified)"
 
   action: (M, stepName) ->
-
-    throw new Error "Missing stepName argument" unless stepName?
-
-    cfg = M?.theLowdown?('experiment.yaml')?.value
-    throw new Error "Missing experiment.yaml in memo" unless cfg?
-
-    stepCfg = cfg[stepName]
-    throw new Error "Missing step config for '#{stepName}'" unless stepCfg?
-
-    runCfg = cfg['run']
-    throw new Error "Missing global 'run' section in experiment.yaml" unless runCfg?
+    params = (M.theLowdown "params/#{stepName}.json").value
 
     # ----------------------------------------------------------------
     # Required step-level keys (control which rows to run)
     # ----------------------------------------------------------------
     requiredStep = ['dry_run','only_model_id','only_row']
     for k in requiredStep
-      throw new Error "Missing required param '#{k}' in step '#{stepName}'" unless k of stepCfg
+      throw new Error "Missing required param '#{k}' in step '#{stepName}'" unless k of params
 
-    DRY_RUN       = !!stepCfg.dry_run
-    ONLY_MODEL_ID = stepCfg.only_model_id   # string or ''
-    ONLY_ROW      = stepCfg.only_row        # index or 'None'
+    DRY_RUN       = !!params.dry_run
+    ONLY_MODEL_ID = params.only_model_id   # string or ''
+    ONLY_ROW      = params.only_row        # index or 'None'
 
     # ----------------------------------------------------------------
     # experiments.csv location from run.*
     # ----------------------------------------------------------------
-    EXP_CSV_KEY = runCfg.experiments_csv
+    EXP_CSV_KEY = params.experiments_csv
     throw new Error "Missing run.experiments_csv" unless EXP_CSV_KEY?
 
     # Prefer memo; fall back to filesystem if needed
     csvEntry = M.theLowdown(EXP_CSV_KEY)
-    csvText  = csvEntry?.value
+    csvText  = csvEntry.value || await csvEntry.notifier
 
     if csvText? and typeof csvText is 'string' and csvText.trim().length
       text = csvText

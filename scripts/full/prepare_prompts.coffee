@@ -6,7 +6,7 @@ Generates a prompt-formatting policy from:
   • contract JSON loaded from memo
   • dataset samples loaded from memo
 Writes:
-  • prompt policy JSON → memo key (stepCfg.prompt_policy)
+  • prompt policy JSON → memo key (params.prompt_policy)
 
 NEVER reads/writes the filesystem.
 All I/O is via @memo.
@@ -17,34 +17,17 @@ All I/O is via @memo.
   desc: "Generate prompt-formatting policy JSON (memo-native)"
 
   action: (M, stepName) ->
-
-    throw new Error "Missing stepName" unless stepName?
-
-    # ------------------------------------------------------------
-    # Load configuration
-    # ------------------------------------------------------------
-    cfg = M.theLowdown("experiment.yaml")?.value
-    throw new Error "Missing experiment.yaml in memo" unless cfg?
-
-    stepCfg = cfg[stepName]
-    throw new Error "Missing step config '#{stepName}'" unless stepCfg?
-
-    runCfg = cfg.run
-    throw new Error "Missing global run section" unless runCfg?
-
-    # Required run keys
-    for k in ['data_dir']
-      throw new Error "Missing run.#{k}" unless runCfg[k]?
+    params = (M.theLowdown "params/#{stepName}.json").value
 
     # Required step keys
     for k in ['contract','prompt_policy','template_name','stop_strings','use_eos_token']
-      throw new Error "Missing step '#{stepName}'.#{k}" unless stepCfg[k]?
+      throw new Error "Missing step #{stepName}.#{k}" unless params[k]?
 
-    CONTRACT_KEY     = stepCfg.contract
-    POLICY_KEY       = stepCfg.prompt_policy
-    TEMPLATE_NAME    = stepCfg.template_name
-    STOP_STRINGS     = stepCfg.stop_strings
-    USE_EOS_TOKEN    = stepCfg.use_eos_token
+    CONTRACT_KEY     = params.contract
+    POLICY_KEY       = params.prompt_policy
+    TEMPLATE_NAME    = params.template_name
+    STOP_STRINGS     = params.stop_strings
+    USE_EOS_TOKEN    = params.use_eos_token
 
     log = (msg) ->
       stamp = new Date().toISOString().replace('T',' ').replace('Z','')
@@ -56,9 +39,8 @@ All I/O is via @memo.
     # Load contract from memo
     # ------------------------------------------------------------
     contractEntry = M.theLowdown(CONTRACT_KEY)
+    contract = contractEntry.value || await contractEntry.notifier
     throw new Error "Missing contract in memo: #{CONTRACT_KEY}" unless contractEntry?
-
-    contract = contractEntry.value ? {}
     throw new Error "Contract is empty or malformed" unless contract.filenames?
 
     # Determine text field heuristically

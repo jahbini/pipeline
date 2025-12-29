@@ -22,16 +22,7 @@ rand   = require 'seedrandom'
   desc: "Fetch & preprocess HF dataset into train/valid memo arrays (no disk use)"
 
   action: (M, stepName) ->
-
-    throw new Error "Missing stepName argument" unless stepName?
-    cfg = M.theLowdown('experiment.yaml')?.value
-    throw new Error "Missing experiment.yaml" unless cfg?
-
-    stepCfg = cfg[stepName]
-    runCfg  = cfg.run
-    throw new Error "Missing step config '#{stepName}'" unless stepCfg?
-    throw new Error "Missing run section" unless runCfg?
-
+    params = (M.theLowdown "params/#{stepName}.json").value
     # ---------------------------------------------------------
     # Required keys
     # ---------------------------------------------------------
@@ -41,21 +32,21 @@ rand   = require 'seedrandom'
       'contract','catalog'
     ]
     for k in needed
-      throw new Error "Missing required param '#{k}' in #{stepName}" unless stepCfg[k]?
+      throw new Error "Missing required param '#{k}' in #{stepName}" unless params[k]?
 
-    DATA_DIR     = runCfg.data_dir
-    CONTRACT_KEY = stepCfg.contract
-    CATALOG_KEY  = stepCfg.catalog
+    DATA_DIR     = M.getStepParam stepName, "data_dir"
+    CONTRACT_KEY = params.contract
+    CATALOG_KEY  = params.catalog
 
-    HF_DATASET   = stepCfg.hf_dataset
-    SUBSET       = stepCfg.subset
-    MODE         = stepCfg.mode
-    VALID_FRACT  = stepCfg.valid_fract
-    MIN_WORDS    = stepCfg.min_words
-    MAX_WORDS    = stepCfg.max_words
-    SEED         = stepCfg.seed
-    TRAIN        = stepCfg.train
-    VALID        = stepCfg.valid
+    HF_DATASET   = params.hf_dataset
+    SUBSET       = params.subset
+    MODE         = params.mode
+    VALID_FRACT  = params.valid_fract
+    MIN_WORDS    = params.min_words
+    MAX_WORDS    = params.max_words
+    SEED         = params.seed
+    TRAIN        = params.train
+    VALID        = params.valid
 
     # ---------------------------------------------------------
     # Helpers
@@ -120,9 +111,8 @@ for r in ds:
       text = if MODE is 'plain'
         quote
       else
-        instr = if author \
-          then "Write a short motivational quote in the style of #{author}."
-          else "Write a short motivational quote."
+        instr = "Write a short motivational quote."
+        instr = "Write a short motivational quote in the style of #{author}." if author 
         "Instruction:\n#{instr}\n\nResponse:\n#{quote}"
 
       continue unless MIN_WORDS <= wc(text) <= MAX_WORDS

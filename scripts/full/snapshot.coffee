@@ -4,7 +4,7 @@ snapshot.coffee — memo-native meta-runner snapshot generator (2025)
 -------------------------------------------------------------------
 Reads:
   run.artifacts_json    ← artifact registry (from memo)
-  stepCfg.prompts       ← array of prompts
+  params.prompts       ← array of prompts
 Writes:
   <snap>.jsonl          ← array-of-objects (memo JSONL)
   <snap>.yaml           ← grouped-by-prompt YAML (memo)
@@ -19,25 +19,15 @@ yaml = require 'js-yaml'
   desc: "Generate prompt snapshots using MLX (memo-only, no filesystem)"
 
   action: (M, stepName) ->
+    params = (M.theLowdown "params/#{stepName}.json").value
 
-    # ---------------------------------------------------------------
-    # Load experiment.yaml
-    # ---------------------------------------------------------------
-    cfg = M.theLowdown("experiment.yaml")?.value
-    throw new Error "Missing experiment.yaml" unless cfg?
-
-    stepCfg = cfg[stepName]
-    runCfg  = cfg.run
-
-    throw new Error "Missing step config '#{stepName}'" unless stepCfg?
-    throw new Error "Missing run section" unless runCfg?
 
     # Required config keys (NO defaults injected)
-    SNAP_NAME        = stepCfg.snapshots          # "generations"
-    PROMPTS          = stepCfg.prompts or []
-    MAX_NEW          = stepCfg.max_new_tokens
-    ONLY_MODEL_ID    = stepCfg.only_model_id      # optional
-    ART_KEY          = runCfg.artifacts_json      # memo key containing registry
+    SNAP_NAME        = params.generations          # "generations"
+    PROMPTS          = params.prompts or []
+    MAX_NEW          = params.max_new
+    ONLY_MODEL_ID    = params.only_model_id      # optional
+    ART_KEY          = params.artifacts      # memo key containing registry
 
     throw new Error "Missing #{stepName}.snapshots" unless SNAP_NAME?
     throw new Error "Missing #{stepName}.prompts"   unless Array.isArray(PROMPTS)
@@ -48,8 +38,8 @@ yaml = require 'js-yaml'
     # Load artifact registry from memo
     # ---------------------------------------------------------------
     regEntry = M.theLowdown(ART_KEY)
-    registry = regEntry.value
-    unless registry?.runs?
+    registry = regEntry.value || await regEntry.notifier
+    unless registry
       throw new Error "Artifact registry missing or invalid in '#{ART_KEY}'"
 
     runs = registry.runs.slice()

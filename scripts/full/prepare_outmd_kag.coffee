@@ -19,33 +19,14 @@ Requires:
   desc: "Convert Markdown stories into KAG-style JSONL entries (memo-native)"
 
   action: (M, stepName) ->
-
-    throw new Error "Missing stepName" unless stepName?
-
-    # ----------------------------------------------------------
-    # Load experiment.yaml
-    # ----------------------------------------------------------
-    cfg = M.theLowdown("experiment.yaml")?.value
-    throw new Error "Missing experiment.yaml in memo" unless cfg?
-
-    stepCfg = cfg[stepName]
-    throw new Error "Missing step config '#{stepName}'" unless stepCfg?
-
-    runCfg = cfg.run
-    throw new Error "Missing global run section" unless runCfg?
-
-    # ----------------------------------------------------------
-    # Required keys
-    # ----------------------------------------------------------
-    for k in ['data_dir']
-      throw new Error "Missing run.#{k}" unless runCfg[k]?
+    params = (M.theLowdown "params/#{stepName}.json").value
 
     for k in ['input_md','output_jsonl']
-      throw new Error "Missing step param #{k}" unless stepCfg[k]?
+      throw new Error "Missing step param #{k}" unless params[k]?
 
-    DATA_DIR_KEY   = runCfg.data_dir          # logical namespace only
-    INPUT_MD_KEY   = stepCfg.input_md         # memo key containing markdown string
-    OUTPUT_JSONL_KEY = stepCfg.output_jsonl   # memo key to store JSONL array
+    DATA_DIR_KEY   = M.getStepParam stepName, "data_dir"  # logical namespace only
+    INPUT_MD_KEY   = params.input_md         # memo key containing markdown string
+    OUTPUT_JSONL_KEY = params.output_jsonl   # memo key to store JSONL array
 
     log = (msg) ->
       stamp = new Date().toISOString().replace('T',' ').replace('Z','')

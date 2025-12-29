@@ -22,32 +22,15 @@ yaml = require 'js-yaml'
 
   action: (M, stepName) ->
 
-    throw new Error "Missing stepName argument" unless stepName?
-
-    cfg = M.theLowdown("experiment.yaml")?.value
-    throw new Error "Missing experiment.yaml" unless cfg?
-
-    runCfg  = cfg.run
-    stepCfg = cfg[stepName]
-    throw new Error "Missing run section" unless runCfg?
-    throw new Error "Missing step config" unless stepCfg?
-
-    for k in ['output_dir','data_dir','eval_dir']
-      throw new Error "Missing run.#{k}" unless runCfg[k]?
-
-    EVAL_DIR = path.resolve(runCfg.eval_dir)
+    EVAL_DIR = path.resolve(M.getStepParam stepName, "eval_dir")
     fs.mkdirSync(EVAL_DIR, {recursive:true})
 
-    GEN_JSONL = path.join(EVAL_DIR, "generations.jsonl")
-    TOK_PATH  = path.join(EVAL_DIR, "entropy_tokens.jsonl")
-    SUM_PATH  = path.join(EVAL_DIR, "entropy_summary.csv")
-    POLICY_FILE = path.join(EVAL_DIR, "policy.yaml")
-
-    unless fs.existsSync(GEN_JSONL)
-      throw new Error "Missing #{GEN_JSONL}"
-
-    params = stepCfg.params
-    throw new Error "Missing #{stepName}.params block" unless params?
+    params = (M.theLowdown "params/#{stepName}.json").value
+    
+    GEN_JSONL = params.generations + ".jsonl"
+    TOK_PATH  = params.entropy_tokens + ".jsonl"
+    SUM_PATH  = params.entropy_summary + ".csv"
+    POLICY_FILE = params.policy.yaml
 
     MAX_NEW   = parseInt(params.max_new_tokens)
     STOP_STRS = params.stop_strings
@@ -91,7 +74,9 @@ yaml = require 'js-yaml'
     # ---------------------------------------------------------------
     # Artifact selection from memo registry
     # ---------------------------------------------------------------
-    reg = M.theLowdown(runCfg.artifacts)?.value
+    reg = M.getStepParam stepName, "artifacts"
+    reg = M.theLowdown reg
+    reg = reg.value || await reg.notifier
     throw new Error "Missing artifacts in memo" unless reg?
 
     runs = reg.runs or []
@@ -115,9 +100,9 @@ yaml = require 'js-yaml'
     entropy_from_logprobs = (logs) ->
       maxv = Math.max.apply(null, logs)
       exps = logs.map((v)-> Math.exp(v-maxv))
-      Z = exps.reduce((a,b)->a+b, 0)
+      Z = exps.reduce(((a,b)->a+b), 0)
       ps = exps.map((e)-> e/(Z + 1e-12))
-      -ps.reduce((a,p)-> a + p*Math.log(p+1e-12), 0)
+      -ps.reduce(((a,p)-> a + p*Math.log(p+1e-12)), 0)
 
     median = (xs) ->
       return 0 unless xs.length
@@ -186,7 +171,7 @@ yaml = require 'js-yaml'
           TOK.write JSON.stringify({prompt_idx:idx, token:r.token, entropy:H})+"\n"
 
       if ent.length
-        meanH = ent.reduce((a,b)->a+b,0) / ent.length
+        meanH = ent.reduce(((a,b)->a+b),0) / ent.length
         medH  = median(ent)
         minH  = Math.min.apply(null, ent)
         maxH  = Math.max.apply(null, ent)

@@ -29,34 +29,23 @@ cheerio = require 'cheerio'
     # ------------------------------------------------------------
     # 1) Load config from memo
     # ------------------------------------------------------------
-    cfg = M.theLowdown("experiment.yaml")?.value
-    throw new Error "Missing experiment.yaml" unless cfg?
 
-    stepCfg = cfg[stepName]
-    runCfg  = cfg.run
-    throw new Error "Missing step config '#{stepName}'" unless stepCfg?
-    throw new Error "Missing run section" unless runCfg?
+    BASE       = M.getStepParam stepName, "base"
+    OUT_KEY    = M.getStepParam stepName, "output_key"
+    VALID_FRAC = Number(M.getStepParam stepName, "valid_fraction")
+    MIN_WORDS  = parseInt(M.getStepParam stepName, "min_story_words")
 
-    # Required keys
-    for k in ['base','output_key','valid_fraction','min_story_words']
-      throw new Error "Missing #{stepName}.#{k}" unless stepCfg[k]?
-
-    BASE       = stepCfg.base
-    OUT_KEY    = stepCfg.output_key
-    VALID_FRAC = Number(stepCfg.valid_fraction)
-    MIN_WORDS  = parseInt(stepCfg.min_story_words)
-
-    MAX_PAGES  = parseInt(stepCfg.max_pages or 1000)
-    PAUSE_SEC  = Number(stepCfg.pause_sec or 0.4)
-    UA         = stepCfg.user_agent or "Mozilla/5.0"
-    TIMEOUT_MS = parseInt(stepCfg.request_timeout or 15000)
+    MAX_PAGES  = parseInt(M.getStepParam stepName, "max_pages")
+    PAUSE_SEC  = Number(M.getStepParam stepName, "pause_sec")
+    UA         = M.getStepParam stepName, "user_agent"
+    TIMEOUT_MS = parseInt(M.getStepParam stepName, "request_timeout")
 
     START_URL  = "https://#{BASE}/"
 
     # ------------------------------------------------------------
     # 2) Logging (still allowed to filesystem)
     # ------------------------------------------------------------
-    EVAL_DIR = path.resolve(runCfg.eval_dir)
+    EVAL_DIR = path.resolve("./logs")
     fs.mkdirSync(EVAL_DIR, {recursive:true})
 
     LOG_PATH = path.join(EVAL_DIR, "#{stepName}.log")
@@ -97,7 +86,7 @@ cheerio = require 'cheerio'
     # ------------------------------------------------------------
     # 4) BFS crawl
     # ------------------------------------------------------------
-    discover_pages = async ->
+    discover_pages = ->
       queue = [START_URL]
       seen  = new Set()
       pages = []
