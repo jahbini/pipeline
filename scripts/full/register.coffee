@@ -18,7 +18,7 @@ crypto = require 'crypto'
   desc: "Register experiments.csv and record pipeline lock hash (memo-native)"
 
   action: (M, stepName) ->
-    params = M.theLowdown "params/#{stepName}.json"
+    params = (M.theLowdown "params/#{stepName}.json").value
 
     EXP_CSV_KEY = params.experiments_csv
 
@@ -28,6 +28,7 @@ crypto = require 'crypto'
     csvEntry = M.theLowdown(EXP_CSV_KEY)
     throw new Error "experiments.csv not found in memo (#{EXP_CSV_KEY})" unless csvEntry?
 
+    console.error "JIM awaits",stepName,EXP_CSV_KEY unless csvEntry.value
     csv = csvEntry.value ||  await csvEntry.notifier
     throw new Error "experiments.csv memo entry is empty" unless String(csv).trim().length
 

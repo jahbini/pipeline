@@ -36,13 +36,16 @@ path = require 'path'
     # Load contract, catalog, report
     # ----------------------------------------------------------
     contractEntry = M.theLowdown(CONTRACT_KEY)
+    console.error "JIM await", stepName, CONTRACT_KEY	unless contractEntry.value
     contract = contractEntry.value || await contractEntry.notifier
     throw new Error "Missing contract memo: #{CONTRACT_KEY}" unless contract?
 
     catalogEntry = M.theLowdown(CATALOG_KEY)
+    console.error "JIM await", stepName, CATALOG_KEY unless catalogEntry.value
     catalog      = catalogEntry.value || await catalogEntry.notifier
 
     reportEntry = M.theLowdown(REPORT_KEY)
+    console.error "JIM await", stepName, REPORT_KEY unless reportEntry.value
     report      = reportEntry.value || await reportEntry.notifier
     throw new Error "Missing data_report in memo: #{REPORT_KEY}" unless report?
 

@@ -62,9 +62,11 @@ rand   = require 'seedrandom'
       return '' unless text?
       String(text)
         .replace(/\\n/g, '\n')
+        .replace(/\\\\n/g, '\n')
         .replace(/[“”]/g, '"')
         .replace(/[‘’]/g, "'")
         .replace(/\r/g, '')
+        .trim()
 
     # ---------------------------------------------------------
     # Load via Python
@@ -81,19 +83,12 @@ for r in ds:
     if res.error? or res.status isnt 0
       console.error res.stderr
       throw new Error "datasets.load_dataset failed"
-
     rawRows = []
-    for line in res.stdout.trim().split(/\\r?\\n/)
+    
+    for line in res.output[1].split('\n')
       continue unless line.trim()
       try
-        obj = JSON.parse(sanitize(line))
-        if typeof obj.text is 'string'
-          obj.text = obj.text
-            .replace(/\\\\n/g, '\n')
-            .replace(/\\n/g, '\n')
-            .replace(/[“”]/g, '"')
-            .replace(/[‘’]/g, "'")
-            .trim()
+        obj = JSON.parse(line)
         rawRows.push obj
       catch
         continue
@@ -104,25 +99,24 @@ for r in ds:
     rows = []
 
     for r in rawRows
-      quote  = (r.quote  or '').trim()
-      author = (r.author or '').trim()
+      quote  = sanitize(r.quote)  or ''
+      author = sanitize(r.author) or ''
+      quote.replace(/^"|"$/g, '')
       continue unless quote.length
 
       text = if MODE is 'plain'
-        quote
+        { text: quote }
       else
         instr = "Write a short motivational quote."
         instr = "Write a short motivational quote in the style of #{author}." if author 
-        "Instruction:\n#{instr}\n\nResponse:\n#{quote}"
-
-      continue unless MIN_WORDS <= wc(text) <= MAX_WORDS
+        { prompt:instr, completion: quote}
       rows.push text
 
     # Deduplicate
     seen = new Set()
     uniq = []
     for t in rows
-      h = sha(t)
+      h = sha(t.completion)
       unless seen.has(h)
         seen.add(h)
         uniq.push t
@@ -140,6 +134,7 @@ for r in ds:
     # ---------------------------------------------------------
     M.saveThis(TRAIN, train)
     M.saveThis(VALID, valid)
+    M.saveThis('data/test.jsonl',valid)
     console.log "Saved train=#{train.length}, valid=#{valid.length} to memo."
 
     # ---------------------------------------------------------
@@ -204,4 +199,5 @@ for r in ds:
     M.saveThis(CONTRACT_KEY, data_contract)
     M.saveThis(CATALOG_KEY, data_catalog)
 
+    console.log  "#{stepName} finished"
     return

@@ -14,7 +14,8 @@ Requires:
   step.input_md     – memo key holding raw markdown text
   step.output_jsonl – memo key to store the JSONL array
 ###
-
+path = require "path"
+fs   = require "fs"
 @step =
   desc: "Convert Markdown stories into KAG-style JSONL entries (memo-native)"
 
@@ -31,7 +32,7 @@ Requires:
     log = (msg) ->
       stamp = new Date().toISOString().replace('T',' ').replace('Z','')
       line = "[#{stamp}] #{msg}"
-      console.log line
+      console.log stepName, line
       try M.logThis?(stepName, line) catch e then null
 
     # ----------------------------------------------------------
@@ -70,12 +71,16 @@ Requires:
     # ----------------------------------------------------------
     log "Starting step #{stepName}"
     log "Reading markdown from memo key: #{INPUT_MD_KEY}"
+    # ------------------------------------------------------------
+    # Load Markdown (ONLY fs access)
+    # ------------------------------------------------------------
+    inAbs = path.resolve INPUT_MD_KEY
+    throw new Error "Markdown not found: #{inAbs}" unless fs.existsSync inAbs
 
-    mdEntry = M.theLowdown(INPUT_MD_KEY)
-    throw new Error "Missing markdown in memo: #{INPUT_MD_KEY}" unless mdEntry?
-    mdText = mdEntry.value ? ""
-    mdText = String(mdText)
+    raw   = fs.readFileSync inAbs, 'utf8'
+    lines = raw.split /\r?\n/
 
+    mdText = String(raw)
     chunks = extract_chunks(mdText)
     log "Extracted #{chunks.length} chunks"
 

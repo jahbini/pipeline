@@ -32,7 +32,7 @@ All I/O is via @memo.
     log = (msg) ->
       stamp = new Date().toISOString().replace('T',' ').replace('Z','')
       line = "[#{stamp}] #{msg}"
-      console.log line
+      console.log stepName, line
       try M.logThis?(stepName, line) catch e then null
 
     # ------------------------------------------------------------

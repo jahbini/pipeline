@@ -90,7 +90,7 @@ path = require 'path'
       args =
         model: row.model_id
         data:  row.data_dir
-        train: ''   # presence of flag triggers training in mlx_lm
+        train: null   # presence of flag triggers training in mlx_lm
         "adapter-path":    row.adapter_path
         "batch-size":      row.batch_size
         iters:             row.iters

@@ -70,7 +70,7 @@ crypto = require 'crypto'
           bad.push "[bad_json] #{line.slice(0,120)}" if bad.length < 3
           continue
 
-        unless field of obj
+        unless field in obj
           missing_field++
           bad.push "[missing_field] #{line.slice(0,120)}" if bad.length < 3
           continue
@@ -147,14 +147,14 @@ crypto = require 'crypto'
 
     for split, fileKey of contract.filenames
       chosen = fileKey.chosen
-      dataKey = "data/#{chosen}"
+      dataKey = chosen
 
       dataEntry = M.theLowdown(dataKey)
+      console.error "waiting for", stepName, dataKey unless dataEntry.value
       dataEntry = dataEntry.value || await dataEntry.notifier
       throw new Error "Missing dataset for split #{split} (#{dataKey})" unless dataEntry?
-
       # dataEntry.value is an array of parsed JSON objects already
-      rows = dataEntry.value ? []
+      rows = dataEntry
       unless Array.isArray(rows)
         throw new Error "Dataset #{dataKey} must load as array of JSON objects"
 
