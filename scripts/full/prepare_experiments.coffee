@@ -149,17 +149,10 @@ path = require 'path'
       est_tokens: estTokens
 
     # ----------------------------------------------------------
-    # CSV string
-    # ----------------------------------------------------------
-    headers = Object.keys(row)
-    csv =
-      headers.join(',') + '\n' +
-      headers.map((k)-> String(row[k])).join(',') + '\n'
-
-    # ----------------------------------------------------------
     # Save to memo (the new truth)
     # ----------------------------------------------------------
-    M.saveThis EXP_CSV_KEY, csv
+    M.saveThis EXP_CSV_KEY, row
+    row = [ row ] unless row[0]?
     M.saveThis "prepare_experiments:last_row", row
 
     console.log "experiments.csv materialized → memo key #{EXP_CSV_KEY}"

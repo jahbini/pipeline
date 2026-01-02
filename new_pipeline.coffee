@@ -278,6 +278,56 @@ class Memo
         writeText(dest, JSON.stringify(value,null,2))
         value
 
+
+    # ---- csv-path ----
+    parseCSV = (text) ->
+      lines = text.trim().split /\r?\n/
+      return [] unless lines.length
+
+      headers = lines.shift().split ','
+
+      rows = []
+      for line in lines
+        cols = line.split ','
+        obj = {}
+        for h, i in headers
+          obj[h] = cols[i] ? ''
+        rows.push obj
+
+      rows
+
+    stringifyCSV = (obj) ->
+      unless obj? and typeof obj is 'object' and not Array.isArray obj
+        throw new Error "stringifyCSV expects a single object"
+
+      keys   = Object.keys obj
+      values = keys.map (k) ->
+        v = obj[k] ? ''
+        s = String v
+        if /[",\n]/.test s
+          '"' + s.replace(/"/g, '""') + '"'
+        else
+          s
+
+      [
+        keys.join ','
+        values.join ','
+      ].join "\n"
+
+    #
+    @addMetaRule "csv",
+      /\.csv$/,
+      (key, value) ->
+        dest = path2.join baseDir, key
+
+        if value is undefined
+          return undefined unless fs2.existsSync dest
+          return parseCSV fs2.readFileSync(dest,'utf8')
+
+        fs2.mkdirSync path2.dirname(dest), { recursive: true }
+        fs2.writeFileSync dest, stringifyCSV(value)
+        value
+
     # ---- slash-path ----
     @addMetaRule "slash",
       /^(?=.*\/)(?!.*\.[A-Za-z0-9]{1,8}$).+$/,
@@ -294,7 +344,7 @@ class Memo
     buildArgs = (cmdType, params) ->
       args = ['-m','mlx_lm',cmdType]
       for k,v of params
-        args.push "--#{k}"
+        args.push "--#{k}" if k
         args.push v if v?
       args
 
@@ -328,7 +378,11 @@ discoverSteps = (spec) ->
     continue unless isPlainObject(v)
     continue unless v.run? or v.run_mlx
     def = Object.assign {}, v
-    def.depends_on = normalizeDeps(v.depends_on)
+    deps = normalizeDeps(v.depends_on)
+    if deps.length is 1 and String(deps[0]).toLowerCase() is 'never'
+      console.log "⏭️  skipping step #{k} (depends_on: never)"
+      continue
+    def.depends_on = deps
     steps[k] = def
   steps
 

@@ -135,7 +135,7 @@ for r in ds:
     M.saveThis(TRAIN, train)
     M.saveThis(VALID, valid)
     M.saveThis('data/test.jsonl',valid)
-    console.log "Saved train=#{train.length}, valid=#{valid.length} to memo."
+    console.log "Saved train=#{train.length}, valid=#{valid.length}."
 
     # ---------------------------------------------------------
     # Construct data_contract (memo-only paths)

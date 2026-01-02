@@ -39,41 +39,14 @@ path = require 'path'
     csvEntry = M.theLowdown(EXP_CSV_KEY)
     csvText  = csvEntry.value || await csvEntry.notifier
 
-    if csvText? and typeof csvText is 'string' and csvText.trim().length
-      text = csvText
-    else if fs.existsSync(EXP_CSV_KEY)
-      text = fs.readFileSync(EXP_CSV_KEY, 'utf8')
-    else
-      throw new Error "experiments.csv missing in memo and on disk: #{EXP_CSV_KEY}"
-
     # ----------------------------------------------------------------
     # CSV parsing helpers
     # ----------------------------------------------------------------
-    readCSVText = (text) ->
-      lines = text.split(/\r?\n/).filter (l)-> l.trim().length
-      return [] unless lines.length
-      headers = lines[0].split(',').map (h)-> h.trim()
-      rows = []
-      for line in lines.slice(1)
-        cols = line.split(',').map (c)-> c.trim()
-        row = {}
-        for i in [0...headers.length]
-          row[headers[i]] = cols[i] ? ''
-        # numeric coercions for known fields
-        for k in ['epochs','iters','batch_size','grad_accum','max_seq_length','bf16']
-          if row[k]? and row[k] isnt ''
-            row[k] = parseInt(parseFloat(row[k]))
-        for k in ['learning_rate']
-          if row[k]? and row[k] isnt ''
-            row[k] = parseFloat(row[k])
-        rows.push row
-      rows
 
     selectRows = (rows, onlyModel, onlyRowIdx) ->
       # explicit row index wins
       if onlyRowIdx? and String(onlyRowIdx) isnt 'None'
-        idx = parseInt(onlyRowIdx)
-        return if rows[idx]? then [rows[idx]] else []
+        return [rows[idx]]
       # else filter by model id if provided
       if onlyModel? and String(onlyModel).length
         return rows.filter (r)-> r.model_id is onlyModel
@@ -96,7 +69,6 @@ path = require 'path'
         iters:             row.iters
         "max-seq-length":  row.max_seq_length
         "learning-rate":   row.learning_rate
-
       args
 
     ensureDirs = (row) ->
@@ -126,7 +98,8 @@ path = require 'path'
     # ----------------------------------------------------------------
     # Main execution
     # ----------------------------------------------------------------
-    rows = readCSVText(text)
+    rows = csvText  
+    rows = [ rows ] unless rows[0]?
     if rows.length is 0
       console.log "train: experiments.csv has no data rows; nothing to run."
       M.saveThis "train:status", "empty"

@@ -79,6 +79,7 @@ manifest:
 register:
   run: full/register.coffee
   experiments_csv: out/experiments.csv
+  artifacts: out/artifacts.json
 
 prepare_data:
   run: full/prepare_data.coffee
@@ -136,6 +137,7 @@ fuse:
   q_group: 32
   dtype: float16
   dry_run: false
+  depends_on: [train]
 
 prepare_outmd_kag:
   run: full/prepare_outmd_kag.coffee

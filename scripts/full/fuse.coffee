@@ -24,14 +24,14 @@ path = require 'path'
     # -------------------------------------------------------------
     # Load artifacts registry (MUST be in memo)
     # -------------------------------------------------------------
-    ART_PATH = params.artifacts
-    reg = M.theLowdown(ART_PATH)
+    artifacts_path = params.artifacts
+    reg = M.theLowdown(artifacts_path)
+    console.error "JIM awaits",stepName, artifacts_path unless reg.value
     registry = reg.value || await reg.notifier
-    throw new Error "Missing #{ART_PATH} in memo" unless registry?
+    throw new Error "Missing #{artifacts_path} in memo" unless registry?
 
     runs = registry.runs or []
     throw new Error "No entries in registry.runs" unless runs.length
-
     # -------------------------------------------------------------
     # Step parameters
     # -------------------------------------------------------------
@@ -55,7 +55,6 @@ path = require 'path'
       if DRY_RUN
         log "(DRY_RUN) fuse: #{JSON.stringify args}"
         return {stdout: ""}
-
       stdout = M.callMLX "fuse", args
       {stdout}
 
@@ -66,7 +65,7 @@ path = require 'path'
         "q-bits": Q_BITS
         "q-group-size": Q_GROUP
         dtype: DTYPE
-        quantize: ''   # MLX uses presence of '-q'
+        "": "-q"   # MLX uses presence of '-q'
 
       if DRY_RUN
         log "(DRY_RUN) quantize: #{JSON.stringify args}"
@@ -80,10 +79,12 @@ path = require 'path'
     # -------------------------------------------------------------
     for entry in runs
       modelId    = entry.model_id
+      entry["output_root"] = path.dirname entry.adapter_dir
       adapterDir = entry.adapter_dir
-      fusedDir   = entry.fused_dir or path.join(path.dirname(ART_PATH), 'fused')
-      quantDir   = entry.quantized_dir or path.join(path.dirname(ART_PATH), 'quantized')
+      fusedDir   = entry.fused_dir or path.join(path.dirname(entry.adapter_dir), 'fused')
+      quantDir   = entry.quantized_dir or path.join(path.dirname(entry.adapter_dir), 'quantized')
 
+      console.error "JIM registry run",entry
       log "Processing #{modelId}"
 
       # -----------------------------------------------------------
@@ -111,6 +112,7 @@ path = require 'path'
       entry.quantized_dir  = quantDir
       entry.quantize_bits  = Q_BITS
       entry.q_group_size   = Q_GROUP
+      entry.bop = "Bugaloo"
 
       M.saveThis "#{stepName}:quant:#{modelId}", outQ
       log "   ✓ quantized → #{quantDir}"
@@ -119,7 +121,7 @@ path = require 'path'
     # Save updated registry back into memo
     # -------------------------------------------------------------
     registry.updated_utc = new Date().toISOString()
-    M.saveThis ART_PATH, registry
+    M.saveThis artifacts_path, registry
 
     log "📘 Updated artifacts in memo."
     return

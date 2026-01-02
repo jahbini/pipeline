@@ -30,7 +30,7 @@ yaml = require 'js-yaml'
     GEN_JSONL = params.generations + ".jsonl"
     TOK_PATH  = params.entropy_tokens + ".jsonl"
     SUM_PATH  = params.entropy_summary + ".csv"
-    POLICY_FILE = params.policy.yaml
+    POLICY_FILE = params.policy
 
     MAX_NEW   = parseInt(params.max_new_tokens)
     STOP_STRS = params.stop_strings
@@ -50,26 +50,27 @@ yaml = require 'js-yaml'
     log "Starting #{stepName}"
 
     # ---------------------------------------------------------------
-    # Load policy
+    # Load policy  -- kind of like ---
+    #{prompt_policy:{name:'plain'},artifact_preference:['quantized','fused','adapter']}
     # ---------------------------------------------------------------
     load_policy = ->
-      if fs.existsSync(POLICY_FILE)
-        yaml.load fs.readFileSync(POLICY_FILE,'utf8')
+      j=M.theLowdown(POLICY_FILE)
+      if j.value
+       j.value
       else
-        {prompt_policy:{name:'plain'},artifact_preference:['quantized','fused','adapter']}
+       console.error "JIM awaits",stepName,POLICY_FILE
+       await j.notifier
 
     # ---------------------------------------------------------------
     # Load prompts from generations.jsonl
     # ---------------------------------------------------------------
     load_prompts = ->
-      acc = []
-      for line in fs.readFileSync(GEN_JSONL,'utf8').split(/\r?\n/)
-        continue unless line.trim()
-        try
-          row = JSON.parse(line)
-          acc.push row.prompt if row.prompt?
-        catch then null
-      acc
+      j=M.theLowdown(GEN_JSONL)
+      if j.value
+       j.value
+      else
+       console.error "JIM awaits",stepName,GEN_JSONL
+       await j.notifier
 
     # ---------------------------------------------------------------
     # Artifact selection from memo registry
@@ -80,6 +81,7 @@ yaml = require 'js-yaml'
     throw new Error "Missing artifacts in memo" unless reg?
 
     runs = reg.runs or []
+    console.error "JIM artifacts?",stepName, runs
     throw new Error "No runs found in artifacts registry" unless runs.length
 
     pick_artifact = (policy) ->
@@ -155,6 +157,7 @@ yaml = require 'js-yaml'
 
       log "stream_generate for prompt #{idx}"
 
+      console.error "JIM MLX args",stepName, args
       out = await M.callMLX("stream_generate", args)
       if out?.error?
         log "ERROR: #{out.error}"

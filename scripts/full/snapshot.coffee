@@ -14,6 +14,8 @@ Uses:
 ###
 
 yaml = require 'js-yaml'
+fs = require 'fs'
+path = require 'path'
 
 @step =
   desc: "Generate prompt snapshots using MLX (memo-only, no filesystem)"
@@ -41,7 +43,7 @@ yaml = require 'js-yaml'
     registry = regEntry.value || await regEntry.notifier
     unless registry
       throw new Error "Artifact registry missing or invalid in '#{ART_KEY}'"
-
+    console.error "JIM ART_KEY?", stepName,ART_KEY, registry
     runs = registry.runs.slice()
 
     if ONLY_MODEL_ID? and ONLY_MODEL_ID.length > 0
@@ -52,9 +54,10 @@ yaml = require 'js-yaml'
     # Choose modeling paths (quantized → fused → base+adapter)
     # ---------------------------------------------------------------
     pickArtifacts = (re) ->
+      console.error "JIM re re",re
       out = []
-      if re.quantized_dir? then out.push {model: re.quantized_dir, adapter: null, label: "quantized"}
-      if re.fused_dir?     then out.push {model: re.fused_dir,     adapter: null, label: "fused"}
+      if re.quantized_dir? then out.push {model: re.model_id, adapter:  re.quantized_dir, label: "quantized"}
+      if re.fused_dir?     then out.push {model: re.model_id, adapter:  re.fused_dir, label: "fused"}
       out.push {model: re.model_id, adapter: re.adapter_dir, label: "base+adapter"}
 
       uniq = []
@@ -64,26 +67,27 @@ yaml = require 'js-yaml'
         continue if seen.has(key)
         seen.add(key)
         uniq.push x
+      console.error "JIM er er",uniq
       uniq
 
     # ---------------------------------------------------------------
     # MLX one-prompt runner using memo-native callMLX
     # ---------------------------------------------------------------
     runOneModel = (modelPath, adapterPath, prompts, maxTokens) ->
+      fs.mkdirSync path.dirname(adapterPath), { recursive: true }
       outs = []
       for p in prompts
         args =
-          op: "generate"
           model: modelPath
           prompt: p
-          max_tokens: maxTokens
+          "max-tokens": maxTokens
 
         if adapterPath?
           args["adapter-path"] = adapterPath
 
         # MLX op is async; use await on internal notifier
-        outEntry = M.callMLX "generate", args
-        res = await outEntry.notifier
+        console.error "JIM call mlx",stepName, args
+        res = M.callMLX "generate", args
 
         if res?.error?
           throw new Error "mlx-lm.generate error: #{res.error}"
@@ -103,7 +107,7 @@ yaml = require 'js-yaml'
 
     for re in runs
       variants = pickArtifacts(re)
-
+      console.error "JIM variants", variants
       for v in variants
         gens = await runOneModel(v.model, v.adapter, PROMPTS, MAX_NEW)
 

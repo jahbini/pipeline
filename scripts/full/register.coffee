@@ -2,7 +2,7 @@
 ###
 register.coffee — memo-native checkpoint (2025)
 ------------------------------------------------
-Confirms that experiments.csv exists in memo,
+Confirms that experiments.csv exists
 validates its header line, computes a lock_hash,
 and installs a canonical artifacts registry into memo.
 
@@ -30,24 +30,16 @@ crypto = require 'crypto'
 
     console.error "JIM awaits",stepName,EXP_CSV_KEY unless csvEntry.value
     csv = csvEntry.value ||  await csvEntry.notifier
-    throw new Error "experiments.csv memo entry is empty" unless String(csv).trim().length
-
-    # ------------------------------------------------------------
-    # Validate header
-    # ------------------------------------------------------------
-    lines   = csv.trim().split(/\r?\n/)
-    header  = lines[0]?.split(',')
-    throw new Error "Invalid experiments.csv (missing header)" unless header?.length > 0
-
+    
     # ------------------------------------------------------------
     # Compute lock_hash (stable pipeline checksum)
     # ------------------------------------------------------------
-    lockHash = crypto.createHash("sha1").update(csv, "utf8").digest("hex")
+    lockHash = crypto.createHash("sha1").update(JSON.stringify(csv), "utf8").digest("hex")
 
     M.saveThis "lock_hash", lockHash
     M.saveThis "register:experiments_csv", EXP_CSV_KEY
 
-    console.log "Registered experiments.csv (#{lines.length - 1} row(s))"
+    console.log "Registered experiments.csv 1  row"
     console.log "lock_hash =", lockHash
 
     # ------------------------------------------------------------
@@ -56,7 +48,7 @@ crypto = require 'crypto'
     ART_PATH = M.getStepParam stepName, "artifacts"  # e.g. "out/artifacts.json"
     throw new Error "Missing run.artifacts" unless ART_PATH?
 
-    OUT_ROOT = path.dirname(ART_PATH)
+    OUT_ROOT = path.dirname(csv.adapter_path)
 
     registry =
       created_utc: new Date().toISOString().replace(/\.\d+Z$/, 'Z')
@@ -64,11 +56,12 @@ crypto = require 'crypto'
         {
           model_id: M.getStepParam stepName, "model"
           output_root: OUT_ROOT
-          adapter_dir: path.join(OUT_ROOT, "adapter")
+          adapter_dir: csv.adapter_path
           fused_dir: path.join(OUT_ROOT, "fused")
           quantized_dir: path.join(OUT_ROOT, "quantized")
         }
       ]
+    
 
     # Memo-native save; meta rule handles writing externally
     M.saveThis ART_PATH, registry
