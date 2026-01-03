@@ -28,7 +28,7 @@ crypto = require 'crypto'
     csvEntry = M.theLowdown(EXP_CSV_KEY)
     throw new Error "experiments.csv not found in memo (#{EXP_CSV_KEY})" unless csvEntry?
 
-    console.error "JIM awaits",stepName,EXP_CSV_KEY unless csvEntry.value
+    console.error "awaiting",stepName,EXP_CSV_KEY unless csvEntry.value
     csv = csvEntry.value ||  await csvEntry.notifier
     
     # ------------------------------------------------------------

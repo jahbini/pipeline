@@ -24,7 +24,7 @@ yaml = require 'js-yaml'
     # Artifact registry: memo only
     # ---------------------------------------------------------------
     reg = M.theLowdown regMemo
-    console.error "JIM awaits artifacts",stepName,regMemo unless reg.value
+    console.error "awaiting artifacts",stepName,regMemo unless reg.value
     reg = reg.value || await reg.notifier
     throw new Error "Missing artifacts in memo: #{reg}" unless reg?
 
@@ -39,7 +39,6 @@ yaml = require 'js-yaml'
     # Artifact resolution helper
     # ---------------------------------------------------------------
     pickArtifacts = (re) ->
-      console.error "JIM bad model path",stepName, re
       out = []
       if re.quantized_dir? then out.push [re.quantized_dir, null, 'quantized']
       if re.fused_dir?     then out.push [re.fused_dir, null, 'fused']
@@ -52,7 +51,6 @@ yaml = require 'js-yaml'
         continue if seen.has(key)
         seen.add(key)
         uniq.push [m,a,label]
-      console.error "JIM bad uniq",stepName,uniq
       uniq
 
     # ---------------------------------------------------------------
@@ -91,7 +89,6 @@ yaml = require 'js-yaml'
       
         args['adapter-path'] =  adapterPath if adapterPath
 
-        console.error "JIM call mlx",stepName, args
         result = await M.callMLX("generate", args)
 
         if result?.error?
@@ -111,7 +108,6 @@ yaml = require 'js-yaml'
 
     for re in runs
       arts = pickArtifacts(re)
-      console.error "JIM runOne",re,runs,arts
 
       for [modelPath, adapterPath, artLabel] in arts
         for [pvLabel, pvFn] in PROMPT_VARIANTS
@@ -164,6 +160,6 @@ yaml = require 'js-yaml'
       grouped[key] ?= []
       grouped[key].push r
 
-    M.saveThis yamlKey, yaml.safeDump(grouped, {sortKeys:false})
+    M.saveThis yamlKey, yaml.dump(grouped, {sortKeys:false})
 
     return

@@ -81,7 +81,6 @@ yaml = require 'js-yaml'
     throw new Error "Missing artifacts in memo" unless reg?
 
     runs = reg.runs or []
-    console.error "JIM artifacts?",stepName, runs
     throw new Error "No runs found in artifacts registry" unless runs.length
 
     pick_artifact = (policy) ->

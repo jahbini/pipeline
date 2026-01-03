@@ -340,7 +340,7 @@ class Memo
         fs2.writeFileSync(dest,data)
         value
 
-  callMLX: (cmdType, payload) ->
+  callMLX: (cmdType, payload, dbug = false) ->
     buildArgs = (cmdType, params) ->
       args = ['-m','mlx_lm',cmdType]
       for k,v of params
@@ -349,8 +349,11 @@ class Memo
       args
 
     args = buildArgs(cmdType, payload)
+    console.error "MLX args",args if dbug
     spawnSync = require('child_process').spawnSync
     res = spawnSync 'python', args, {encoding:'utf8'}
+    console.error "MLX result" ,res if dbug
+    
     if res.status isnt 0
       throw new Error "MLX failed: #{res.stderr}"
     res.stdout

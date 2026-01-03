@@ -26,7 +26,7 @@ path = require 'path'
     # -------------------------------------------------------------
     artifacts_path = params.artifacts
     reg = M.theLowdown(artifacts_path)
-    console.error "JIM awaits",stepName, artifacts_path unless reg.value
+    console.error "awaiting",stepName, artifacts_path unless reg.value
     registry = reg.value || await reg.notifier
     throw new Error "Missing #{artifacts_path} in memo" unless registry?
 
@@ -84,7 +84,6 @@ path = require 'path'
       fusedDir   = entry.fused_dir or path.join(path.dirname(entry.adapter_dir), 'fused')
       quantDir   = entry.quantized_dir or path.join(path.dirname(entry.adapter_dir), 'quantized')
 
-      console.error "JIM registry run",entry
       log "Processing #{modelId}"
 
       # -----------------------------------------------------------
@@ -112,7 +111,6 @@ path = require 'path'
       entry.quantized_dir  = quantDir
       entry.quantize_bits  = Q_BITS
       entry.q_group_size   = Q_GROUP
-      entry.bop = "Bugaloo"
 
       M.saveThis "#{stepName}:quant:#{modelId}", outQ
       log "   ✓ quantized → #{quantDir}"

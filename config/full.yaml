@@ -9,40 +9,6 @@ run:
   data_dir: data
   eval_dir: eval_out
 
-  # --- Core data contracts and reports ---
-  catalog: data/data_catalog.json
-  contract: data/data_contract.json
-  report: data/data_report.json
-
-  # --- Experiment descriptors ---
-  experiments_csv: out/experiments.csv
-  experiment_manifest: out/experiment_manifest.json
-
-  # --- Model and policy assets ---
-  model: microsoft/Phi-3-mini-4k-instruct
-  format_policy: data/format_policy.json
-  policy: generation_policy.json
-
-  # --- Outputs and artifacts ---
-  fused_dir: fused_model
-
-  generations: generations
-  tokmeta: tokenizer_meta
-  ablations: eval_out/ablation_generations
-  summary: summary
-  analysis: analysis
-
-data:
-  output_dir: data
-  contract: data/data_contract.json
-  catalog: data/data_catalog.json
-  report: data/data_report.json
-
-eval:
-  output_dir: eval_out
-  policy: generation_policy.json
-  report: report.md
-
 # ============================================================
 # Step: Prepare Experiments (single-model mode)
 # ============================================================
