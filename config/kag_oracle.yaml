@@ -24,7 +24,7 @@ run:
 
 md2segments:
   run: kag_oracle/md2segments.coffee
-  split_mode: paragraph
+  split_mode: story      # or paragraph
   stories_md: /Users/theaiguy/jim_stories/jim.md    # markdown source
   marshalled_stories: data/marshalled_stories.jsonl # md2segments output
 
@@ -56,10 +56,10 @@ lora_train:
   run: kag_oracle/lora_train.coffee
   epochs: 1
   batch_size: 1
-  grad_accum: 8
-  max_seq_length: 768
-  learning_rate: 1e-4
-  iters: 100
+  grad_accum: 12
+  max_seq_length: 1024
+  learning_rate: 5e-5
+  iters: 200
   bf16: false
 
   train_file: loraland/train.jsonl
@@ -73,13 +73,4 @@ talk_story:
   topP: 0.9
   temp: 0.7
   prompt:
-    prompt: |
-      You are a storyteller. Take the voice Pomon and finish the story. Here is the start of the story:
-      Pomon and Roman are sitting on the shore with me. As we talk, a porpoise raises its head from the lagoon and chirps softly.
-      Roman startles, looks very concerned, jumps to his feet, and runs toward the beach shouting,
-      "It's the octopus! Don't wait up." And he dives into the water and disappears beneath the surface.
-
-      I look at Pomon. She smiles and says, "That's what it's like to be married to a shape-shifter.
-      He loves the sea, and sometimes he even becomes whatever sea creature calls him."
-
-      She goes on to say:
+    prompt:  we went to Portland and this happened 

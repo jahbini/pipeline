@@ -45,6 +45,12 @@ sadness=#{get 'sadness'}, desire=#{get 'desire'}, curiosity=#{get 'curiosity'}
 """.trim()
 
     mkPrompt = (row) ->
+      if true
+        t= """Continue in the same voice and mannner as the text below.
+#{row.prompt}
+"""
+        return t.trim()
+      #old training prompt text
       meta = row.meta ? {}
       """
 You are reading a personal narrative written by Jim.
@@ -80,7 +86,7 @@ Continue in the same voice, with emotional honesty and human warmth.
 
       unless isSequential(cur, nxt)
         skipped++
-        continue
+        #continue
 
       newTrain.push
         prompt: mkPrompt(cur)
