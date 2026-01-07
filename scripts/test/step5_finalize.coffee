@@ -23,5 +23,7 @@ Step 5 — finalize: aggregate results
       timestamp: new Date().toISOString()
 
     M.saveThis "data/final_summary.json", summary
+    M.saveThis "data/final_summary.yaml", summary
+    M.saveThis "data/final_summary.csv", summary
     console.log "[#{stepName}] wrote data/final_summary.json"
     return

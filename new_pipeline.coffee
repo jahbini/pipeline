@@ -1,10 +1,10 @@
 #!/usr/bin/env coffee
 ###
-pipeline_runner_clean.coffee — Flat DAG Runner (CALLMLX + STATE DIR, CLEAN)
+pipeline_runner.coffee a micro OS for AI 
 ===========================================================================
 
 Hard guarantees:
-• callMLX EXISTS and is used via Memo meta rules
+• callMLX EXISTS and is syncronous via the pipeline, and not in the memo
 • Memo meta-dispatch preserved (read + write)
 • experiment.yaml is saved into Memo BEFORE any step runs
 • Step params are saved into Memo BEFORE any step runs
@@ -144,7 +144,6 @@ class Memo
   constructor: ->
     @MM = {}
     @metaRules = []
-    @initializeMetaRules CWD
 
   _newEntry: (key, value) ->
     breaker = null
@@ -206,6 +205,9 @@ class Memo
       return if keys.some((k)=> @theLowdown(k).value is false)
       try andDo() catch then null
 
+  addMetaRule: (name, regex, handler) ->
+    @metaRules.push {name, regex, handler}
+
   selectMetaHandler: (key) ->
     for r in @metaRules when r.regex.test(key)
       return r.handler
@@ -231,114 +233,6 @@ class Memo
 
   addMetaRule: (name, regex, handler) ->
     @metaRules.push {name, regex, handler}
-
-  initializeMetaRules: (baseDir) ->
-    fs2 = require 'fs'
-    path2 = require 'path'
-
-    readText = (p) -> if fs2.existsSync(p) then fs2.readFileSync(p,'utf8') else undefined
-    writeText = (p,s) -> fs2.mkdirSync(path2.dirname(p),{recursive:true}); fs2.writeFileSync(p,s,'utf8')
-
-    readJSON = (p) -> try JSON.parse(readText(p)) catch then undefined
-    readJSONL = (p) ->
-      raw = readText(p); return undefined unless raw?
-      out=[]
-      for l in raw.split(/\r?\n/) when l.trim().length
-        try out.push JSON.parse(l) catch then continue
-      out
-
-    # ---- MLX META RULE (CALLMLX) ----
-    @addMetaRule "mlx-meta",
-      /^donkeyButt mlx-lm:(train|generate|fuse|convert|lora)$/,
-      (key, payload) =>
-        return unless payload?
-        cmd = key.split(":")[1]
-        @callMLX cmd, payload
-
-    # ---- JSONL ----
-    @addMetaRule "jsonl",
-      /\.jsonl$/i,
-      (key, value) ->
-        dest = path2.join(baseDir, key)
-        if value is undefined
-          return readJSONL(dest)
-        fs2.mkdirSync(path2.dirname(dest),{recursive:true})
-        fs2.writeFileSync(dest,'','utf8')
-        for t in value
-          fs2.appendFileSync(dest, JSON.stringify(t)+"\n",'utf8')
-        value
-
-    # ---- JSON ----
-    @addMetaRule "json",
-      /\.json$/i,
-      (key, value) ->
-        dest = path2.join(baseDir, key)
-        if value is undefined
-          return readJSON(dest)
-        writeText(dest, JSON.stringify(value,null,2))
-        value
-
-
-    # ---- csv-path ----
-    parseCSV = (text) ->
-      lines = text.trim().split /\r?\n/
-      return [] unless lines.length
-
-      headers = lines.shift().split ','
-
-      rows = []
-      for line in lines
-        cols = line.split ','
-        obj = {}
-        for h, i in headers
-          obj[h] = cols[i] ? ''
-        rows.push obj
-
-      rows
-
-    stringifyCSV = (obj) ->
-      unless obj? and typeof obj is 'object' and not Array.isArray obj
-        throw new Error "stringifyCSV expects a single object"
-
-      keys   = Object.keys obj
-      values = keys.map (k) ->
-        v = obj[k] ? ''
-        s = String v
-        if /[",\n]/.test s
-          '"' + s.replace(/"/g, '""') + '"'
-        else
-          s
-
-      [
-        keys.join ','
-        values.join ','
-      ].join "\n"
-
-    #
-    @addMetaRule "csv",
-      /\.csv$/,
-      (key, value) ->
-        dest = path2.join baseDir, key
-
-        if value is undefined
-          return undefined unless fs2.existsSync dest
-          return parseCSV fs2.readFileSync(dest,'utf8')
-
-        fs2.mkdirSync path2.dirname(dest), { recursive: true }
-        fs2.writeFileSync dest, stringifyCSV(value)
-        value
-
-    # ---- slash-path ----
-    @addMetaRule "slash",
-      /^(?=.*\/)(?!.*\.[A-Za-z0-9]{1,8}$).+$/,
-      (key, value) ->
-        dest = path2.join(baseDir, key)
-        if value is undefined
-          return readText(dest)
-        fs2.mkdirSync(path2.dirname(dest),{recursive:true})
-        data = if Buffer.isBuffer(value) then value else JSON.stringify(value,null,2)
-        fs2.writeFileSync(dest,data)
-        value
 
   callMLX: (cmdType, payload, dbug = false) ->
     buildArgs = (cmdType, params) ->
@@ -464,16 +358,6 @@ runStep = (n, def, exp, M, S, active) ->
         M.saveThis "done:#{n}", false
         rej new Error(String(errMsg ? "failed"))
 
-    # declarative mlx step: still uses callMLX via memo meta rule
-    if def.run_mlx
-      try
-        entry = def.mlx?.entry ? 'generate'
-        M.saveThis "donkeyButt mlx-lm:#{entry}", def.mlx
-        finish(true)
-      catch e
-        finish(false, e.message)
-      return
-
     script = path.join(EXEC,'scripts',def.run)
 
     # ---- SACRED PATH ----
@@ -508,11 +392,6 @@ runStep = (n, def, exp, M, S, active) ->
       if c is 0 then finish(true) else finish(false, "exit #{c}")
 
 # -------------------------------------------------------------------
-# ADD THIS TO pipeline_runner_clean.coffee
-# Creates params/_global.json and installs M.getStepParam
-# -------------------------------------------------------------------
-
-# --- after Memo class definition, BEFORE main() ---
 
 installGetStepParam = (M) ->
   M.getStepParam = (stepName, key) ->
@@ -523,7 +402,6 @@ installGetStepParam = (M) ->
     return globalP[key] if globalP? and globalP[key]?
 
     undefined
-
 
 # -------------------------------------------------------------------
 # MODIFY main()
@@ -547,6 +425,8 @@ main = ->
   finals = terminalSteps steps
 
   M = new Memo()
+  metaLoader = require path.join(EXEC, 'meta')
+  metaLoader(M, { baseDir: CWD })
   S = new StepStateStore path.join(CWD,'state')
 
   # ---------------- GLOBAL PARAMS (AUTHORITATIVE) ----------------
