@@ -22,11 +22,15 @@ run:
   data_dir: data                               # generic data bucket
   eval_dir: eval_out                           # optional
 
+hf_download:
+  run: kag_oracle/hf_download.coffee
+  
 md2segments:
   run: kag_oracle/md2segments.coffee
   split_mode: story      # or paragraph
   stories_md: /Users/theaiguy/jim_stories/jim.md    # markdown source
   marshalled_stories: data/marshalled_stories.jsonl # md2segments output
+  depends_on: [ hf_download ]
 
 oracle_ask:
   run: kag_oracle/oracle_ask.coffee
@@ -34,12 +38,14 @@ oracle_ask:
   marshalled_stories: data/marshalled_stories.jsonl # md2segments output
   kag_emotions: data/kag_emotions.jsonl       # oracle replies
   max_tokens: 256
+  depends_on: [ hf_download ]
 
 reply_merge:
   run: kag_oracle/reply_merge.coffee
   marshalled_stories: data/marshalled_stories.jsonl # md2segments output
   kag_emotions: data/kag_emotions.jsonl       # oracle replies
   merged_segments: data/merged_segments.jsonl # staging for rotation
+  depends_on: [ hf_download ]
   # no special config
 
 rotate_merged:
@@ -51,6 +57,7 @@ rotate_merged:
   valid_file: loraland/valid.jsonl
   loraLand: loraland
   # no special config
+  depends_on: [ hf_download ]
 
 lora_train:
   run: kag_oracle/lora_train.coffee
@@ -65,6 +72,7 @@ lora_train:
   train_file: loraland/train.jsonl
   valid_file: loraland/valid.jsonl
   loraLand: loraland
+  depends_on: [ hf_download ]
 
 talk_story:
   run: kag_oracle/talk_story.coffee
@@ -74,3 +82,4 @@ talk_story:
   temp: 0.7
   prompt:
     prompt:  we went to Portland and this happened 
+  depends_on: [ hf_download ]

@@ -86,8 +86,8 @@ Continue in the same voice, with emotional honesty and human warmth.
 
       unless isSequential(cur, nxt)
         skipped++
-        #continue
-
+        continue
+      continue unless cur? && cur.prompt?
       newTrain.push
         prompt: mkPrompt(cur)
         completion: nxt.prompt

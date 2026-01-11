@@ -35,6 +35,7 @@ oracle_ask.coffee — Select untagged segments + query MLX emotion oracle
     # ------------------------------------------------------------
     taggedRows = M.theLowdown(emoKey).value ? []
     throw new Error "kag_emotions must be array" unless Array.isArray(taggedRows)
+    console.error "JIM number of tagged rows",taggedRows.length
 
     tagged = new Set()
     for row in taggedRows when row?.meta?
@@ -46,6 +47,7 @@ oracle_ask.coffee — Select untagged segments + query MLX emotion oracle
     pending = []
     for s in segments
       k = "#{s.meta?.doc_id}|#{s.meta?.paragraph_index}"
+      console.error "JIM tagged k?", k, tagged
       continue if tagged.has k
       pending.push s
       break if pending.length >= batchSz

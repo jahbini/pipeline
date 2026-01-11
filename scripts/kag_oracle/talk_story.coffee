@@ -25,6 +25,7 @@ Runs MLX generate BEFORE fuse.
 
     throw new Error "Missing model"    unless modelId?
     throw new Error "Missing loraLand" unless landKey?
+    model_dir = M.theLowdown  "model_dir:#{modelId}"
 
     # ------------------------------------------------------------
     # Story prompt
@@ -35,7 +36,7 @@ Runs MLX generate BEFORE fuse.
     # MLX generate args (adapter applied)
     # ------------------------------------------------------------
     args =
-      model: modelId
+      model: model_dir.value
       prompt: prompt
       "adapter-path": adapterKey
       "max-tokens": maxTokens
@@ -43,7 +44,7 @@ Runs MLX generate BEFORE fuse.
       "top-p": topP
 
     console.log "=== GENERATION ==="
-    console.log prompt
+    console.log args
     console.log "\n--- model output ---\n"
 
     out = M.callMLX "generate", args
