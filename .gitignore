@@ -1,0 +1,16 @@
+node_modules/
+.venv/
+state/
+params/
+override/
+override.yaml
+control_override.yaml
+experiment.yaml
+runtime.sqlite
+tested/
+out/
+env/
+data/
+pipeline.json
+.DS_Store
+*.log

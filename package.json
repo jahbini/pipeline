@@ -1,0 +1,42 @@
+{
+  "name": "@jahbini/pipeline-runner",
+  "version": "0.1.0",
+  "description": "A small dependency-aware step runner for shell-friendly AI experiments. Pipelines declared in YAML; steps coordinate through a shared in-memory Memo with pluggable meta devices.",
+  "main": "pipeline_runner.coffee",
+  "bin": {
+    "pipeline-runner": "bin/pipeline-runner.js"
+  },
+  "files": [
+    "pipeline_runner.coffee",
+    "bin/",
+    "meta/",
+    "scripts/test/",
+    "config/test.yaml",
+    "config/base_ite.yaml",
+    "override.test.yaml",
+    "requirements.txt",
+    "README.md"
+  ],
+  "scripts": {
+    "test:compile": "node -e \"const fs=require('fs'),path=require('path'),cs=require('coffeescript');function walk(d){for(const f of fs.readdirSync(d)){if(f==='node_modules'||f.startsWith('.'))continue;const p=path.join(d,f);if(fs.statSync(p).isDirectory())walk(p);else if(p.endsWith('.coffee'))cs.compile(fs.readFileSync(p,'utf8'),{filename:p});}}walk('.');console.log('compile OK');\"",
+    "test:yaml": "node -e \"const fs=require('fs'),path=require('path'),y=require('js-yaml');function walk(d){for(const f of fs.readdirSync(d)){if(f==='node_modules'||f.startsWith('.'))continue;const p=path.join(d,f);if(fs.statSync(p).isDirectory())walk(p);else if(p.endsWith('.yaml'))y.load(fs.readFileSync(p,'utf8'));}}walk('.');console.log('yaml OK');\"",
+    "test": "npm run test:compile && npm run test:yaml"
+  },
+  "dependencies": {
+    "coffeescript": "^2.7.0",
+    "js-yaml": "^4.1.1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "pipeline",
+    "dag",
+    "step-runner",
+    "mlx",
+    "coffeescript",
+    "ai-experiments"
+  ],
+  "license": "ISC",
+  "author": "jahbini"
+}

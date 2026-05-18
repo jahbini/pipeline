@@ -1,0 +1,54 @@
+# =====================================================================
+#             override.test.yaml  —  worked example: run the test pipeline
+# =====================================================================
+#
+#   This file is the **simplest possible project-level override**. It
+#   selects the `test` recipe (`config/test.yaml`) and provides the
+#   two required params for `step1_setup`. Everything else uses the
+#   defaults baked into the recipe.
+#
+#   How the runner picks an override
+#   ----------------------------------------------------------------
+#   On startup, `pipeline_runner.coffee` §11 looks for the pipeline
+#   name in this order:
+#
+#     1. `control_override.yaml` (preferred) — its `pipeline:` key
+#     2. `override.yaml` (legacy) — its `pipeline:` key
+#
+#   It then looks for per-recipe overrides at `override/<name>.yaml`
+#   (recipe-scoped, the modern path). If a legacy top-level
+#   `override.yaml` exists but no recipe-scoped file, the runner
+#   migrates it on first run.
+#
+#   How to use this example
+#   ----------------------------------------------------------------
+#   Pick ONE of these activation methods:
+#
+#     # (A) symlink as the legacy top-level override (auto-migrates):
+#     ln -s override.test.yaml override.yaml
+#
+#     # (B) place it directly at the recipe-scoped path:
+#     mkdir -p override && cp override.test.yaml override/test.yaml
+#     printf 'pipeline: test\n' > control_override.yaml
+#
+#   Then:
+#
+#     coffee pipeline_runner.coffee
+#
+#   The test pipeline writes its artifacts to `tested/*.json|yaml|csv`
+#   and creates a `runtime.sqlite` for the sqlite-meta step.
+#
+#   What you can override here
+#   ----------------------------------------------------------------
+#   Any step's keys can be overridden in this file under the step's
+#   name. Deep-merged into the recipe's step block; setting a key to
+#   `null` deletes it.
+#
+
+pipeline: test
+
+# Step-1 parameters. `step1_setup` declares no defaults for these in
+# the recipe, so the override is the supply.
+step1_setup:
+  greeting: "hello"
+  value: 42

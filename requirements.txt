@@ -1,0 +1,19 @@
+# =====================================================================
+#   requirements.txt — minimal MLX surface
+# =====================================================================
+#
+#   Only three packages are pinned. The runner's startup check
+#   (validatePythonEnvironment in pipeline_runner.coffee §2) verifies
+#   that exactly these three are installed at exactly these versions
+#   in the project's .venv. Transitive deps are left to pip to
+#   resolve; that's what keeps the install small and the failure
+#   surface honest.
+#
+#   We are NOT shipping a Python distribution. If a project needs
+#   additional Python packages, it owns its own .venv extension —
+#   add them to a project-local requirements.txt and install
+#   alongside these.
+#
+mlx==0.31.1
+mlx-lm==0.31.2
+mlx-metal==0.31.1

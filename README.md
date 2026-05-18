@@ -1,0 +1,127 @@
+# @jahbini/pipeline-runner
+
+A small dependency-aware step runner for shell-friendly AI experiments.
+Pipelines are declared in YAML; each step declares what it `needs`, what
+it `makes`, and what it `depends_on`. The runner topologically sorts the
+DAG, wires artifacts between steps through a shared in-memory store
+(the *Memo*), and records per-step state to disk so an interrupted run
+can be resumed.
+
+The code is annotated in the Backbone/Underscore Docco style — every
+section opens with prose that explains why the code looks the way it
+does. Read [`pipeline_runner.coffee`](pipeline_runner.coffee) front to
+back as the canonical tour.
+
+## Install
+
+```sh
+mkdir my-pipeline-project && cd my-pipeline-project
+npm init -y
+npm install @jahbini/pipeline-runner
+```
+
+That gives you the runner and its two npm dependencies
+(`coffeescript`, `js-yaml`). Total `node_modules/` footprint is a few
+MB.
+
+## First run — the teaching pipeline
+
+The shipped `test` pipeline is nine steps, each chosen to demonstrate a
+different mechanism (source step, needs/makes, async work, subprocess
+calls, sqlite request keys). It runs end-to-end in under a minute.
+
+```sh
+# 1. Drop the example override at the project root. This is the
+#    ONE artifact a project actually needs to commit.
+cp node_modules/@jahbini/pipeline-runner/override.test.yaml ./override.yaml
+
+# 2. Create a Python virtualenv with MLX pinned to the versions
+#    the runner expects. (Only required if you'll use the MLX
+#    surface — the test pipeline's step7 spawns Python.)
+python3 -m venv .venv
+./.venv/bin/pip install --upgrade pip setuptools wheel
+./.venv/bin/pip install -r node_modules/@jahbini/pipeline-runner/requirements.txt
+
+# 3. Run it.
+npx pipeline-runner
+```
+
+You should see eight step banners, then a friendly hand-off message
+from `step9_handoff` explaining what to do next. That message is the
+pipeline's way of saying "now it's your opportunity."
+
+## Make it yours
+
+The runner looks for these directories in your project root and
+**merges them with the shipped versions**:
+
+| dir            | what it's for                                               | who wins on conflict |
+|----------------|-------------------------------------------------------------|----------------------|
+| `config/`      | pipeline recipes (YAML)                                     | project              |
+| `override/`    | per-recipe overrides — params, swapped step lists           | project              |
+| `scripts/`     | step implementations (`.coffee` with `@step =` export)      | project              |
+| `meta/`        | custom meta devices (extra file formats, DB backends, …)    | project              |
+
+**None of these are scaffolded automatically.** You `mkdir` them only
+when you actually need them. A project that just wants to run the
+shipped pipelines and override their params needs only `override.yaml`.
+
+### Override a step
+Drop a file at `scripts/<step_name>.coffee` exporting a `@step =` block.
+The runner prefers project scripts over module-shipped ones, so you
+can override or extend behavior without forking.
+
+### Add a recipe
+Drop a recipe at `config/<myname>.yaml`. Use
+`include: [base_ite.yaml]` to inherit the bootstrap steps shipped by
+the runner. Point your `override.yaml` at it via `pipeline: myname`.
+
+### Add a meta device
+Drop a `meta/<myname>.coffee` exporting a function that calls
+`memo.addMetaRule(name, regex, handler)`. Project meta devices load
+alongside the shipped ones; project wins on filename collision.
+First regex match wins for any given key, so don't write a regex
+broader than `meta/slash.coffee`'s catch-all.
+
+## What the runner won't do
+
+- **Manage your Python install.** The MLX surface (validation at
+  startup, `callMLX`) is currently in the runner core. We ship a
+  minimal `requirements.txt` (three packages — `mlx`, `mlx-lm`,
+  `mlx-metal` — at pinned versions). Beyond that, your project owns
+  its own `.venv` extensions. If you need additional Python
+  packages, add them to a project-local `requirements.txt` and
+  install alongside.
+- **Persist state to a remote.** All state lives in `state/` and
+  `runtime.sqlite` under your project root. Bring your own
+  backup/replication if you need it.
+- **Manage secrets.** Use the standard
+  `export FOO=bar` / `.envrc` / `direnv` patterns. The runner sees
+  `process.env`.
+
+## Roadmap
+
+The current shape works but several seams are intentionally left for
+future extraction:
+
+- **MLX as a plugin.** The `validatePythonEnvironment` and `callMLX`
+  pieces should leave the core and become an opt-in
+  `@jahbini/pipeline-runner-mlx` package. Non-MLX projects (data
+  wrangling, web scraping, code review pipelines) shouldn't need
+  Python.
+- **`pipeline-runner init` subcommand.** Currently you copy
+  `override.test.yaml` by hand. An `init` subcommand should write
+  it for you, plus the `package.json` script entry and `.gitignore`
+  additions.
+- **First-run welcome.** If there's no `override.yaml` and no
+  `control_override.yaml`, the runner errors. It should instead
+  write a starter `override.yaml` pointing at `pipeline: test` and
+  proceed, so a fresh `npm install` + `npx pipeline-runner` works
+  in two commands instead of three.
+- **`env/*` keys shouldn't materialize.** The runner currently
+  writes `env/CWD`, `env/EXEC`, etc. into a real `env/` directory
+  via the slash meta. They should be in-memory only.
+
+## License
+
+ISC. See [LICENSE](LICENSE).

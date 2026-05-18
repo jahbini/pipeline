@@ -1,0 +1,83 @@
+# =====================================================================
+#                     base_ite.yaml  —  the include base for _ite recipes
+# =====================================================================
+#
+#   Every `_ite.yaml` recipe in this directory starts with `include:
+#   [base_ite.yaml]`. This file is therefore the canonical shape of an
+#   _ite pipeline: shared `run:` defaults, shared artifacts, and the
+#   handful of bootstrapping steps every iterative pipeline needs to
+#   run first.
+#
+#   `run:` block — pipeline-global params
+#   ----------------------------------------------------------------
+#   Anything under `run:` is written to the Memo key
+#   `params/_global.yaml` and is visible to every step via
+#   `L.param(key)` (with step-local params taking precedence). Use
+#   `run:` for things every step shares: the base model, the output
+#   directory, the debug toggles.
+#
+#   `debug_s` / `debug_mlx` / `debug_sql` are the three debug knobs
+#   built into the runner:
+#     - debug_s   → per-step ledger trace (need/make/param/peek lines)
+#     - debug_mlx → log full MLX subprocess args before each callMLX
+#     - debug_sql → log every sqlite request key and projection
+#
+#   `artifacts:` block — the wiring table
+#   ----------------------------------------------------------------
+#   Each artifact has either a `source:` (file the artifact is read
+#   from), a `target:` (file the artifact is written to), or a
+#   `value:` (literal). Steps only see artifact *names* in their
+#   `needs:`/`makes:`; the runner translates name → file via this
+#   table. Add a new artifact here once, reference it from any step.
+#
+run:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  output_dir: out
+  data_dir: data
+  training_dir: build/train
+  loraLand: build/model
+  debug_s: false
+  debug_mlx: false
+  debug_sql: false
+
+artifacts:
+  stories_md:
+    source: data/jim.md
+  story_seed_ids:
+    target: out/story_seed_ids.json
+
+# Bootstrap steps every _ite pipeline runs before its own work. A
+# child recipe can disable any of these by setting `depends_on: never`
+# in its override block.
+
+reset_base_environment_ite:
+  run: story/reset_base_environment_ite.coffee
+  depends_on: []
+  needs: []
+  makes: []
+
+download_model:
+  run: story/hf_download.coffee
+  depends_on: [reset_base_environment_ite]
+  needs: []
+  makes: []
+  loraLand: build/model
+
+quantize_model:
+  debug_s: true
+  run: kag_oracle/quantize_model.coffee
+  depends_on: [download_model]
+  needs: []
+  makes: []
+  source_model_dir: build/model
+  quantized_model_dir: build/model4
+  quantized_model_memo_key: quantizedModelDir
+  mlx:
+    quantize: null
+    q-bits: 4
+
+seed_story_sqlite:
+  run: kag_oracle_ite/seed_story_sqlite.coffee
+  depends_on: [quantize_model]
+  needs: [stories_md]
+  makes: [story_seed_ids]

@@ -1,0 +1,154 @@
+# =====================================================================
+#                     test.yaml  —  the teaching pipeline
+# =====================================================================
+#
+#   This is the **demo recipe** for the pipeline runner. Nine steps,
+#   each chosen to demonstrate a different mechanism, run end-to-end
+#   in under a minute. Use this file as the worked example when
+#   teaching someone what a pipeline declaration looks like.
+#
+#   How to run
+#   ----------------------------------------------------------------
+#   At a project root with a `.venv/` already provisioned:
+#
+#       cp override.test.yaml override/test.yaml   # or symlink
+#       coffee pipeline_runner.coffee
+#
+#   The override picks the pipeline name; everything else flows from
+#   this file.
+#
+#   What each step demonstrates
+#   ----------------------------------------------------------------
+#   1. step1_setup     — source step (no needs, only makes)
+#   2. step2_transform — single need + single make (the common case)
+#   3. step3_table     — artifact destined for a meta projection
+#   4. step4_wait      — truly-async step (returns a Promise)
+#   5. step5_finalize  — multi-input, fan-out to multiple artifacts
+#   6. test6_curl      — external subprocess (curl), error capture
+#   7. test7_python    — invoke the project Python interpreter
+#   8. test8_sqlite    — full sqlite meta exercise (writes + projections)
+#   9. step9_handoff   — side-effect-only sign-off; friendly first-run UX
+#
+#   `artifacts:` table — name → target file mapping. Every entry
+#   below has only `target:` because the test steps generate their
+#   own data; a real recipe usually has at least one `source:` entry
+#   pointing at input data on disk.
+
+run:
+  output_dir: out
+  data_dir: data
+  params_dir: params
+
+artifacts:
+  input_data:
+    target: tested/input.json
+  transformed_data:
+    target: tested/transformed.json
+  summary_row:
+    target: tested/table.json
+  wait_data:
+    target: tested/wait.json
+  final_summary_json:
+    target: tested/final_summary.json
+  final_summary_yaml:
+    target: tested/final_summary.yaml
+  final_summary_csv:
+    target: tested/final_summary.csv
+  curl_result:
+    target: tested/curl_result.json
+  python_result:
+    target: tested/python_result.json
+  sql_validation:
+    target: tested/sql_validation.json
+
+# ------------------------------------------------------------
+# Step 1 — generate input
+# ------------------------------------------------------------
+step1_setup:
+  run: test/step1_setup.coffee
+  depends_on: []
+  needs: []
+  makes: [input_data]
+  greeting: "hello"
+  value: 42
+
+# ------------------------------------------------------------
+# Step 2 — transform input
+# ------------------------------------------------------------
+step2_transform:
+  run: test/step2_transform.coffee
+  depends_on: [step1_setup]
+  needs: [input_data]
+  makes: [transformed_data]
+
+# ------------------------------------------------------------
+# Step 3 — derive tabular summary
+# ------------------------------------------------------------
+step3_table:
+  run: test/step3_table.coffee
+  depends_on: [step2_transform]
+  needs: [transformed_data]
+  makes: [summary_row]
+
+# ------------------------------------------------------------
+# Step 4 — wait / synchronization test
+# ------------------------------------------------------------
+step4_wait:
+  run: test/step4_wait.coffee
+  depends_on: [step3_table]
+  needs: []
+  makes: [wait_data]
+
+# ------------------------------------------------------------
+# Step 5 — finalize outputs
+# ------------------------------------------------------------
+step5_finalize:
+  run: test/step5_finalize.coffee
+  depends_on: [step4_wait]
+  needs: [input_data, transformed_data, wait_data]
+  makes: [final_summary_json, final_summary_yaml, final_summary_csv]
+
+# ------------------------------------------------------------
+# Step 6 — external curl test
+# ------------------------------------------------------------
+test6_curl:
+  run: test/step6_curl.coffee
+  depends_on: [step5_finalize]
+  needs: [final_summary_json]
+  makes: [curl_result]
+  desc: "Spawn a bash curl command to verify external process integration"
+
+# ------------------------------------------------------------
+# Step 7 — python process test
+# ------------------------------------------------------------
+test7_python:
+  run: test/step7_python.coffee
+  depends_on: [test6_curl]
+  needs: [curl_result]
+  makes: [python_result]
+  desc: "Spawn a Python subprocess and capture output"
+
+# ------------------------------------------------------------
+# Step 8 — sqlite meta request-key validation
+# ------------------------------------------------------------
+test8_sqlite:
+  run: test/step8_sqlite.coffee
+  depends_on: [test7_python]
+  needs: [python_result]
+  makes: [sql_validation]
+  desc: "Validate sqlite-backed meta request keys and read projections"
+
+# ------------------------------------------------------------
+# Step 9 — graceful sign-off
+# ------------------------------------------------------------
+# A side-effect-only step: no needs:, no makes:, just prints a
+# friendly orientation message after the rest of the pipeline has
+# succeeded. This is what a fresh `npx pipeline-runner init` shows
+# the user on their very first run, instead of failing on a
+# placeholder pipeline name.
+step9_handoff:
+  run: test/step9_handoff.coffee
+  depends_on: [test8_sqlite]
+  needs: []
+  makes: []
+  desc: "Print a friendly hand-off message after the test pipeline succeeds"
