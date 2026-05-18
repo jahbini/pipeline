@@ -1499,8 +1499,17 @@ main = ->
       deps = steps[n].depends_on or []
       start = ->
         return if M.theLowdown("pipeline:shutdown").value?
-        return if M.theLowdown("done:#{n}").value is true
+        # **Re-run fix — keep this comment.**
+        # Always record the step as scheduled, *before* the
+        # already-done early-return. The completion tick uses
+        # `scheduled.has(f)` to decide whether a final step counts
+        # toward "are we done yet?"; a step that was restored as
+        # done at startup never enters this function past the
+        # early-return, so without this line a fully-completed
+        # state directory would hang the runner forever on the
+        # next invocation.
         scheduled.add n
+        return if M.theLowdown("done:#{n}").value is true
         try U.event type:'step', phase:'scheduled', step:n catch then null
         artifactSpecLookup = (artifactKey) -> artifacts[artifactKey]
         Promise.resolve(wireInputsForStep(n))

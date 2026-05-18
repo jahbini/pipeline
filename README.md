@@ -142,14 +142,6 @@ future extraction:
 - **`env/*` keys shouldn't materialize.** The runner currently
   writes `env/CWD`, `env/EXEC`, etc. into a real `env/` directory
   via the slash meta. They should be in-memory only.
-- **Re-run hangs on a fully-completed state directory.** If every
-  step is restored as `done:true` at startup, no step actually
-  runs, so the `scheduled` set stays empty. The completion-tick
-  checks `scheduled.has(f)` before checking the Memo, decides
-  "not done," and recurses every 2 s forever. Workaround: delete
-  `state/` (or `npm run clean` in your project) before re-running.
-  Fix is small — the tick should consult the Memo's `done:<step>`
-  key directly rather than gating on `scheduled.has`.
 
 ## License
 
