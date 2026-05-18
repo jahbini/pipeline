@@ -1,0 +1,116 @@
+# =====================================================================
+#   diary_translate_ite.yaml  —  diary translation experiment
+# =====================================================================
+#   Sibling of `diary_ite.yaml`. Translates previously-generated
+#   diary entries using a trained adapter and records the result for
+#   evaluation. Same shape as the other _ite recipes; differences
+#   live in the step list at the bottom.
+
+run:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  output_dir: out
+  data_dir: data
+  training_dir: build/train
+  loraLand: build/model
+  debug_s: false
+  debug_mlx: false
+  debug_sql: false
+
+artifacts:
+  story_library:
+    target: out/story_library.json
+  story_recipe:
+    target: out/story_recipe.json
+  story_parts:
+    target: out/story_parts.json
+  diary_kag:
+    target: out/diary_kag.json
+  diary_prompt_text:
+    target: out/diary_prompt.txt
+  diary_adapted_raw:
+    target: out/diary_adapted_raw.txt
+  diary_base_raw:
+    target: out/diary_base_raw.txt
+  diary_adapted_meta:
+    target: out/diary_adapted_meta.json
+  diary_base_meta:
+    target: out/diary_base_meta.json
+  diary_adapted_text:
+    target: out/diary_adapted.txt
+  diary_base_text:
+    target: out/diary_base.txt
+
+load_library:
+  run: story/load_library.coffee
+  depends_on: []
+  needs: []
+  makes: [story_library]
+  library_file: data/jim_story_library.yaml
+
+select_story_recipe:
+  run: story/select_story_recipe.coffee
+  depends_on: [load_library]
+  needs: [story_library]
+  makes: [story_recipe]
+  scene: [ UI_dropdown, data/jim_story_library.yaml/library/scenes ]
+  arrival: [ UI_dropdown, data/jim_story_library.yaml/library/characters ]
+  disturbance: [ UI_dropdown, data/jim_story_library.yaml/library/disturbances ]
+  reflection: [ UI_dropdown, data/jim_story_library.yaml/library/reflections ]
+  realization: [ UI_dropdown, data/jim_story_library.yaml/library/realizations ]
+
+resolve_story_parts:
+  run: story/resolve_story_parts.coffee
+  depends_on: [select_story_recipe]
+  needs: [story_library, story_recipe]
+  makes: [story_parts]
+
+collect_diary_kag_ite:
+  run: diary_ite/collect_diary_kag_ite.coffee
+  depends_on: [resolve_story_parts]
+  needs: [story_parts]
+  makes: [diary_kag]
+  per_event_match_limit: 3
+  scene_emotion: [ UI_dropdown, db/kag_keywords, "" ]
+  arrival_emotion: [ UI_dropdown, db/kag_keywords, "" ]
+  disturbance_emotion: [ UI_dropdown, db/kag_keywords, "" ]
+  reflection_emotion: [ UI_dropdown, db/kag_keywords, "" ]
+  realization_emotion: [ UI_dropdown, db/kag_keywords, "" ]
+
+build_diary_prompt_ite:
+  run: diary_ite/build_diary_prompt_ite.coffee
+  depends_on: [collect_diary_kag_ite]
+  needs: [story_parts, diary_kag]
+  makes: [diary_prompt_text]
+
+generate_diary_without_adapter_ite:
+  run: diary_ite/generate_diary_without_adapter_ite.coffee
+  depends_on: [build_diary_prompt_ite]
+  needs: [story_parts, diary_prompt_text]
+  makes: [diary_base_raw, diary_base_meta, diary_base_text]
+  quantized_model_dir: build/model4
+  mlx:
+    max-tokens: 2000
+    temp: 0.7
+
+translate_diary_with_adapter_ite:
+  run: diary_ite/translate_diary_with_adapter_ite.coffee
+  depends_on: [never]
+  needs: [story_parts, diary_base_text]
+  makes: [diary_adapted_raw, diary_adapted_meta, diary_adapted_text]
+  adapter_path: build/adapter
+  quantized_model_dir: build/model4
+  translation_prompt_text: >
+    You are writing in the narrative voice of Jim from St. John's.
+
+    Translate this diary story into how Jim would say it.
+    Preserve the same events, order, and factual content.
+    Keep the paragraph structure.
+    Do not summarize.
+    Do not omit event beats.
+    Return only the rewritten diary entry.
+
+    Diary story to translate:
+    {diary_text}
+  mlx:
+    max-tokens: 2000
+    temp: 0.7

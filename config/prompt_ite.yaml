@@ -1,0 +1,44 @@
+# =====================================================================
+#   prompt_ite.yaml  —  iterative prompt-generation pipeline
+# =====================================================================
+#   Generates new story-seed prompts from a configurable instruction
+#   template. The smallest _ite recipe — useful as a reference for
+#   the minimum step count and artifact wiring needed for an
+#   iterative pipeline.
+#
+#   **Note:** the upstream recipe also has a `generate_prompt_rusty_ite`
+#   step that drives a native Rust bridge for sustained inference. That
+#   step (and its `prompt_rusty_*` artifacts) is omitted here because
+#   the rusty bridge isn't shipped with the runner. If you want it,
+#   install the bridge in your project and re-add the step from the
+#   upstream writeStory repo.
+
+run:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  output_dir: out
+  data_dir: data
+  training_dir: build/train
+  loraLand: build/model
+  debug_s: false
+  debug_mlx: false
+  debug_sql: false
+
+artifacts:
+  prompt_generate_raw:
+    target: out/prompt_generate_raw.txt
+  prompt_generate_meta:
+    target: out/prompt_generate_meta.json
+  prompt_generate_text:
+    target: out/prompt_generate.txt
+
+generate_prompt_ite:
+  run: prompt_ite/generate_prompt_ite.coffee
+  depends_on: []
+  needs: []
+  makes: [prompt_generate_raw, prompt_generate_meta, prompt_generate_text]
+  quantized_model_dir: build/model4
+  output_file_prefix: prompt_generate
+  prompt_text: [ UI_textarea, "" ]
+  mlx:
+    max-tokens: 1600
+    temp: 0.7

@@ -10,9 +10,8 @@
     "pipeline_runner.coffee",
     "bin/",
     "meta/",
-    "scripts/test/",
-    "config/test.yaml",
-    "config/base_ite.yaml",
+    "scripts/",
+    "config/",
     "override.test.yaml",
     "requirements.txt",
     "README.md"

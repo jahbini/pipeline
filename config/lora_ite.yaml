@@ -1,0 +1,70 @@
+# =====================================================================
+#   lora_ite.yaml  —  iterative LoRA adapter training pipeline
+# =====================================================================
+#   Selects untrained-or-stale stories, builds a LoRA dataset,
+#   spawns `mlx_lm.lora`, and records the training run. Designed to
+#   be re-run repeatedly — each invocation picks up where the last
+#   left off via the `lora_cycle_state` artifact.
+
+run:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  output_dir: out
+  data_dir: data
+  training_dir: build/train
+  loraLand: build/model
+  debug_s: false
+  debug_mlx: false
+  debug_sql: false
+
+artifacts:
+  lora_cycle_state:
+    target: out/lora_cycle_state.json
+  lora_remaining_count:
+    target: out/lora_remaining_count.json
+  selected_story_ids:
+    target: out/selected_story_ids.json
+  train_rows:
+    target: build/train/train.jsonl
+  valid_rows:
+    target: build/train/valid.jsonl
+  test_rows:
+    target: build/train/test.jsonl
+  lora_stdout:
+    target: out/lora_train.txt
+  lora_run_record:
+    target: out/lora_run_record.json
+  trained_story_ids:
+    target: out/trained_story_ids.json
+
+select_lora_stories_ite:
+  run: lora_ite/select_lora_stories_ite.coffee
+  depends_on: []
+  needs: []
+  makes: [lora_cycle_state, lora_remaining_count, selected_story_ids]
+  batch_size: 4
+
+build_lora_dataset_ite:
+  run: lora_ite/build_lora_dataset_ite.coffee
+  depends_on: [select_lora_stories_ite]
+  needs: [selected_story_ids]
+  makes: [train_rows, valid_rows, test_rows]
+
+run_lora_train_ite:
+  run: lora_ite/run_lora_train_ite.coffee
+  depends_on: [build_lora_dataset_ite]
+  needs: [lora_cycle_state, selected_story_ids, train_rows, valid_rows, test_rows]
+  makes: [lora_stdout, lora_run_record]
+  test_only: false
+  adapter_path: build/adapter
+  resume_adapter_file: build/adapter/adapters.safetensors
+  mlx:
+    batch-size: 1
+    iters: 20
+    max-seq-length: 2048
+    learning-rate: 0.00005
+
+record_lora_training_ite:
+  run: lora_ite/record_lora_training_ite.coffee
+  depends_on: [run_lora_train_ite]
+  needs: [lora_run_record]
+  makes: [trained_story_ids]

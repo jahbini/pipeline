@@ -50,6 +50,27 @@ You should see eight step banners, then a friendly hand-off message
 from `step9_handoff` explaining what to do next. That message is the
 pipeline's way of saying "now it's your opportunity."
 
+## Starting-point recipes (the `_ite` family)
+
+Beyond the teaching pipeline, the runner ships a set of *iterative*
+recipes pulled from the source project as starting points. They live
+in `config/*_ite.yaml` with step scripts under `scripts/*_ite/`:
+
+| recipe                       | what it does                                          |
+|------------------------------|-------------------------------------------------------|
+| `diary_ite.yaml`             | walks a story library, generates diary entries with and without a trained LoRA adapter for A/B comparison |
+| `diary_translate_ite.yaml`   | rewrites previously-generated diary entries through a trained adapter |
+| `lora_ite.yaml`              | selects untrained stories, builds a LoRA dataset, spawns `mlx_lm.lora`, records the run |
+| `oracle_ite.yaml`            | extracts KAG (keyword + headline) rows from raw stories via an oracle model, with backoff on failure |
+| `prompt_ite.yaml`            | generates new story-seed prompts from an instruction template |
+
+**These are templates, not turnkey pipelines.** Several reference
+supporting scripts (`scripts/story/*.coffee`, etc.) that are NOT
+shipped with the runner — those are project-specific content that
+stays in the upstream `writeStory` repo. Use these recipes as
+worked examples of what an iterative MLX/sqlite pipeline looks
+like; copy + adapt the steps and configs into your own project.
+
 ## Make it yours
 
 The runner looks for these directories in your project root and
@@ -121,6 +142,14 @@ future extraction:
 - **`env/*` keys shouldn't materialize.** The runner currently
   writes `env/CWD`, `env/EXEC`, etc. into a real `env/` directory
   via the slash meta. They should be in-memory only.
+- **Re-run hangs on a fully-completed state directory.** If every
+  step is restored as `done:true` at startup, no step actually
+  runs, so the `scheduled` set stays empty. The completion-tick
+  checks `scheduled.has(f)` before checking the Memo, decides
+  "not done," and recurses every 2 s forever. Workaround: delete
+  `state/` (or `npm run clean` in your project) before re-running.
+  Fix is small — the tick should consult the Memo's `done:<step>`
+  key directly rather than gating on `scheduled.has`.
 
 ## License
 
