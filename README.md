@@ -50,6 +50,35 @@ You should see eight step banners, then a friendly hand-off message
 from `step9_handoff` explaining what to do next. That message is the
 pipeline's way of saying "now it's your opportunity."
 
+## UI (optional)
+
+The runner ships an HTTP UI that watches `state/ui-events.jsonl` and
+`state/ui-run.json`, lets you pick a recipe, launch a run, watch
+step lifecycles in real time, and inspect artifacts.
+
+The UI is split deliberately:
+
+- **The server** (`ui_server.coffee`) stays in the package. It's
+  infrastructure; most projects won't modify it.
+- **The static frontend** (`ui/index.html`) is *project-owned* —
+  copied into your project root at install time so you can
+  customize branding, add panels, swap libraries, whatever — without
+  forking the runner. Updates to the package don't overwrite your
+  edits.
+
+```sh
+# One-time: copy the shipped ui/ into your project root.
+npx pipeline-runner ui:init        # use --force to overwrite later
+
+# Start the server (default port 4311; override via UI_PORT).
+npx pipeline-runner ui             # then open http://127.0.0.1:4311
+```
+
+The server resolves the static frontend project-first: `CWD/ui/`
+wins, falling back to the package's `ui/` only if you haven't
+run `ui:init` yet. So a fresh install works immediately, and your
+edits stick once you've initialized.
+
 ## Starting-point recipes (the `_ite` family)
 
 Beyond the teaching pipeline, the runner ships a set of *iterative*
@@ -82,6 +111,7 @@ The runner looks for these directories in your project root and
 | `override/`    | per-recipe overrides — params, swapped step lists           | project              |
 | `scripts/`     | step implementations (`.coffee` with `@step =` export)      | project              |
 | `meta/`        | custom meta devices (extra file formats, DB backends, …)    | project              |
+| `ui/`          | static frontend (`index.html`) for the optional UI server   | project              |
 
 **None of these are scaffolded automatically.** You `mkdir` them only
 when you actually need them. A project that just wants to run the

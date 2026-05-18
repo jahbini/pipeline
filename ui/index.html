@@ -1,0 +1,1168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pipeline Monitor</title>
+  <style>
+    :root {
+      --bg: #f2efe8;
+      --ink: #1d221f;
+      --muted: #6b726d;
+      --panel: #fffdf8;
+      --line: #d7d1c2;
+      --accent: #145a46;
+      --warn: #8a5a00;
+      --bad: #8a1f2a;
+      --good: #1f6a3a;
+      --mono: "SFMono-Regular", Menlo, Consolas, monospace;
+      --sans: "Avenir Next", "Helvetica Neue", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #fdf8ea 0, transparent 30%),
+        linear-gradient(180deg, #f4f1e9 0%, #ebe6da 100%);
+    }
+    .wrap {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1, h2 { margin: 0 0 12px; }
+    h1 { font-size: 34px; letter-spacing: 0.02em; }
+    h2 { font-size: 16px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    .column {
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 4px 18px rgba(43, 45, 40, 0.06);
+    }
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .status {
+      font-size: 13px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .status.running { color: var(--accent); border-color: #9dc5b8; background: #edf8f4; }
+    .status.done { color: var(--good); border-color: #aad2b0; background: #eef9ef; }
+    .status.failed, .status.shutdown { color: var(--bad); border-color: #d5a1a8; background: #fff1f3; }
+    .kv {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 6px 10px;
+      font-size: 14px;
+    }
+    .kv .k { color: var(--muted); }
+    .steps {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    .steps th, .steps td {
+      padding: 8px 6px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    .steps th { color: var(--muted); font-weight: 600; }
+    .mono { font-family: var(--mono); }
+    .events {
+      display: grid;
+      gap: 8px;
+      max-height: 420px;
+      overflow: auto;
+    }
+    .event {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: #fff;
+      font-size: 13px;
+    }
+    .event .top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 4px;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.4 var(--mono);
+      background: #171917;
+      color: #f2f0e8;
+      border-radius: 12px;
+      padding: 12px;
+      max-height: 320px;
+      overflow: auto;
+    }
+    .files {
+      display: grid;
+      gap: 6px;
+      font-size: 14px;
+    }
+    .files .stale {
+      color: #9a9a9a;
+    }
+    .files .fresh {
+      color: var(--ink);
+    }
+    .file.clickable {
+      cursor: pointer;
+    }
+    .controls {
+      display: grid;
+      gap: 12px;
+    }
+    .controls-group {
+      display: grid;
+      gap: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .controls-group:first-of-type {
+      padding-top: 0;
+      border-top: 0;
+    }
+    .controls-group h3 {
+      margin: 0;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    .controls label {
+      display: grid;
+      gap: 6px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .controls .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      color: var(--ink);
+    }
+    .controls label.inline {
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 10px;
+    }
+    .controls select, .controls button {
+      font: 14px var(--sans);
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+    }
+    .controls textarea {
+      font: 13px/1.45 var(--mono);
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      min-height: 260px;
+      resize: vertical;
+    }
+    .yaml-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .yaml-pane {
+      display: grid;
+      gap: 8px;
+    }
+    .yaml-readonly {
+      background: #f4efe4;
+      color: #4a504d;
+    }
+    .controls button {
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .controls button[disabled] {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    .danger-button {
+      background: var(--bad) !important;
+    }
+    .hint {
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .death-box {
+      border: 1px solid #d5a1a8;
+      background: #fff1f3;
+      border-radius: 12px;
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .death-box.hidden {
+      display: none;
+    }
+    .button-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .file {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 6px;
+    }
+    .modal-shell {
+      position: fixed;
+      inset: 0;
+      background: rgba(18, 20, 18, 0.42);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 50;
+    }
+    .modal-shell.open {
+      display: flex;
+    }
+    .modal {
+      width: min(1100px, 96vw);
+      max-height: 88vh;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 16px 48px rgba(26, 28, 25, 0.22);
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+    .modal-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: #f7f3ea;
+    }
+    .modal-close {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font: 14px var(--sans);
+      cursor: pointer;
+    }
+    .modal-body {
+      padding: 16px;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .hero { flex-direction: column; align-items: start; }
+      .yaml-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div>
+        <h1>Pipeline Monitor</h1>
+        <div id="subtitle" class="mono"></div>
+      </div>
+      <div id="run-status" class="status">unknown</div>
+    </div>
+
+    <div class="grid">
+      <div class="column">
+        <section class="panel">
+          <h2>Pipeline Death</h2>
+          <div id="pipeline-death-box" class="death-box hidden">
+            <div id="pipeline-death-text" class="mono"></div>
+            <div class="button-row">
+              <button id="clear-pipeline-state-button" class="danger-button" type="button">Erase pipeline.json</button>
+            </div>
+          </div>
+          <div id="pipeline-death-empty" class="hint mono">no pipeline.json death message</div>
+        </section>
+
+        <section class="panel">
+          <h2>Outputs</h2>
+          <div id="out-files" class="files"></div>
+          <h2 style="margin-top:16px;">Diary Files</h2>
+          <div id="diary-files" class="files"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Steps</h2>
+          <table class="steps">
+            <thead>
+              <tr><th>Step</th><th>Status</th><th>Updated</th></tr>
+            </thead>
+            <tbody id="steps-body"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Latest Err</h2>
+          <pre id="latest-err"></pre>
+        </section>
+
+        <section class="panel">
+          <h2>Latest Log</h2>
+          <pre id="latest-log"></pre>
+        </section>
+      </div>
+
+      <div class="column">
+        <section class="panel">
+          <h2>Controls</h2>
+          <div class="controls">
+            <div class="controls-group">
+              <h3>Pipe</h3>
+              <div id="pipe-current" class="mono"></div>
+              <label>
+                Switch UI To Pipe
+                <select id="pipe-select"></select>
+              </label>
+              <button id="switch-pipe-button" type="button">Switch Pipe UI</button>
+              <button id="merge-pipe-button" type="button">Merge Adapter And SQLite From Other Machine</button>
+              <div id="merge-result" class="hint mono"></div>
+              <div id="merge-status" class="hint mono"></div>
+            </div>
+
+            <div class="controls-group">
+              <h3>Run</h3>
+              <label>
+                Recipe Selector
+                <select id="pipeline-select"></select>
+              </label>
+              <div id="run-kv" class="kv"></div>
+              <label class="checkbox-row">
+                <input id="continuous-checkbox" type="checkbox">
+                <span>Restart after cooldown until pipeline shutdown</span>
+              </label>
+              <label>
+                Cooldown Seconds
+                <select id="continuous-delay-select">
+                  <option value="60">60</option>
+                  <option value="20">20</option>
+                </select>
+              </label>
+              <button id="launch-button" type="button">Write Override And Run</button>
+              <button id="kill-button" type="button">Kill Run</button>
+              <div id="launch-result" class="hint mono"></div>
+            </div>
+
+            <div class="controls-group">
+              <h3>Recipe And Overrides</h3>
+              <div>
+                <div class="hint" style="margin-bottom:6px;">Recipe UI Fields</div>
+                <div id="ui-fields" class="controls"></div>
+              </div>
+              <div class="hint" style="margin-bottom:10px;">
+                Recipe is the background. Human override stays separate. UI writes control_override. experiment.yaml is the effective next run.
+              </div>
+              <div class="yaml-grid">
+                <div class="yaml-pane">
+                  <label>
+                    Recipe Background
+                    <textarea id="recipe-viewer" class="yaml-readonly" spellcheck="false" readonly></textarea>
+                  </label>
+                </div>
+                <div class="yaml-pane">
+                  <label>
+                    Human Override
+                    <textarea id="human-override-editor" spellcheck="false"></textarea>
+                  </label>
+                  <div id="human-override-status" class="hint mono"></div>
+                </div>
+                <div class="yaml-pane">
+                  <label>
+                    UI Control Override
+                    <textarea id="control-override-viewer" class="yaml-readonly" spellcheck="false" readonly></textarea>
+                  </label>
+                  <div id="control-override-status" class="hint mono"></div>
+                </div>
+                <div class="yaml-pane">
+                  <label>
+                    Effective experiment.yaml
+                    <textarea id="experiment-viewer" class="yaml-readonly" spellcheck="false" readonly></textarea>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="file-modal-shell" class="modal-shell">
+    <div class="modal">
+      <div class="modal-top">
+        <div>
+          <strong id="file-modal-title" class="mono"></strong>
+          <div id="file-modal-meta" class="mono hint"></div>
+        </div>
+	        <button id="file-modal-close" class="modal-close" type="button">X</button>
+	        <button id="file-modal-copy" class="modal-close" type="button">Copy</button>
+	      </div>
+	      <div class="modal-body">
+	        <div id="file-modal-copy-status" class="hint mono" style="margin-bottom:8px;"></div>
+	        <pre id="file-modal-text"></pre>
+	      </div>
+	    </div>
+	  </div>
+
+  <script>
+    const byId = (id) => document.getElementById(id);
+    let launchBusy = false;
+    let controlsDirty = false;
+    let controlsInitialized = false;
+    let humanOverrideDirty = false;
+    let humanOverrideInitialized = false;
+    let controlOverrideInitialized = false;
+    let controlSaveTimer = null;
+    let humanSaveTimer = null;
+    let currentPipeName = '';
+    let selectedPipeName = '';
+    let refreshTimer = null;
+
+    function startRefreshLoop() {
+      if (refreshTimer) return;
+      refreshTimer = window.setInterval(() => refresh().catch(console.error), 2000);
+    }
+
+    function stopRefreshLoop() {
+      if (!refreshTimer) return;
+      window.clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+
+    function uiEditorHasFocus() {
+      const active = document.activeElement;
+      if (!active) return false;
+      if (active === byId('human-override-editor')) return true;
+      if (active === byId('pipeline-select')) return true;
+      if (active === byId('continuous-checkbox')) return true;
+      if (active === byId('continuous-delay-select')) return true;
+      if (active.classList?.contains('ui-dropdown')) return true;
+      if (active.classList?.contains('ui-checkbox')) return true;
+      if (active.classList?.contains('ui-textarea')) return true;
+      return false;
+    }
+
+    function formatLocalTime(value) {
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+    }
+
+    function renderKV(target, rows) {
+      target.innerHTML = rows.map(([k, v]) => `
+        <div class="k">${k}</div>
+        <div class="mono">${v ?? ''}</div>
+      `).join('');
+    }
+
+    function renderFiles(target, files) {
+      if (!files || !files.length) {
+        target.innerHTML = '<div class="mono">none</div>';
+        return;
+      }
+      target.innerHTML = files.map((f) => `
+        <div class="file clickable ${f.is_fresh ? 'fresh' : 'stale'}" data-path="${f.path || ''}">
+          <span class="mono">${f.path || f.name}</span>
+          <span class="mono">${f.exists ? (f.size ?? '') : 'missing'}</span>
+        </div>
+      `).join('');
+
+      target.querySelectorAll('.file.clickable').forEach((node) => {
+        node.addEventListener('dblclick', () => {
+          const filePath = node.getAttribute('data-path');
+          if (filePath) openFileModal(filePath).catch(console.error);
+        });
+      });
+    }
+
+    function renderControls(controls) {
+      const pipelineSelect = byId('pipeline-select');
+      const pipelines = controls?.pipelines || [];
+      const selectedPipeline = controls?.pipeline || '';
+      const uiFields = controls?.ui_fields || [];
+      const uiTarget = byId('ui-fields');
+
+      if ((controlsDirty || uiEditorHasFocus()) && controlsInitialized) {
+        return;
+      }
+
+      pipelineSelect.innerHTML = pipelines.map((name) => `
+        <option value="${name}" ${name === selectedPipeline ? 'selected' : ''}>${name}</option>
+      `).join('');
+      uiTarget.innerHTML = uiFields.map((field) => {
+        if (field.type === 'checkbox') {
+          return `
+            <label class="checkbox-row">
+              <input type="checkbox" class="ui-checkbox" data-path="${field.path}" ${field.value ? 'checked' : ''}>
+              <span class="mono">${field.label}</span>
+            </label>
+          `;
+        }
+        if (field.type === 'dropdown') {
+          const base = [`<option value="" ${!field.value ? 'selected' : ''}>(default)</option>`];
+          const options = (field.options || []).map((row) => `
+            <option value="${row.key}" ${row.key === field.value ? 'selected' : ''}>${row.label}</option>
+          `);
+          return `
+            <label>
+              ${field.label}
+              <select class="ui-dropdown" data-path="${field.path}" data-current-value="${field.value || ''}">
+                ${base.concat(options).join('')}
+              </select>
+            </label>
+          `;
+        }
+        if (field.type === 'textarea') {
+          return `
+            <label>
+              ${field.label}
+              <textarea class="ui-textarea" data-path="${field.path}">${field.value || ''}</textarea>
+            </label>
+          `;
+        }
+        return '';
+      }).join('');
+
+      uiTarget.querySelectorAll('.ui-dropdown').forEach((node) => {
+        const currentValue = node.getAttribute('data-current-value') || '';
+        node.value = currentValue;
+      });
+
+      controlsInitialized = true;
+    }
+
+	    function renderPipeControls(pipe) {
+	      const pipeSelect = byId('pipe-select');
+	      const switchButton = byId('switch-pipe-button');
+	      const pipes = pipe?.pipes || [];
+	      const current = pipe?.current || '';
+      const availableNames = pipes.map((row) => row.name);
+      let desired = selectedPipeName || pipeSelect.value || current;
+      if (!availableNames.includes(desired)) desired = current;
+	      currentPipeName = current;
+	      byId('pipe-current').textContent = current ? `active: ${current}` : 'active: (not in pipes)';
+	      pipeSelect.innerHTML = pipes.map((row) => `
+	        <option value="${row.name}" ${row.name === desired ? 'selected' : ''}>${row.name}${row.is_active ? ' (active)' : ''}</option>
+	      `).join('');
+      pipeSelect.value = desired;
+      selectedPipeName = desired;
+	      pipeSelect.disabled = pipes.length === 0;
+	      switchButton.disabled = pipes.length === 0 || !desired || desired === current;
+	    }
+
+	    function renderMergeStatus(mergeRun) {
+	      const button = byId('merge-pipe-button');
+	      const target = byId('merge-status');
+	      const activePipe = currentPipeName || '';
+	      const status = mergeRun?.status || '';
+	      const logdir = mergeRun?.logdir || '';
+	      const pid = mergeRun?.pid || '';
+	      const logPath = mergeRun?.log_path || '';
+	      const errPath = mergeRun?.err_path || '';
+	      button.disabled = !activePipe || status === 'running' || status === 'launching';
+
+	      if (!activePipe) {
+	        target.textContent = 'merge unavailable: current workspace is not under pipes/';
+	        return;
+	      }
+
+	      if (!status) {
+	        target.textContent = `ready to merge remote adapter and sqlite into ${activePipe}`;
+	        return;
+	      }
+
+	      target.textContent = [
+	        `merge status: ${status}`,
+	        `pipe: ${mergeRun?.pipe || activePipe}`,
+	        `pid: ${pid}`,
+	        `logdir: ${logdir}`,
+	        `log: ${logPath}`,
+	        `err: ${errPath}`,
+	        `started: ${formatLocalTime(mergeRun?.started_at || '')}`,
+	        `finished: ${formatLocalTime(mergeRun?.finished_at || '')}`
+	      ].join('\n');
+	    }
+
+    function renderPipelineDeath(pipelineState) {
+      const box = byId('pipeline-death-box');
+      const empty = byId('pipeline-death-empty');
+      const text = byId('pipeline-death-text');
+      const clearButton = byId('clear-pipeline-state-button');
+      if (!pipelineState || !pipelineState.status) {
+        box.classList.add('hidden');
+        empty.style.display = 'block';
+        text.textContent = '';
+        clearButton.disabled = true;
+        return;
+      }
+      box.classList.remove('hidden');
+      empty.style.display = 'none';
+      clearButton.disabled = false;
+      text.textContent = [
+        `status: ${pipelineState.status || ''}`,
+        `by: ${pipelineState.by || ''}`,
+        `reason: ${pipelineState.reason || ''}`,
+        `timestamp: ${formatLocalTime(pipelineState.timestamp || '')}`
+      ].join('\n');
+    }
+
+    function collectUiValues() {
+      const rows = {};
+      document.querySelectorAll('.ui-checkbox').forEach((node) => {
+        const path = node.getAttribute('data-path');
+        if (!path) return;
+        rows[path] = node.checked;
+      });
+      document.querySelectorAll('.ui-dropdown').forEach((node) => {
+        const path = node.getAttribute('data-path');
+        if (!path) return;
+        rows[path] = node.value;
+      });
+      document.querySelectorAll('.ui-textarea').forEach((node) => {
+        const path = node.getAttribute('data-path');
+        if (!path) return;
+        rows[path] = node.value;
+      });
+      return rows;
+    }
+
+    function renderOverrideEditor(controls) {
+      const recipeViewer = byId('recipe-viewer');
+      const humanEditor = byId('human-override-editor');
+      const experimentViewer = byId('experiment-viewer');
+      const controlViewer = byId('control-override-viewer');
+      const recipeText = typeof controls?.recipe_text === 'string' ? controls.recipe_text : '';
+      const humanText = typeof controls?.human_override_text === 'string' ? controls.human_override_text : '';
+      const experimentText = typeof controls?.experiment_text === 'string' ? controls.experiment_text : '';
+      const text = typeof controls?.control_override_text === 'string' ? controls.control_override_text : '';
+      recipeViewer.value = recipeText;
+      experimentViewer.value = experimentText;
+      if (!((humanOverrideDirty || document.activeElement === humanEditor) && humanOverrideInitialized)) {
+        humanEditor.value = humanText;
+        humanOverrideInitialized = true;
+        byId('human-override-status').textContent = '';
+      }
+      controlViewer.value = text;
+      controlOverrideInitialized = true;
+      byId('control-override-status').textContent = 'UI-owned; updates from controls immediately';
+    }
+
+    function renderSteps(rows) {
+      byId('steps-body').innerHTML = (rows || []).map((row) => `
+        <tr>
+          <td class="mono">${row.step || ''}</td>
+          <td>${row.status || ''}</td>
+          <td class="mono">${formatLocalTime(row.updated_at || row.finished_at || row.started_at || '')}</td>
+        </tr>
+      `).join('');
+    }
+
+    function renderKillButton(run) {
+      const button = byId('kill-button');
+      const pid = run?.pid;
+      const status = run?.status || '';
+      const firstBlocking = Array.isArray(run?.other_runners) && run.other_runners.length > 0
+        ? run.other_runners[0]
+        : null;
+      const blockingMatch = firstBlocking && typeof firstBlocking === 'object'
+        ? null
+        : String(firstBlocking || '').match(/^\s*(\d+)\b/);
+      const blockingPid = firstBlocking && typeof firstBlocking?.pid === 'number'
+        ? firstBlocking.pid
+        : (blockingMatch ? blockingMatch[1] : null);
+      const killable = Number.isInteger(Number(pid)) && !['done', 'failed', 'shutdown'].includes(status);
+
+      if (blockingPid) {
+        button.disabled = false;
+        button.textContent = `Kill Blocking PID ${blockingPid}`;
+        return;
+      }
+
+      if (killable) {
+        button.disabled = false;
+        button.textContent = `Kill PID ${pid}`;
+        return;
+      }
+
+      button.disabled = true;
+      if (pid) {
+        button.textContent = `No Kill: PID ${pid} ${status}`.trim();
+      } else {
+        button.textContent = 'No Active Run';
+      }
+    }
+
+    function renderContinuous(controls) {
+      const box = byId('continuous-checkbox');
+      const delaySelect = byId('continuous-delay-select');
+      if (controlsDirty) return;
+      box.checked = controls?.continuous === true;
+      delaySelect.value = String(controls?.continuous_delay_seconds === 20 ? 20 : 60);
+    }
+
+    async function refresh() {
+      console.debug('[ui] refresh:start');
+      const res = await fetch('/api/status', { cache: 'no-store' });
+      const data = await res.json();
+      const run = data.run || {};
+      const mergeRun = data.merge_run || {};
+      const pipelineState = data.pipeline_state || {};
+      const pipe = data.pipe || {};
+      console.debug('[ui] refresh:status', {
+        activePipe: pipe.current || '',
+        runStatus: run.status || '',
+        mergeStatus: mergeRun.status || '',
+        mergePid: mergeRun.pid || null
+      });
+      byId('subtitle').textContent = `${pipe.current || ''}  ${run.pipeline || ''}  ${run.hh_mm || ''}  ${run.logdir || ''}`.trim();
+      const status = run.status || 'unknown';
+      if (['launching', 'running', 'killing', 'skipped', 'cooldown'].includes(status)) {
+        startRefreshLoop();
+      } else {
+        stopRefreshLoop();
+      }
+      const statusEl = byId('run-status');
+      statusEl.textContent = status;
+      statusEl.className = `status ${status}`;
+
+      renderKV(byId('run-kv'), [
+        ['recipe', run.pipeline],
+        ['pipe', pipe.current || ''],
+        ['status', run.status],
+        ['pid', run.pid],
+        ['cwd', run.cwd],
+        ['started', formatLocalTime(run.started_at)],
+        ['finished', formatLocalTime(run.finished_at)],
+        ['stories remaining', data.stories_remaining_count ?? ''],
+        ['hh_mm', run.hh_mm],
+        ['countdown', run.countdown_seconds ?? ''],
+        ['shutdown by', pipelineState.by],
+        ['shutdown reason', pipelineState.reason],
+        ['shutdown at', formatLocalTime(pipelineState.timestamp)],
+        ['latest log', data.latest_log_stem]
+      ]);
+
+	      renderKillButton(run);
+	      renderPipeControls(pipe);
+	      renderMergeStatus(mergeRun);
+	      renderPipelineDeath(pipelineState);
+      renderContinuous(data.controls || {});
+      renderControls(data.controls || {});
+      renderOverrideEditor(data.controls || {});
+      renderFiles(byId('out-files'), data.out_files);
+      renderFiles(byId('diary-files'), data.diary_files);
+      renderSteps(data.steps);
+      byId('latest-log').textContent = data.latest_log || '';
+      byId('latest-err').textContent = data.latest_err || '';
+    }
+
+	    function closeFileModal() {
+	      byId('file-modal-copy-status').textContent = '';
+	      byId('file-modal-shell').classList.remove('open');
+	    }
+
+	    async function openFileModal(filePath) {
+	      const res = await fetch(`/api/file?path=${encodeURIComponent(filePath)}`, { cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'file open failed');
+      }
+	      const file = data.file || {};
+	      byId('file-modal-title').textContent = file.path || '';
+	      byId('file-modal-meta').textContent = `${file.size ?? 0} bytes  ${formatLocalTime(file.mtime || '')}`;
+	      byId('file-modal-copy-status').textContent = '';
+	      byId('file-modal-text').textContent = file.text || '';
+	      byId('file-modal-shell').classList.add('open');
+	    }
+
+	    async function copyFileModalText() {
+	      const text = byId('file-modal-text').textContent || '';
+	      const status = byId('file-modal-copy-status');
+	      if (!text.length) {
+	        status.textContent = 'nothing to copy';
+	        return;
+	      }
+	      try {
+	        await navigator.clipboard.writeText(text);
+	        status.textContent = `copied ${text.length} characters`;
+	      } catch (err) {
+	        const selection = window.getSelection();
+	        const range = document.createRange();
+	        range.selectNodeContents(byId('file-modal-text'));
+	        selection.removeAllRanges();
+	        selection.addRange(range);
+	        status.textContent = 'clipboard write failed; text selected for manual copy';
+	      }
+	    }
+
+    async function launchPipeline() {
+      if (launchBusy) return;
+      launchBusy = true;
+      startRefreshLoop();
+      const launchButton = byId('launch-button');
+      const result = byId('launch-result');
+      launchButton.disabled = true;
+      result.textContent = 'launching...';
+      byId('latest-log').textContent = '';
+      byId('latest-err').textContent = '';
+
+      try {
+        if (humanSaveTimer) {
+          window.clearTimeout(humanSaveTimer);
+          humanSaveTimer = null;
+        }
+        if (humanOverrideDirty) {
+          result.textContent = 'saving override.yaml...';
+          await saveHumanOverride();
+        }
+
+        const payload = {
+          pipeline: byId('pipeline-select').value,
+          ui_values: collectUiValues(),
+          continuous: byId('continuous-checkbox').checked,
+          continuous_delay_seconds: Number(byId('continuous-delay-select').value || 60)
+        };
+        const res = await fetch('/api/launch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'launch failed');
+        }
+        controlsDirty = false;
+        result.textContent = `pid ${data.pid}  pipeline ${data.override?.pipeline || ''}`;
+        byId('control-override-status').textContent = 'control override written for current run';
+        await refresh();
+      } catch (err) {
+        result.textContent = String(err.message || err);
+      } finally {
+        launchBusy = false;
+        launchButton.disabled = false;
+      }
+    }
+
+    async function saveControlState() {
+      const payload = {
+        pipeline: byId('pipeline-select').value,
+        ui_values: collectUiValues(),
+        continuous: byId('continuous-checkbox').checked,
+        continuous_delay_seconds: Number(byId('continuous-delay-select').value || 60)
+      };
+
+      const res = await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'control save failed');
+      }
+      controlsDirty = false;
+      controlOverrideInitialized = false;
+      byId('control-override-status').textContent = 'control override updated immediately';
+    }
+
+    async function saveSingleUiField(node) {
+      const path = node.getAttribute('data-path');
+      if (!path) return;
+
+      let value = '';
+      if (node.classList.contains('ui-checkbox')) {
+        value = node.checked;
+      } else {
+        value = node.value;
+      }
+
+      const payload = {
+        pipeline: byId('pipeline-select').value,
+        ui_values: {
+          [path]: value
+        },
+        continuous: byId('continuous-checkbox').checked,
+        continuous_delay_seconds: Number(byId('continuous-delay-select').value || 60)
+      };
+
+      const res = await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'single control save failed');
+      }
+
+      controlsDirty = false;
+      controlOverrideInitialized = false;
+      byId('control-override-status').textContent = 'control override updated immediately';
+    }
+
+    function scheduleControlSave() {
+      if (controlSaveTimer) window.clearTimeout(controlSaveTimer);
+      controlSaveTimer = window.setTimeout(() => {
+        saveControlState().catch((err) => {
+          byId('control-override-status').textContent = String(err.message || err);
+        });
+      }, 250);
+    }
+
+    async function saveHumanOverride() {
+      const payload = {
+        human_override_text: byId('human-override-editor').value
+      };
+
+      const res = await fetch('/api/human_override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'human override save failed');
+      }
+      humanOverrideDirty = false;
+      byId('human-override-status').textContent = 'override.yaml saved';
+    }
+
+    function scheduleHumanOverrideSave() {
+      if (humanSaveTimer) window.clearTimeout(humanSaveTimer);
+      humanSaveTimer = window.setTimeout(() => {
+        saveHumanOverride().catch((err) => {
+          byId('human-override-status').textContent = String(err.message || err);
+        });
+      }, 250);
+    }
+
+    async function killPipeline() {
+      const result = byId('launch-result');
+      try {
+        const res = await fetch('/api/kill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'kill failed');
+        }
+        result.textContent = `kill requested for pid ${data.pid}`;
+        await refresh();
+      } catch (err) {
+        result.textContent = String(err.message || err);
+      }
+    }
+
+    async function clearPipelineState() {
+      const result = byId('launch-result');
+      try {
+        const res = await fetch('/api/clear_pipeline_state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'clear pipeline state failed');
+        }
+        result.textContent = data.removed ? 'pipeline.json erased' : 'no pipeline.json present';
+        await refresh();
+      } catch (err) {
+        result.textContent = String(err.message || err);
+      }
+    }
+
+    async function switchPipe() {
+      const result = byId('launch-result');
+      const pipe = byId('pipe-select').value;
+      console.debug('[ui] switchPipe:click', {
+        selectedPipe: pipe || '',
+        currentPipe: currentPipeName || ''
+      });
+      if (!pipe) return;
+      if (pipe === currentPipeName) {
+        result.textContent = `already on pipe ${pipe}`;
+        return;
+      }
+      try {
+        const res = await fetch('/api/switch_pipe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pipe })
+        });
+        const data = await res.json();
+        console.debug('[ui] switchPipe:response', {
+          ok: !!data?.ok,
+          status: res.status,
+          data
+        });
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'switch pipe failed');
+        }
+        result.textContent = `switching UI to pipe ${pipe}...`;
+        selectedPipeName = pipe;
+        window.setTimeout(() => window.location.reload(), 1800);
+      } catch (err) {
+        result.textContent = String(err.message || err);
+      }
+    }
+
+    async function mergePipe() {
+      const result = byId('merge-result');
+      console.debug('[ui] mergePipe:click', {
+        activePipe: currentPipeName || '',
+        buttonDisabled: byId('merge-pipe-button').disabled
+      });
+      result.textContent = 'starting merge...';
+      try {
+        const res = await fetch('/api/merge_pipe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        const data = await res.json();
+        console.debug('[ui] mergePipe:response', {
+          ok: !!data?.ok,
+          status: res.status,
+          data
+        });
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'merge pipe failed');
+        }
+        if (data.attached) {
+          result.textContent = `merge already running for pid ${data.merge_run?.pid || ''}`;
+        } else {
+          result.textContent = `merge started for ${data.merge_run?.pipe || currentPipeName} pid ${data.merge_run?.pid || ''}`;
+        }
+        console.debug('[ui] mergePipe:refresh-after-start');
+        await refresh();
+      } catch (err) {
+        console.debug('[ui] mergePipe:error', {
+          message: String(err?.message || err)
+        });
+        result.textContent = String(err.message || err);
+      }
+    }
+
+    refresh().catch(console.error);
+    byId('pipeline-select').addEventListener('change', () => {
+      controlsDirty = true;
+      saveControlState().catch((err) => {
+        byId('control-override-status').textContent = String(err.message || err);
+      });
+    });
+    byId('continuous-checkbox').addEventListener('change', () => {
+      controlsDirty = true;
+      saveControlState().catch((err) => {
+        byId('control-override-status').textContent = String(err.message || err);
+      });
+    });
+    byId('continuous-delay-select').addEventListener('change', () => {
+      controlsDirty = true;
+      saveControlState().catch((err) => {
+        byId('control-override-status').textContent = String(err.message || err);
+      });
+    });
+    document.addEventListener('change', (event) => {
+      if (!event.target.classList.contains('ui-checkbox') && !event.target.classList.contains('ui-dropdown')) return;
+      controlsDirty = true;
+      byId('control-override-status').textContent = 'rebuilding control override from recipe UI fields...';
+      saveSingleUiField(event.target).catch((err) => {
+        byId('control-override-status').textContent = String(err.message || err);
+      });
+    });
+    document.addEventListener('input', (event) => {
+      if (!event.target.classList.contains('ui-textarea')) return;
+      controlsDirty = true;
+      byId('control-override-status').textContent = 'editing control override from recipe UI fields...';
+      scheduleControlSave();
+    });
+    byId('human-override-editor').addEventListener('input', () => {
+      humanOverrideDirty = true;
+      byId('human-override-status').textContent = 'editing override.yaml...';
+      scheduleHumanOverrideSave();
+    });
+    byId('launch-button').addEventListener('click', () => {
+      launchPipeline().catch(console.error);
+    });
+    byId('kill-button').addEventListener('click', () => {
+      killPipeline().catch(console.error);
+    });
+    byId('clear-pipeline-state-button').addEventListener('click', () => {
+      clearPipelineState().catch(console.error);
+    });
+	    byId('switch-pipe-button').addEventListener('click', () => {
+	      switchPipe().catch(console.error);
+	    });
+	    byId('pipe-select').addEventListener('change', (event) => {
+	      selectedPipeName = event.target.value || '';
+	      byId('switch-pipe-button').disabled = !selectedPipeName || selectedPipeName === currentPipeName;
+	    });
+		    byId('merge-pipe-button').addEventListener('click', () => {
+		      mergePipe().catch(console.error);
+		    });
+		    byId('file-modal-copy').addEventListener('click', () => {
+		      copyFileModalText().catch(console.error);
+		    });
+		    byId('file-modal-close').addEventListener('click', closeFileModal);
+    byId('file-modal-shell').addEventListener('click', (event) => {
+      if (event.target === byId('file-modal-shell')) closeFileModal();
+    });
+  </script>
+</body>
+</html>

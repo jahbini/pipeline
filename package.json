@@ -8,10 +8,12 @@
   },
   "files": [
     "pipeline_runner.coffee",
+    "ui_server.coffee",
     "bin/",
     "meta/",
     "scripts/",
     "config/",
+    "ui/",
     "override.test.yaml",
     "requirements.txt",
     "README.md"
