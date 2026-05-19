@@ -1,0 +1,60 @@
+# =====================================================================
+#   download_model.yaml — fetch + quantize a HuggingFace model
+# =====================================================================
+#
+#   A two-step recipe that lands a self-contained quantized MLX
+#   model in `build/`. The output requires no further network
+#   access — load it from disk, run it offline.
+#
+#   How to use
+#   ----------
+#   From the project root, drop this in `override.yaml`:
+#
+#     pipeline: download_model
+#     download_model:
+#       model: Qwen/Qwen3-4B-Instruct-2507    # required: the HF repo
+#
+#   Then: `npx pipeline`. Two steps run in order:
+#
+#     1. `download_model`  →  build/model/   (raw HF download)
+#     2. `quantize_model`  →  build/model4/  (4-bit MLX, ready to use)
+#
+#   After it finishes:
+#     - build/model/   has the raw download (~16 GB for a 4B model).
+#       You can `rm -rf build/model` afterward to reclaim disk; the
+#       quantized dir is the only thing downstream recipes need.
+#     - build/model4/  is the self-contained quantized MLX model.
+#       Reference it from other recipes via the `quantized_dir`
+#       param or by symlinking it where the recipe expects.
+#
+#   Override params
+#   ----------------
+#     model            required — HF repo path (org/name)
+#     download_dir     default: build/model
+#     quantized_dir    default: build/model4
+#     q_bits           default: 4
+#     skip_quantize    default: false  (true = download only)
+
+run:
+  output_dir: build
+
+# This recipe writes its outputs to disk (build/model/ and
+# build/model4/) rather than through the Memo, so there are no
+# declared artifacts. The chain is enforced via depends_on alone.
+artifacts: {}
+
+download_model:
+  run: model/download_model.coffee
+  depends_on: []
+  needs: []
+  makes: []
+  download_dir: build/model
+
+quantize_model:
+  run: model/quantize_model.coffee
+  depends_on: [download_model]
+  needs: []
+  makes: []
+  src_dir: build/model
+  quantized_dir: build/model4
+  q_bits: 4
