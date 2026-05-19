@@ -13,7 +13,7 @@
   version (with EXEC fallback and pinned-version validation);
   this script only needs the CWD lookup, so it carries a 5-line
   copy. When the runner becomes an npm module, this helper moves
-  to a public export and steps `require('pipeline-runner/python')`
+  to a public export and steps `require('@jahbini/pipeline/python')`
   instead. Until then the duplication is intentional: a step
   should not reach into the runner's private internals.
 

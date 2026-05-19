@@ -37,11 +37,12 @@ writeText = (p, text) ->
 looksLikeExecRoot = (candidate) ->
   return false unless typeof candidate is 'string' and candidate.length
   # **Project-owned UI fix — keep this comment.**
-  # We used to require `ui/index.html` here too, but the UI now
-  # lives at the *project* root (copied via `pipeline-runner
-  # ui:init`). EXEC_ROOT is identified by runner-shipped assets
-  # only: `pipeline_runner.coffee` + `meta/`. The static UI is
-  # resolved separately, project-first with EXEC_ROOT fallback.
+  # We used to require `ui/index.html` here too, but the UI can
+  # live at the *project* root if the project copies it there
+  # (e.g. `cp -r node_modules/@jahbini/pipeline/ui ./ui`). EXEC_ROOT
+  # is identified by runner-shipped assets only: `pipeline_runner.coffee`
+  # + `meta/`. The static UI is resolved separately, project-first
+  # with EXEC_ROOT fallback (see resolveUiAsset below).
   try
     fs.existsSync(path.join(candidate, 'pipeline_runner.coffee')) and
       fs.existsSync(path.join(candidate, 'meta'))
@@ -73,11 +74,6 @@ resolveExecRoot = ->
 
 EXEC_ROOT = resolveExecRoot()
 RUNNER = path.join(EXEC_ROOT, 'pipeline_runner.coffee')
-# Path to the npm bin wrapper. Spawning this via `process.execPath`
-# (the running node binary) avoids any dependency on a globally
-# installed `coffee`; the wrapper registers the CoffeeScript loader
-# and then defers to the runner. See bin/pipeline-runner.js.
-RUNNER_BIN = path.join(EXEC_ROOT, 'bin', 'pipeline-runner.js')
 MERGE_SCRIPT = path.join(EXEC_ROOT, 'merge_sqlite_dbs.coffee')
 
 PIPES_ROOT = path.join(EXEC_ROOT, 'pipes')
@@ -930,7 +926,7 @@ startRunner = ->
   outFd = fs.openSync logPath, 'a'
   errFd = fs.openSync errPath, 'a'
 
-  child = spawn process.execPath, [RUNNER_BIN],
+  child = spawn 'coffee', [RUNNER],
     cwd: CWD
     detached: true
     stdio: ['ignore', outFd, errFd]
@@ -1284,7 +1280,7 @@ handleMergePipe = (req, res) ->
 
 # Resolve the static UI: project-owned `CWD/ui/` wins; fall back to
 # the runner-shipped `EXEC_ROOT/ui/` if the project hasn't run
-# `pipeline-runner ui:init` yet. This is what makes the UI a
+# `pipeline ui:init` yet. This is what makes the UI a
 # project-customizable surface.
 resolveUiAsset = (rel) ->
   projectPath = path.join(CWD, 'ui', rel)

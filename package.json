@@ -4,12 +4,12 @@
   "description": "A small dependency-aware step runner for shell-friendly AI experiments. Pipelines declared in YAML; steps coordinate through a shared in-memory Memo with pluggable meta devices.",
   "main": "pipeline_runner.coffee",
   "bin": {
-    "pipeline-runner": "bin/pipeline-runner.js"
+    "pipeline": "pipeline_runner.coffee",
+    "pipeline-ui": "ui_server.coffee"
   },
   "files": [
     "pipeline_runner.coffee",
     "ui_server.coffee",
-    "bin/",
     "meta/",
     "scripts/",
     "config/",

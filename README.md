@@ -1,4 +1,4 @@
-# @jahbini/pipeline-runner
+# @jahbini/pipeline
 
 A small dependency-aware step runner for shell-friendly AI experiments.
 Pipelines are declared in YAML; each step declares what it `needs`, what
@@ -17,7 +17,7 @@ back as the canonical tour.
 ```sh
 mkdir my-pipeline-project && cd my-pipeline-project
 npm init -y
-npm install @jahbini/pipeline-runner
+npm install @jahbini/pipeline
 ```
 
 That gives you the runner and its two npm dependencies
@@ -33,17 +33,17 @@ calls, sqlite request keys). It runs end-to-end in under a minute.
 ```sh
 # 1. Drop the example override at the project root. This is the
 #    ONE artifact a project actually needs to commit.
-cp node_modules/@jahbini/pipeline-runner/override.test.yaml ./override.yaml
+cp node_modules/@jahbini/pipeline/override.test.yaml ./override.yaml
 
 # 2. Create a Python virtualenv with MLX pinned to the versions
 #    the runner expects. (Only required if you'll use the MLX
 #    surface — the test pipeline's step7 spawns Python.)
 python3 -m venv .venv
 ./.venv/bin/pip install --upgrade pip setuptools wheel
-./.venv/bin/pip install -r node_modules/@jahbini/pipeline-runner/requirements.txt
+./.venv/bin/pip install -r node_modules/@jahbini/pipeline/requirements.txt
 
 # 3. Run it.
-npx pipeline-runner
+npx pipeline
 ```
 
 You should see eight step banners, then a friendly hand-off message
@@ -67,17 +67,31 @@ The UI is split deliberately:
   edits.
 
 ```sh
-# One-time: copy the shipped ui/ into your project root.
-npx pipeline-runner ui:init        # use --force to overwrite later
+# One-time: copy the shipped ui/ into your project root so you
+# can edit it without forking the package.
+cp -r node_modules/@jahbini/pipeline/ui ./ui
 
 # Start the server (default port 4311; override via UI_PORT).
-npx pipeline-runner ui             # then open http://127.0.0.1:4311
+npx pipeline-ui              # then open http://127.0.0.1:4311
 ```
 
 The server resolves the static frontend project-first: `CWD/ui/`
 wins, falling back to the package's `ui/` only if you haven't
-run `ui:init` yet. So a fresh install works immediately, and your
-edits stick once you've initialized.
+copied it yet. So a fresh install works immediately, and your
+edits stick once you've copied.
+
+Two bin commands are installed by `npm install`:
+
+| command          | what it runs                                |
+|------------------|---------------------------------------------|
+| `npx pipeline`   | the pipeline runner (`pipeline_runner.coffee`) |
+| `npx pipeline-ui`| the UI HTTP server (`ui_server.coffee`)       |
+
+Both are CoffeeScript files invoked directly via their
+`#!/usr/bin/env coffee` shebang. `npm install` puts the
+transitive `coffee` binary on PATH for you. No JS wrapper, no
+TypeScript compile step — if a deployment wants those, that's a
+separate project.
 
 ## Starting-point recipes (the `_ite` family)
 
@@ -157,17 +171,20 @@ future extraction:
 
 - **MLX as a plugin.** The `validatePythonEnvironment` and `callMLX`
   pieces should leave the core and become an opt-in
-  `@jahbini/pipeline-runner-mlx` package. Non-MLX projects (data
+  `@jahbini/pipeline-mlx` package. Non-MLX projects (data
   wrangling, web scraping, code review pipelines) shouldn't need
   Python.
-- **`pipeline-runner init` subcommand.** Currently you copy
-  `override.test.yaml` by hand. An `init` subcommand should write
-  it for you, plus the `package.json` script entry and `.gitignore`
-  additions.
+- **Starter scaffolding.** Currently you copy `override.test.yaml`
+  by hand. A small standalone scaffolding script (kept as a
+  separate concern from the runner itself — the runner doesn't
+  do CLI dispatch) could write the override, the project's
+  `package.json` script entries, and `.gitignore` additions in
+  one shot. Today, the [pipeline-demo](https://github.com/jahbini/pipeline-demo)
+  starter project is the closest equivalent.
 - **First-run welcome.** If there's no `override.yaml` and no
   `control_override.yaml`, the runner errors. It should instead
   write a starter `override.yaml` pointing at `pipeline: test` and
-  proceed, so a fresh `npm install` + `npx pipeline-runner` works
+  proceed, so a fresh `npm install` + `npx pipeline` works
   in two commands instead of three.
 - **`env/*` keys shouldn't materialize.** The runner currently
   writes `env/CWD`, `env/EXEC`, etc. into a real `env/` directory

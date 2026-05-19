@@ -9,9 +9,9 @@
   pipeline has succeeded.
 
   This is the *intentional* alternative to a fail-on-first-run
-  placeholder override. A fresh `npx pipeline-runner init` ships
-  with `pipeline: test`, so the first thing a new user sees is
-  this message — not an error.
+  placeholder override. The shipped `override.test.yaml` selects
+  `pipeline: test`, so the first thing a new user sees is this
+  message — not an error.
 
   It is also a real example of a step that exists for human
   output rather than data flow. The runner has no special case
