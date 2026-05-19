@@ -61,6 +61,24 @@ resolveExecRoot = ->
     candidates.push absolute
 
   pushCandidate process.env.EXEC if process.env.EXEC?
+
+  # **Read env/EXEC stamped by the runner.**
+  # On every run, pipeline_runner.coffee saves `env/EXEC` (and
+  # `env/CWD`, `env/PYTHON`, …) into the project via the slash
+  # meta device. That's the authoritative project record of where
+  # the runner code lives, so we honor it before any heuristic
+  # guess. The file is JSON-encoded (the slash meta does
+  # JSON.stringify on string values), hence the parse.
+  try
+    envExecPath = path.join(CWD, 'env', 'EXEC')
+    if fs.existsSync(envExecPath)
+      raw = fs.readFileSync(envExecPath, 'utf8').trim()
+      parsed = null
+      try parsed = JSON.parse(raw) catch then parsed = raw
+      pushCandidate parsed if typeof parsed is 'string'
+  catch
+    null
+
   pushCandidate path.dirname(__filename)
   pushCandidate process.cwd()
   pushCandidate CWD
@@ -629,6 +647,21 @@ collectDiaryFiles = (run) ->
   rows.sort (a, b) -> String(a.path).localeCompare String(b.path)
   rows
 
+# Ported from writeStory main: lists files under `logs/`, marking
+# any updated since the current run started as "fresh". The frontend
+# uses this to render the "logs" panel.
+collectLogFiles = (run) ->
+  logDir = path.join(CWD, 'logs')
+  runStart = run?.started_at ? null
+  rows = []
+  return rows unless fs.existsSync(logDir)
+
+  for entry in listFiles(logDir) when entry? and entry.is_dir isnt true
+    rows.push describeOutputFile "logs/#{entry.name}", runStart
+
+  rows.sort (a, b) -> String(b.path).localeCompare String(a.path)
+  rows
+
 buildStatus = ->
   run = normalizeUiRun readJson path.join(CWD, 'state', 'ui-run.json'), {}
   mergeRun = readMergeRun()
@@ -660,6 +693,7 @@ buildStatus = ->
     latest_err: latestErr
     out_files: expectedOutputs.out_files
     diary_files: expectedOutputs.diary_files
+    log_files: collectLogFiles(run)
   }
 
 isAllowedFilePath = (relativePath) ->

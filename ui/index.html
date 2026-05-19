@@ -158,6 +158,30 @@
       letter-spacing: 0.08em;
       color: var(--muted);
     }
+    /* Collapsible section toggles. The JS wires up the first h2 (for .panel)
+       or first h3 (for .controls-group) as a click target; CSS handles the
+       visual state and hiding of body content when .collapsed is set. */
+    .section-toggle {
+      cursor: pointer;
+      user-select: none;
+    }
+    .section-toggle::before {
+      content: '\25BC';
+      display: inline-block;
+      width: 1em;
+      margin-right: 4px;
+      font-size: 0.75em;
+      color: var(--muted);
+      vertical-align: middle;
+    }
+    .panel.collapsed > .section-toggle::before,
+    .controls-group.collapsed > .section-toggle::before {
+      content: '\25B6';
+    }
+    .panel.collapsed > *:not(.section-toggle),
+    .controls-group.collapsed > *:not(.section-toggle) {
+      display: none;
+    }
     .controls label {
       display: grid;
       gap: 6px;
@@ -202,10 +226,113 @@
     .yaml-pane {
       display: grid;
       gap: 8px;
+      position: relative;
     }
     .yaml-readonly {
       background: #f4efe4;
       color: #4a504d;
+    }
+    /* Per-pane expand toggle. Each yaml-pane gets a small unobtrusive button
+       in its top-right corner. Clicking it lifts the pane into a fullscreen-
+       width overlay so the YAML has real horizontal room. */
+    .pane-expand-btn {
+      position: absolute;
+      top: 0;
+      right: 0;
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 2px 7px;
+      font-size: 11px;
+      line-height: 1.2;
+      cursor: pointer;
+      color: var(--muted);
+      z-index: 2;
+    }
+    .pane-expand-btn:hover { background: var(--panel); }
+    .yaml-pane.expanded {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      right: 24px;
+      bottom: 24px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+      z-index: 1000;
+      grid-template-rows: 1fr auto;
+    }
+    .yaml-pane.expanded > label {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 6px;
+      height: 100%;
+      min-height: 0;
+    }
+    .yaml-pane.expanded > label > textarea {
+      height: 100%;
+      min-height: 0;
+      width: 100%;
+      box-sizing: border-box;
+      resize: none;
+    }
+    .yaml-pane.expanded .pane-expand-btn {
+      top: 8px;
+      right: 12px;
+    }
+    .pane-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.40);
+      z-index: 999;
+    }
+    .pane-backdrop.visible { display: block; }
+    /* Per-textarea expand inside the Recipe UI Fields section. Each textarea
+       field is wrapped in its own .ui-textarea-pane so all three fields are
+       visible at once (small) and the user can lift just one to full width. */
+    .ui-textarea-pane {
+      position: relative;
+    }
+    .ui-textarea-pane > label > textarea {
+      min-height: 70px;
+      max-height: 160px;
+    }
+    .ui-textarea-pane.expanded {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      right: 24px;
+      bottom: 24px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+      z-index: 1000;
+      display: grid;
+      grid-template-rows: 1fr;
+    }
+    .ui-textarea-pane.expanded > label {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 6px;
+      height: 100%;
+      min-height: 0;
+    }
+    .ui-textarea-pane.expanded > label > textarea {
+      min-height: 0;
+      max-height: none;
+      height: 100%;
+      width: 100%;
+      box-sizing: border-box;
+      resize: none;
+    }
+    .ui-textarea-pane.expanded .pane-expand-btn {
+      top: 8px;
+      right: 12px;
     }
     .controls button {
       background: var(--accent);
@@ -325,15 +452,23 @@
         <section class="panel">
           <h2>Outputs</h2>
           <div id="out-files" class="files"></div>
-          <h2 style="margin-top:16px;">Diary Files</h2>
+        </section>
+
+        <section class="panel">
+          <h2>Diary Files</h2>
           <div id="diary-files" class="files"></div>
+        </section>
+
+        <section class="panel" data-default-collapsed="1">
+          <h2>Logs</h2>
+          <div id="log-files" class="files"></div>
         </section>
 
         <section class="panel">
           <h2>Steps</h2>
           <table class="steps">
             <thead>
-              <tr><th>Step</th><th>Status</th><th>Updated</th></tr>
+              <tr><th>Step</th><th>Status</th><th>Elapsed</th><th>Updated</th></tr>
             </thead>
             <tbody id="steps-body"></tbody>
           </table>
@@ -392,7 +527,7 @@
 
             <div class="controls-group">
               <h3>Recipe And Overrides</h3>
-              <div>
+              <div class="ui-fields-pane">
                 <div class="hint" style="margin-bottom:6px;">Recipe UI Fields</div>
                 <div id="ui-fields" class="controls"></div>
               </div>
@@ -569,10 +704,12 @@
         }
         if (field.type === 'textarea') {
           return `
-            <label>
-              ${field.label}
-              <textarea class="ui-textarea" data-path="${field.path}">${field.value || ''}</textarea>
-            </label>
+            <div class="ui-textarea-pane">
+              <label>
+                ${field.label}
+                <textarea class="ui-textarea" data-path="${field.path}">${field.value || ''}</textarea>
+              </label>
+            </div>
           `;
         }
         return '';
@@ -582,6 +719,11 @@
         const currentValue = node.getAttribute('data-current-value') || '';
         node.value = currentValue;
       });
+
+      // The previous innerHTML assignment destroyed any existing
+      // .ui-textarea-pane elements (and their expand buttons). Wire up the
+      // freshly-rendered panes so the expand toggle still works.
+      setupPaneExpanders();
 
       controlsInitialized = true;
     }
@@ -702,11 +844,29 @@
       byId('control-override-status').textContent = 'UI-owned; updates from controls immediately';
     }
 
+    function formatDurationMs(elapsedMs) {
+      if (elapsedMs == null || Number.isNaN(elapsedMs) || elapsedMs < 0) return '';
+      const seconds = Math.floor(elapsedMs / 1000);
+      const millis  = Math.floor(elapsedMs % 1000);
+      return `${seconds}s ${String(millis).padStart(3, '0')}ms`;
+    }
+
+    function formatElapsedSecMs(row) {
+      // Prefer server-persisted duration_ms (survives across reloads for finished/failed steps).
+      if (typeof row?.duration_ms === 'number') return formatDurationMs(row.duration_ms);
+      if (!row?.started_at) return '';
+      const start = new Date(row.started_at).getTime();
+      if (Number.isNaN(start)) return '';
+      const end = row.finished_at ? new Date(row.finished_at).getTime() : Date.now();
+      return formatDurationMs(end - start);
+    }
+
     function renderSteps(rows) {
       byId('steps-body').innerHTML = (rows || []).map((row) => `
         <tr>
           <td class="mono">${row.step || ''}</td>
           <td>${row.status || ''}</td>
+          <td class="mono">${formatElapsedSecMs(row)}</td>
           <td class="mono">${formatLocalTime(row.updated_at || row.finished_at || row.started_at || '')}</td>
         </tr>
       `).join('');
@@ -771,7 +931,14 @@
       });
       byId('subtitle').textContent = `${pipe.current || ''}  ${run.pipeline || ''}  ${run.hh_mm || ''}  ${run.logdir || ''}`.trim();
       const status = run.status || 'unknown';
-      if (['launching', 'running', 'killing', 'skipped', 'cooldown'].includes(status)) {
+      const mergeStatus = mergeRun.status || '';
+      // Poll while EITHER the pipeline OR a merge is active. Without the
+      // merge-side check, the 2s heartbeat stops the instant a merge starts
+      // (because no pipeline run is active), and the merge's completion is
+      // never picked up until the user manually reloads.
+      const runActive = ['launching', 'running', 'killing', 'skipped', 'cooldown'].includes(status);
+      const mergeActive = ['launching', 'running'].includes(mergeStatus);
+      if (runActive || mergeActive) {
         startRefreshLoop();
       } else {
         stopRefreshLoop();
@@ -806,6 +973,7 @@
       renderOverrideEditor(data.controls || {});
       renderFiles(byId('out-files'), data.out_files);
       renderFiles(byId('diary-files'), data.diary_files);
+      renderFiles(byId('log-files'), data.log_files);
       renderSteps(data.steps);
       byId('latest-log').textContent = data.latest_log || '';
       byId('latest-err').textContent = data.latest_err || '';
@@ -1098,6 +1266,111 @@
         result.textContent = String(err.message || err);
       }
     }
+
+    // Wire collapse toggles on every .panel and .controls-group. The first
+    // <h2> (or <h3> for controls-group) of each container becomes the click
+    // target. State persists in localStorage keyed by header text so the
+    // user's layout preferences survive page reloads.
+    function setupCollapsibles() {
+      const containers = document.querySelectorAll('.panel, .controls-group');
+      containers.forEach((container) => {
+        const header = container.querySelector(':scope > h2, :scope > h3');
+        if (!header) return;
+        if (header.dataset.collapsibleWired === '1') return;
+        header.dataset.collapsibleWired = '1';
+        header.classList.add('section-toggle');
+        const keyText = (header.textContent || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const storageKey = 'ui-collapse:' + keyText;
+        const defaultCollapsed = container.dataset.defaultCollapsed === '1';
+        const stored = localStorage.getItem(storageKey);
+        if (stored !== null ? stored === '1' : defaultCollapsed) {
+          container.classList.add('collapsed');
+        }
+        header.addEventListener('click', () => {
+          container.classList.toggle('collapsed');
+          const collapsed = container.classList.contains('collapsed');
+          try { localStorage.setItem(storageKey, collapsed ? '1' : '0'); } catch (_) {}
+        });
+      });
+    }
+
+    setupCollapsibles();
+
+    // Pane expand state is hoisted to function scope (not closure-scoped
+    // inside setupPaneExpanders) so it survives across re-renders. The
+    // Recipe UI Fields content is destroyed/recreated by renderControls()
+    // on every refresh; setupPaneExpanders() is called both on initial
+    // boot and at the end of each renderControls() to rewire the new DOM.
+    let paneCurrentlyExpanded = null;
+    let paneBackdrop = null;
+    let paneKeyHandlerInstalled = false;
+
+    function paneCollapse() {
+      if (!paneCurrentlyExpanded) return;
+      if (paneCurrentlyExpanded.isConnected) {
+        paneCurrentlyExpanded.classList.remove('expanded');
+        const btn = paneCurrentlyExpanded.querySelector('.pane-expand-btn');
+        if (btn) {
+          btn.textContent = '⤢';
+          btn.title = 'Expand to full width';
+        }
+      }
+      paneCurrentlyExpanded = null;
+      if (paneBackdrop) paneBackdrop.classList.remove('visible');
+    }
+
+    function paneExpand(pane) {
+      if (paneCurrentlyExpanded === pane) { paneCollapse(); return; }
+      if (paneCurrentlyExpanded) paneCollapse();
+      pane.classList.add('expanded');
+      const btn = pane.querySelector('.pane-expand-btn');
+      if (btn) {
+        btn.textContent = '×';
+        btn.title = 'Collapse';
+      }
+      paneCurrentlyExpanded = pane;
+      if (paneBackdrop) paneBackdrop.classList.add('visible');
+    }
+
+    function setupPaneExpanders() {
+      if (!paneBackdrop) {
+        paneBackdrop = document.querySelector('.pane-backdrop');
+        if (!paneBackdrop) {
+          paneBackdrop = document.createElement('div');
+          paneBackdrop.className = 'pane-backdrop';
+          document.body.appendChild(paneBackdrop);
+        }
+        paneBackdrop.addEventListener('click', paneCollapse);
+      }
+      if (!paneKeyHandlerInstalled) {
+        paneKeyHandlerInstalled = true;
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape' && paneCurrentlyExpanded) paneCollapse();
+        });
+      }
+      // If a previously-expanded pane was just destroyed by a re-render,
+      // tear down the backdrop too so we don't leak a phantom overlay.
+      if (paneCurrentlyExpanded && !paneCurrentlyExpanded.isConnected) {
+        paneCollapse();
+      }
+      document.querySelectorAll('.yaml-pane, .ui-textarea-pane').forEach((pane) => {
+        if (pane.dataset.expanderWired === '1') return;
+        pane.dataset.expanderWired = '1';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pane-expand-btn';
+        btn.textContent = '⤢';
+        btn.title = 'Expand to full width';
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          paneExpand(pane);
+        });
+        pane.appendChild(btn);
+      });
+    }
+
+    setupPaneExpanders();
 
     refresh().catch(console.error);
     byId('pipeline-select').addEventListener('change', () => {
