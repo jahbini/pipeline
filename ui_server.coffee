@@ -700,7 +700,7 @@ isAllowedFilePath = (relativePath) ->
   return false unless typeof relativePath is 'string' and relativePath.length
   normalized = path.normalize(relativePath)
   return false if normalized.startsWith('..') or path.isAbsolute(normalized)
-  /^logs\//.test(normalized) or /^out\//.test(normalized) or /^diary\//.test(normalized) or /^build\//.test(normalized)
+  /^logs\//.test(normalized) or /^out\//.test(normalized) or /^diary\//.test(normalized) or /^build\//.test(normalized) or /^tested\//.test(normalized)
 
 readViewerFile = (relativePath) ->
   return null unless isAllowedFilePath(relativePath)
