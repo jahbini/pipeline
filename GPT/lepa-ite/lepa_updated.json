@@ -1,0 +1,874 @@
+{
+    "lepa_version": "0.3-draft",
+    "name": "LEPA Tarot Translation Framework",
+    "definition": {
+        "LEPA": "Logos / Ethos / Pathos / Anima",
+        "purpose": "Translate Tarot-like symbolic structure into a non-Tarot diagnostic narrative system.",
+        "translation_rule": "Each symbolic pattern becomes movement, imbalance, correction.",
+        "public_rule": "Do not use Tarot language in generated public-facing output unless explicitly requested.",
+        "core_fields": [
+            "movement",
+            "imbalance",
+            "correction"
+        ],
+        "question_model": "Kama, Artha, and Dharma contribute to the composite question 'Do I like this?'; Moksha answers the directional question 'Which way is up?'"
+    },
+    "core_questions": {
+        "do_i_like_this": {
+            "function": "composite evaluation",
+            "description": "A real answer requires consultation among feeling, truth, practicality, legality, ethics, and coherence.",
+            "contributing_aims": [
+                "kama",
+                "artha",
+                "dharma"
+            ],
+            "consults": {
+                "pathos": "Does it feel good, alive, attractive, or emotionally true?",
+                "ethos": "Is it legal, ethical, honorable, and socially sustainable?",
+                "logos": "Does it make sense, is it true, and is it free of deception?",
+                "anima": "Does it carry enough vitality to matter?"
+            },
+            "public_render": "Do I like this? means: does this pass feeling, truth, conduct, and vitality together?"
+        },
+        "which_way_is_up": {
+            "function": "directional orientation",
+            "description": "The anima aligns with the upward direction rather than merely seeking comfort, success, approval, or release from the cycle.",
+            "contributing_aims": [
+                "moksha"
+            ],
+            "consults": {
+                "anima": "Is the life-force aligned with the upward direction?",
+                "logos": "Can thought recognize the direction without over-framing it?",
+                "ethos": "Can conduct follow the direction without becoming rigid?",
+                "pathos": "Can feeling tolerate the direction even when it is uncomfortable?"
+            },
+            "public_render": "Which way is up? means: where does life become more coherent, worthy, and awake?"
+        }
+    },
+    "purushartha_bridge": {
+        "purpose": "Map the four Hindu aims into LEPA as a diagnostic layer rather than a one-to-one identity system.",
+        "public_rule": "Use these as life-aim language only when helpful; public-facing output may instead use the two questions.",
+        "aims": {
+            "kama": {
+                "plain_name": "desire, pleasure, attraction, enjoyment",
+                "lepa_function": "pathos-led evaluation of attraction and emotional fit",
+                "question_role": "contributes to 'Do I like this?'",
+                "primary_energy": "pathos",
+                "secondary_energy": "anima",
+                "movement": "life is drawn toward experience, pleasure, beauty, relationship, and emotional contact",
+                "imbalance": "attraction is mistaken for direction",
+                "correction": "let feeling speak, then consult truth and conduct before acting",
+                "jim_render": "Wanting a thing gets a vote, but it does not get the whole courthouse."
+            },
+            "artha": {
+                "plain_name": "resources, structure, capability, practical success",
+                "lepa_function": "logos and ethos test whether desire can be built into workable life",
+                "question_role": "contributes to 'Do I like this?'",
+                "primary_energy": "logos_ethos",
+                "secondary_energy": "anima",
+                "movement": "resources, tools, structures, and plans gather around a possible aim",
+                "imbalance": "capacity, money, or success is mistaken for worthiness",
+                "correction": "make the structure serve life rather than replacing it",
+                "jim_render": "A ladder is useful, but only if it leans against the right wall."
+            },
+            "dharma": {
+                "plain_name": "right conduct, duty, lawful and ethical fit, proper relation",
+                "lepa_function": "ethos checks whether action is honorable, lawful, and socially coherent",
+                "question_role": "contributes to 'Do I like this?'",
+                "primary_energy": "ethos",
+                "secondary_energy": "logos",
+                "movement": "conduct is measured against role, duty, consequence, and right relation",
+                "imbalance": "rule-following replaces living judgment",
+                "correction": "act rightly without letting righteousness become a cage",
+                "jim_render": "Doing right is not the same as polishing your halo in public."
+            },
+            "moksha": {
+                "plain_name": "upward alignment, liberation of direction, awakened orientation",
+                "lepa_function": "anima aligns with 'which way is up'",
+                "question_role": "answers 'Which way is up?'",
+                "primary_energy": "anima",
+                "secondary_energy": "logos_ethos_pathos",
+                "movement": "life-force finds the upward axis that can orient thought, conduct, and feeling",
+                "imbalance": "escape, detachment, or spiritual language replaces real orientation",
+                "correction": "align vitality with the upward direction inside the living situation",
+                "jim_render": "Up is not somewhere else. Up is the way your next honest step points."
+            }
+        },
+        "diagnostic_flow": [
+            "Kama asks what attracts or repels.",
+            "Artha asks what can be made workable.",
+            "Dharma asks what is lawful, ethical, and honorable.",
+            "Together they answer: Do I like this?",
+            "Moksha asks whether the anima is aligned with upward direction.",
+            "Moksha answers: Which way is up?"
+        ],
+        "one_line": "Kama, Artha, and Dharma form the council of preference; Moksha calibrates the compass."
+    },
+    "energy_model": {
+        "logos": {
+            "domain": "thought, interpretation, meaning, signal",
+            "motion_failure": "noise, over-framing, argument replacing truth",
+            "suit_shadow": "Swords",
+            "question_function": "tests whether the claim makes sense and whether it is true or deceptive"
+        },
+        "ethos": {
+            "domain": "conduct, structure, duty, material action",
+            "motion_failure": "grabbing, stalling, rigid repetition",
+            "suit_shadow": "Pentacles",
+            "question_function": "tests whether the action is legal, ethical, honorable, and sustainable"
+        },
+        "pathos": {
+            "domain": "emotion, desire, reaction, attraction",
+            "motion_failure": "spike, contagion, capture, overreaction",
+            "suit_shadow": "Cups",
+            "question_function": "tests whether the thing feels good, alive, desirable, or emotionally fitting"
+        },
+        "anima": {
+            "domain": "life-force, vitality, axis, coherence",
+            "motion_failure": "drag, depletion, wobble, collapse",
+            "suit_shadow": "Wands",
+            "question_function": "tests whether vitality is aligned with the upward axis"
+        }
+    },
+    "dynamical_model": {
+        "center": "self",
+        "orbiting_bodies": [
+            "logos",
+            "ethos",
+            "pathos"
+        ],
+        "axis": "anima",
+        "constraint": "Logos, Ethos, and Pathos remain bounded near the self, like coupled bodies held at fixed distance.",
+        "eigenvector_note": "Anima may be treated as the dominant direction or coherence mode emerging from Logos/Ethos/Pathos interaction.",
+        "two_question_note": "The orbiting bodies help answer 'Do I like this?'; the anima-axis answers 'Which way is up?'",
+        "one_line": "Logos, Ethos, and Pathos move around the self; Anima determines whether they move together or fall apart."
+    },
+    "voice_policy": {
+        "tommy": {
+            "allow_mensch_labels": true,
+            "tone": "sharp, mocking, reactive"
+        },
+        "jim": {
+            "allow_mensch_labels": false,
+            "tone": "grounded, human, observational"
+        },
+        "southwick": {
+            "allow_mensch_labels": false,
+            "tone": "precise, mechanism-level"
+        },
+        "roger": {
+            "allow_mensch_labels": false,
+            "tone": "indirect, drifting, incomplete"
+        }
+    },
+    "distortions": {
+        "babbelmensch": {
+            "energy": "logos",
+            "movement": "logos over-oscillation",
+            "imbalance": "words replace thinking",
+            "correction": "quiet the signal and check the truth",
+            "jim_render": "talking so much he never has to think straight"
+        },
+        "victimensch": {
+            "energy": "logos",
+            "movement": "authorship displaced outward",
+            "imbalance": "blame becomes identity",
+            "correction": "restore accurate authorship",
+            "jim_render": "a fellow forever keeping the blame outside himself"
+        },
+        "victlessmensch": {
+            "energy": "logos",
+            "movement": "responsibility denied",
+            "imbalance": "nothing is accepted as one\u2019s own to carry",
+            "correction": "admit the part that belongs to the self",
+            "jim_render": "won\u2019t admit anything\u2019s his to carry"
+        },
+        "molotovmensch": {
+            "energy": "pathos",
+            "movement": "pathos spike",
+            "imbalance": "reaction outruns perception",
+            "correction": "pause before ignition",
+            "jim_render": "anger looking for a doorway"
+        },
+        "sensomensch": {
+            "energy": "pathos",
+            "movement": "desire captures direction",
+            "imbalance": "sensation mistaken for purpose",
+            "correction": "choose one real next step",
+            "jim_render": "letting appetite do the steering"
+        },
+        "grabbermensch": {
+            "energy": "ethos",
+            "movement": "ethos locks into taking",
+            "imbalance": "accumulation replaces purpose",
+            "correction": "release what blocks movement",
+            "jim_render": "mistaking possession for purpose"
+        },
+        "stupomensch": {
+            "energy": "ethos",
+            "movement": "ethos damping",
+            "imbalance": "avoidance becomes identity",
+            "correction": "take one concrete action",
+            "jim_render": "letting life go by so he wouldn\u2019t have to answer it"
+        },
+        "slobbermensch": {
+            "energy": "anima",
+            "movement": "axis drag",
+            "imbalance": "overconsumption clogs vitality",
+            "correction": "reduce intake until life-force clears",
+            "jim_render": "feeding heaviness and calling it comfort"
+        },
+        "spentmensch": {
+            "energy": "anima",
+            "movement": "orbit collapse",
+            "imbalance": "depletion without recovery",
+            "correction": "recover before forcing another push",
+            "jim_render": "burned through more than he knew how to refill"
+        }
+    },
+    "court_roles": {
+        "king": {
+            "public_name": "The Direction",
+            "system_role": "sets policy, intent, structure",
+            "energy_bias": "ethos",
+            "restaurant_example": "owner, menu, pricing, house rules",
+            "movement": "governing pattern stabilizes or overcontrols the system",
+            "imbalance": "authority detaches from lived response",
+            "correction": "adjust direction from feedback"
+        },
+        "queen": {
+            "public_name": "The Populace",
+            "system_role": "living field that responds to and sustains the pattern",
+            "energy_bias": "pathos",
+            "restaurant_example": "patrons taken as a whole",
+            "movement": "collective response amplifies or rejects the governing pattern",
+            "imbalance": "crowd mood overwhelms discernment",
+            "correction": "read the field without surrendering to it"
+        },
+        "knight": {
+            "public_name": "The Hands",
+            "system_role": "execution, production, hands-on doing",
+            "energy_bias": "ethos_anima",
+            "restaurant_example": "chopping vegetables, cooking, serving",
+            "movement": "direct transformation of input into output",
+            "imbalance": "work exceeds sustainable flow",
+            "correction": "pace execution to capacity"
+        },
+        "page": {
+            "public_name": "The Signal",
+            "system_role": "marketing, messaging, sensing demand",
+            "energy_bias": "logos_pathos",
+            "restaurant_example": "menu board, ads, word of mouth, social signal",
+            "movement": "message shapes perception before action",
+            "imbalance": "signal detaches from capacity",
+            "correction": "bring promise back into alignment with delivery"
+        }
+    },
+    "upper_arcana": [
+        {
+            "source_symbol": "fool",
+            "public_name": "The First Step",
+            "energy": "mixed",
+            "movement": "motion begins before certainty",
+            "imbalance": "innocence without orientation",
+            "correction": "step forward while keeping attention awake",
+            "jim_render": "Every road starts before a man has a map worth trusting."
+        },
+        {
+            "source_symbol": "magician",
+            "public_name": "The Skilled Hand",
+            "energy": "logos_ethos_anima",
+            "movement": "intention turns into method",
+            "imbalance": "cleverness without service",
+            "correction": "align skill with purpose",
+            "jim_render": "A tool is only magic when the hand knows why it picked it up."
+        },
+        {
+            "source_symbol": "high_priestess",
+            "public_name": "The Quiet Knowing",
+            "energy": "logos_anima",
+            "movement": "meaning gathers below speech",
+            "imbalance": "silence used to avoid engagement",
+            "correction": "listen deeply, then test gently",
+            "jim_render": "Some truths arrive quiet enough that you can miss them by talking."
+        },
+        {
+            "source_symbol": "empress",
+            "public_name": "The Living Field",
+            "energy": "pathos_anima",
+            "movement": "life responds through abundance and care",
+            "imbalance": "nurture becomes control or indulgence",
+            "correction": "support growth without possession",
+            "jim_render": "A garden needs tending, not smothering."
+        },
+        {
+            "source_symbol": "emperor",
+            "public_name": "The Frame",
+            "energy": "ethos",
+            "movement": "structure holds motion in usable form",
+            "imbalance": "order hardens into domination",
+            "correction": "make rules that protect life, not pride",
+            "jim_render": "A good fence keeps the goats safe; a bad one just proves somebody owns wire."
+        },
+        {
+            "source_symbol": "hierophant",
+            "public_name": "The Shared Pattern",
+            "energy": "ethos_logos",
+            "movement": "tradition carries tested meaning",
+            "imbalance": "received form replaces living truth",
+            "correction": "honor the pattern while checking its purpose",
+            "jim_render": "A custom can be a bridge or a cage, depending on who remembers why it started."
+        },
+        {
+            "source_symbol": "lovers",
+            "public_name": "The Chosen Bond",
+            "energy": "pathos_logos",
+            "movement": "separate centers enter willing alignment",
+            "imbalance": "attraction overrides discernment",
+            "correction": "choose with both feeling and clarity",
+            "jim_render": "Wanting a thing is not the same as choosing it."
+        },
+        {
+            "source_symbol": "chariot",
+            "public_name": "The Harnessed Motion",
+            "energy": "ethos_anima",
+            "movement": "opposing forces move under one direction",
+            "imbalance": "willpower outruns wisdom",
+            "correction": "drive only after the team is aligned",
+            "jim_render": "You can hold the reins tight and still be headed into a ditch."
+        },
+        {
+            "source_symbol": "strength",
+            "public_name": "The Gentle Command",
+            "energy": "anima_pathos",
+            "movement": "force becomes calm through steadiness",
+            "imbalance": "power turns into pressure",
+            "correction": "use steadiness before force",
+            "jim_render": "Real strength does not always raise its voice."
+        },
+        {
+            "source_symbol": "hermit",
+            "public_name": "The Inner Lamp",
+            "energy": "logos_anima",
+            "movement": "attention withdraws to recover signal",
+            "imbalance": "solitude becomes avoidance",
+            "correction": "return with what the quiet taught",
+            "jim_render": "Sometimes a man steps away not to disappear, but to hear himself again."
+        },
+        {
+            "source_symbol": "wheel_of_fortune",
+            "public_name": "The Turning Weather",
+            "energy": "mixed",
+            "movement": "conditions rotate beyond direct control",
+            "imbalance": "mistaking a season for the self",
+            "correction": "adapt without losing center",
+            "jim_render": "Weather changes whether you voted for it or not."
+        },
+        {
+            "source_symbol": "justice",
+            "public_name": "The True Measure",
+            "energy": "logos_ethos",
+            "movement": "action is weighed against consequence",
+            "imbalance": "judgment without context or accountability without mercy",
+            "correction": "measure clearly and answer honestly",
+            "jim_render": "Sooner or later the bill comes with the right numbers on it."
+        },
+        {
+            "source_symbol": "hanged_man",
+            "public_name": "The Turned View",
+            "energy": "logos_anima",
+            "movement": "the system pauses and reverses perspective",
+            "imbalance": "suspension becomes helplessness",
+            "correction": "use the pause to see what motion hid",
+            "jim_render": "Sometimes being stuck is the only way to notice the door was behind you."
+        },
+        {
+            "source_symbol": "death",
+            "public_name": "The Necessary Ending",
+            "energy": "anima_ethos",
+            "movement": "old form releases energy for new form",
+            "imbalance": "clinging to what has completed",
+            "correction": "let the finished thing finish",
+            "jim_render": "Some doors do not close because they hate you; they close because the room is over."
+        },
+        {
+            "source_symbol": "temperance",
+            "public_name": "The Steady Pour",
+            "energy": "mixed",
+            "movement": "separate energies enter phase without losing distinction",
+            "imbalance": "overcorrection, force, or refusal to blend",
+            "correction": "adjust gradually until thought, action, feeling, and vitality move together",
+            "jim_render": "Sometimes the trick is pouring a little from one cup to the other until the whole thing stops sloshing."
+        },
+        {
+            "source_symbol": "devil",
+            "public_name": "The Chosen Chain",
+            "energy": "pathos_ethos",
+            "movement": "habit binds energy into repeated capture",
+            "imbalance": "comfort becomes captivity",
+            "correction": "name the bargain and recover choice",
+            "jim_render": "A chain gets easier to wear when you start calling it jewelry."
+        },
+        {
+            "source_symbol": "tower",
+            "public_name": "The Broken Frame",
+            "energy": "mixed",
+            "movement": "false structure fails under accumulated strain",
+            "imbalance": "prideful stability collapses suddenly",
+            "correction": "rebuild only what can carry truth",
+            "jim_render": "When the wall falls, you learn which stones were only pretending."
+        },
+        {
+            "source_symbol": "star",
+            "public_name": "The Clear Night",
+            "energy": "anima_logos",
+            "movement": "orientation returns after collapse",
+            "imbalance": "hope without action",
+            "correction": "follow the small steady light",
+            "jim_render": "Not enough light to own the road, but enough to keep walking."
+        },
+        {
+            "source_symbol": "moon",
+            "public_name": "The Unclear Path",
+            "energy": "pathos_logos",
+            "movement": "feeling and imagination distort the signal",
+            "imbalance": "fear fills gaps in perception",
+            "correction": "move slowly until the light improves",
+            "jim_render": "At night, every stump gets a chance to look like a bear."
+        },
+        {
+            "source_symbol": "sun",
+            "public_name": "The Open Day",
+            "energy": "anima",
+            "movement": "coherence becomes visible and shared",
+            "imbalance": "confidence turns careless",
+            "correction": "let clarity warm without blinding",
+            "jim_render": "Some mornings even the dust looks honest."
+        },
+        {
+            "source_symbol": "judgement",
+            "public_name": "The Called Self",
+            "energy": "anima_ethos_logos",
+            "movement": "the system hears a summons to re-enter life differently",
+            "imbalance": "awakening without responsibility",
+            "correction": "answer the call with changed conduct",
+            "jim_render": "There comes a time when knowing better has to start walking around in your shoes."
+        },
+        {
+            "source_symbol": "world",
+            "public_name": "The Completed Circle",
+            "energy": "mixed",
+            "movement": "parts enter integrated completion",
+            "imbalance": "completion mistaken for stopping forever",
+            "correction": "receive the whole pattern, then begin again cleanly",
+            "jim_render": "A circle closes so the next road can start from somewhere real."
+        }
+    ],
+    "minor_arcana": {
+        "logos": [
+            {
+                "rank": "ace",
+                "public_name": "First Signal",
+                "movement": "a clear thought appears",
+                "imbalance": "idea without grounding",
+                "correction": "test the signal"
+            },
+            {
+                "rank": "two",
+                "public_name": "Split Frame",
+                "movement": "two interpretations balance",
+                "imbalance": "indecision defended as wisdom",
+                "correction": "choose a frame and observe results"
+            },
+            {
+                "rank": "three",
+                "public_name": "Pierced Thought",
+                "movement": "truth cuts through comfort",
+                "imbalance": "pain becomes the whole meaning",
+                "correction": "separate fact from wound"
+            },
+            {
+                "rank": "four",
+                "public_name": "Quiet Mind",
+                "movement": "thinking rests to recover signal",
+                "imbalance": "rest becomes avoidance",
+                "correction": "return when clarity improves"
+            },
+            {
+                "rank": "five",
+                "public_name": "Winning the Wrong Fight",
+                "movement": "argument separates from truth",
+                "imbalance": "victory replaces understanding",
+                "correction": "stop defending the frame"
+            },
+            {
+                "rank": "six",
+                "public_name": "Crossing Thought",
+                "movement": "mind moves from turbulence toward order",
+                "imbalance": "escape without integration",
+                "correction": "carry the lesson forward"
+            },
+            {
+                "rank": "seven",
+                "public_name": "Hidden Angle",
+                "movement": "strategy bends around direct conflict",
+                "imbalance": "cleverness becomes evasion",
+                "correction": "use strategy without losing honesty"
+            },
+            {
+                "rank": "eight",
+                "public_name": "Bounded Signal",
+                "movement": "thought traps itself in constraints",
+                "imbalance": "limits mistaken for reality",
+                "correction": "check which bonds are imagined"
+            },
+            {
+                "rank": "nine",
+                "public_name": "Night Noise",
+                "movement": "thought feeds on fear",
+                "imbalance": "worry amplifies itself",
+                "correction": "name the fear and reduce the loop"
+            },
+            {
+                "rank": "ten",
+                "public_name": "Thought Collapse",
+                "movement": "mental burden reaches terminal overload",
+                "imbalance": "ending interpreted as annihilation",
+                "correction": "let the old frame fall"
+            }
+        ],
+        "pathos": [
+            {
+                "rank": "ace",
+                "public_name": "First Feeling",
+                "movement": "emotion opens as fresh water",
+                "imbalance": "feeling mistaken for destiny",
+                "correction": "receive without drowning"
+            },
+            {
+                "rank": "two",
+                "public_name": "Mutual Flow",
+                "movement": "two centers exchange feeling",
+                "imbalance": "bond becomes dependency",
+                "correction": "keep reciprocity clear"
+            },
+            {
+                "rank": "three",
+                "public_name": "Shared Joy",
+                "movement": "feeling spreads through the group",
+                "imbalance": "celebration loses center",
+                "correction": "enjoy without scattering"
+            },
+            {
+                "rank": "four",
+                "public_name": "Closed Cup",
+                "movement": "feeling refuses what is offered",
+                "imbalance": "numbness hides as discernment",
+                "correction": "notice what is still available"
+            },
+            {
+                "rank": "five",
+                "public_name": "Spilled Feeling",
+                "movement": "loss captures attention",
+                "imbalance": "grief blinds remaining support",
+                "correction": "honor loss and turn toward what remains"
+            },
+            {
+                "rank": "six",
+                "public_name": "Remembered Water",
+                "movement": "old feeling returns",
+                "imbalance": "memory replaces present contact",
+                "correction": "take the gift, not the trap"
+            },
+            {
+                "rank": "seven",
+                "public_name": "Too Many Mirrors",
+                "movement": "desire scatters attention",
+                "imbalance": "sensation mistaken for direction",
+                "correction": "choose one real next step"
+            },
+            {
+                "rank": "eight",
+                "public_name": "Leaving the Cup",
+                "movement": "feeling withdraws from what no longer feeds life",
+                "imbalance": "departure without understanding",
+                "correction": "leave consciously"
+            },
+            {
+                "rank": "nine",
+                "public_name": "Satisfied Vessel",
+                "movement": "emotional fulfillment gathers",
+                "imbalance": "pleasure becomes self-containment",
+                "correction": "let satisfaction stay generous"
+            },
+            {
+                "rank": "ten",
+                "public_name": "Full Household",
+                "movement": "feeling becomes shared belonging",
+                "imbalance": "harmony becomes performance",
+                "correction": "protect the real bond beneath the image"
+            }
+        ],
+        "ethos": [
+            {
+                "rank": "ace",
+                "public_name": "First Ground",
+                "movement": "practical possibility appears",
+                "imbalance": "opportunity hoarded before use",
+                "correction": "plant it"
+            },
+            {
+                "rank": "two",
+                "public_name": "Balanced Load",
+                "movement": "resources alternate under pressure",
+                "imbalance": "juggling replaces decision",
+                "correction": "set priority"
+            },
+            {
+                "rank": "three",
+                "public_name": "Skilled Work",
+                "movement": "craft joins plan and cooperation",
+                "imbalance": "approval replaces mastery",
+                "correction": "serve the work"
+            },
+            {
+                "rank": "four",
+                "public_name": "Closed Hand",
+                "movement": "action locks into possession",
+                "imbalance": "holding replaces living",
+                "correction": "release what blocks motion"
+            },
+            {
+                "rank": "five",
+                "public_name": "Cold Street",
+                "movement": "material support thins",
+                "imbalance": "scarcity narrows perception",
+                "correction": "seek connection and shelter"
+            },
+            {
+                "rank": "six",
+                "public_name": "Measured Giving",
+                "movement": "resources circulate through judgment",
+                "imbalance": "help becomes control",
+                "correction": "give without owning the receiver"
+            },
+            {
+                "rank": "seven",
+                "public_name": "Patient Field",
+                "movement": "work waits for result",
+                "imbalance": "impatience disturbs growth",
+                "correction": "observe before intervening"
+            },
+            {
+                "rank": "eight",
+                "public_name": "Repeated Craft",
+                "movement": "skill forms through disciplined action",
+                "imbalance": "repetition becomes narrowness",
+                "correction": "practice with awareness"
+            },
+            {
+                "rank": "nine",
+                "public_name": "Well-Tended Place",
+                "movement": "structure supports independent ease",
+                "imbalance": "comfort isolates",
+                "correction": "enjoy without enclosure"
+            },
+            {
+                "rank": "ten",
+                "public_name": "Built House",
+                "movement": "material pattern becomes legacy",
+                "imbalance": "inheritance hardens into obligation",
+                "correction": "keep the structure alive"
+            }
+        ],
+        "anima": [
+            {
+                "rank": "ace",
+                "public_name": "First Flame",
+                "movement": "vital impulse ignites",
+                "imbalance": "spark without direction",
+                "correction": "give the flame a worthy path"
+            },
+            {
+                "rank": "two",
+                "public_name": "Held Fire",
+                "movement": "energy surveys possible expansion",
+                "imbalance": "potential replaces movement",
+                "correction": "commit to one horizon"
+            },
+            {
+                "rank": "three",
+                "public_name": "Far Signal",
+                "movement": "energy extends beyond the current place",
+                "imbalance": "expectation outruns readiness",
+                "correction": "prepare for what was invited"
+            },
+            {
+                "rank": "four",
+                "public_name": "Shared Hearth",
+                "movement": "vitality stabilizes in celebration",
+                "imbalance": "comfort resists further growth",
+                "correction": "rest, then rejoin movement"
+            },
+            {
+                "rank": "five",
+                "public_name": "Sparks Crossing",
+                "movement": "energies collide in contest",
+                "imbalance": "friction becomes identity",
+                "correction": "turn conflict into coordination"
+            },
+            {
+                "rank": "six",
+                "public_name": "Visible Flame",
+                "movement": "life-force receives recognition",
+                "imbalance": "praise becomes fuel dependency",
+                "correction": "let recognition confirm, not control"
+            },
+            {
+                "rank": "seven",
+                "public_name": "Held Ground",
+                "movement": "energy defends its position",
+                "imbalance": "defense becomes constant posture",
+                "correction": "discern real threat from habit"
+            },
+            {
+                "rank": "eight",
+                "public_name": "Swift Fire",
+                "movement": "energy moves quickly through the system",
+                "imbalance": "speed exceeds integration",
+                "correction": "let motion land"
+            },
+            {
+                "rank": "nine",
+                "public_name": "The Last Ember",
+                "movement": "holding position while energy thins",
+                "imbalance": "depletion without surrender",
+                "correction": "recover before forcing another push"
+            },
+            {
+                "rank": "ten",
+                "public_name": "Overburdened Flame",
+                "movement": "vital energy carries too much load",
+                "imbalance": "duty crushes life-force",
+                "correction": "put down what is not yours"
+            }
+        ]
+    },
+    "court_by_energy": {
+        "logos": {
+            "king": {
+                "public_name": "Director of Meaning",
+                "movement": "frames the accepted interpretation",
+                "imbalance": "definition becomes domination",
+                "correction": "let truth update the frame"
+            },
+            "queen": {
+                "public_name": "Field of Meaning",
+                "movement": "the group responds through shared interpretation",
+                "imbalance": "consensus becomes echo",
+                "correction": "invite clean signal"
+            },
+            "knight": {
+                "public_name": "Executor of Meaning",
+                "movement": "ideas are carried into argument or policy",
+                "imbalance": "missionary certainty",
+                "correction": "test before advancing"
+            },
+            "page": {
+                "public_name": "Signal of Meaning",
+                "movement": "new message enters the field",
+                "imbalance": "marketing outruns truth",
+                "correction": "make the message accurate"
+            }
+        },
+        "pathos": {
+            "king": {
+                "public_name": "Director of Feeling",
+                "movement": "emotional tone is governed",
+                "imbalance": "control of feeling becomes manipulation",
+                "correction": "protect honest feeling"
+            },
+            "queen": {
+                "public_name": "Field of Feeling",
+                "movement": "the populace shares mood and empathy",
+                "imbalance": "emotional contagion",
+                "correction": "stabilize before spreading"
+            },
+            "knight": {
+                "public_name": "Executor of Feeling",
+                "movement": "emotion rushes into action",
+                "imbalance": "reaction without reflection",
+                "correction": "slow the surge"
+            },
+            "page": {
+                "public_name": "Signal of Feeling",
+                "movement": "a feeling is announced or offered",
+                "imbalance": "sentiment detached from depth",
+                "correction": "make the signal sincere"
+            }
+        },
+        "ethos": {
+            "king": {
+                "public_name": "Director of Conduct",
+                "movement": "rules and resources are governed",
+                "imbalance": "control replaces stewardship",
+                "correction": "rule for life, not pride"
+            },
+            "queen": {
+                "public_name": "Field of Conduct",
+                "movement": "the populace embodies practical stability",
+                "imbalance": "comfort becomes stagnation",
+                "correction": "keep care moving"
+            },
+            "knight": {
+                "public_name": "Executor of Conduct",
+                "movement": "work gets done",
+                "imbalance": "labor exceeds sustainable pace",
+                "correction": "match work to capacity"
+            },
+            "page": {
+                "public_name": "Signal of Conduct",
+                "movement": "a practical offer or promise is made",
+                "imbalance": "promise exceeds delivery",
+                "correction": "align offer with capacity"
+            }
+        },
+        "anima": {
+            "king": {
+                "public_name": "Director of Vitality",
+                "movement": "life-force is directed toward purpose",
+                "imbalance": "drive becomes domination",
+                "correction": "guide vitality without forcing it"
+            },
+            "queen": {
+                "public_name": "Field of Vitality",
+                "movement": "the populace carries morale and warmth",
+                "imbalance": "morale becomes fever or dependency",
+                "correction": "restore natural rhythm"
+            },
+            "knight": {
+                "public_name": "Executor of Vitality",
+                "movement": "energy charges into movement",
+                "imbalance": "burnout through intensity",
+                "correction": "pace the fire"
+            },
+            "page": {
+                "public_name": "Signal of Vitality",
+                "movement": "fresh enthusiasm calls attention",
+                "imbalance": "spark without stamina",
+                "correction": "feed the flame carefully"
+            }
+        }
+    },
+    "pipeline_notes": {
+        "recommended_flow": [
+            "event_selection",
+            "lepa_diagnostics",
+            "two_question_evaluation",
+            "narrative_generation"
+        ],
+        "slowstep_rule": "Start by selecting one dominant motion failure and guide only the reflection phase.",
+        "generation_rule": "Public output should describe motion and correction, not symbolic source labels.",
+        "two_question_rule": "When interpreting an event, first evaluate 'Do I like this?' through Kama, Artha, and Dharma; then evaluate 'Which way is up?' through Moksha/anima alignment."
+    }
+}
