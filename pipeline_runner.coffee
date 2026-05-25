@@ -104,6 +104,35 @@ prefixLines = (pfx, s) -> (s ? '').split(/\r?\n/).map((l)-> pfx + l).join("\n")
 isPlainObject = (o) -> Object.prototype.toString.call(o) is '[object Object]'
 
 ###
+**Script resolution — the `scripts/` overriding seam.**
+
+A step's `run:` is a logical path under `scripts/`. The EXEC/CWD note
+above promised this seam: a project may ship its own step script and
+have it shadow a runner-bundled one. The candidate locations, in order:
+
+  1. an absolute `run:` — the literal path (no `~` expansion)
+  2. `<CWD>/scripts/<run>`  — project-owned (e.g. a step the project
+     declared in its own `override/<recipe>.yaml`)
+  3. `<EXEC>/scripts/<run>` — runner-bundled
+
+`stepScriptCandidates` lists those locations so a caller can name them
+in an error. `resolveStepScript` returns the first that **exists**, or
+`null` — it does NOT fabricate a path. No fallback: when nothing
+resolves the step fails where the script is needed (in `runStep`), with
+a message that names `run:` and every location tried.
+###
+stepScriptCandidates = (runRef) ->
+  ref = String(runRef ? '')
+  return [] unless ref.length
+  return [ref] if path.isAbsolute(ref)
+  [path.join(CWD,'scripts',ref), path.join(EXEC,'scripts',ref)]
+
+resolveStepScript = (runRef) ->
+  for candidate in stepScriptCandidates(runRef) when fs.existsSync(candidate)
+    return candidate
+  null
+
+###
 §2 — Python / MLX environment validation
 ==================================================================
 
@@ -117,8 +146,12 @@ versions of `mlx`, `mlx-lm`, and `mlx-metal`.
 The validation is loud on purpose: a silent venv drift between projects
 caused enough lost afternoons that we now refuse to start the pipeline
 unless the installed packages match the pinned versions byte-for-byte.
-The error messages carry the exact remediation command — don't soften
-them.
+
+It is NOT the runner's job to build or repair the venv — that belongs to
+the upper-level installer (pipeline-demo / pipeline-pipes create
+`<CWD>/.venv` from this `requirements.txt`). The runner only reports the
+fault and stops: each error names what is wrong and where it looked, with
+no remediation commands.
 ###
 
 resolvePython = (baseDir = CWD) ->
@@ -133,12 +166,8 @@ resolvePython = (baseDir = CWD) ->
     return candidate
 
   throw new Error [
-    "Python environment is not initialized for this pipeline."
-    "Expected a project virtualenv at #{path.join(baseDir, '.venv')}."
-    "Remediation:"
-    "  python3 -m venv .venv"
-    "  ./.venv/bin/python -m pip install --upgrade pip setuptools wheel"
-    "  ./.venv/bin/python -m pip install -r requirements.txt"
+    "No Python virtualenv found for this pipeline."
+    "Looked for: #{candidates.join(', ')}"
   ].join("\n")
 
 loadPinnedRequirements = (requirementsPath, packageNames = []) ->
@@ -205,13 +234,8 @@ print(json.dumps(payload))
 
   if details.missing?.length
     throw new Error [
-      "The project virtualenv is missing required MLX packages: #{details.missing.join(', ')}"
-      "Expected versions from requirements.txt:"
-      "  mlx==#{pinned['mlx']}"
-      "  mlx-lm==#{pinned['mlx-lm']}"
-      "  mlx-metal==#{pinned['mlx-metal']}"
-      "Remediation:"
-      "  ./.venv/bin/python -m pip install -r requirements.txt"
+      "Python virtualenv at #{pythonPath} is missing required MLX packages: #{details.missing.join(', ')}"
+      "Pinned by #{requirementsPath}: mlx==#{pinned['mlx']}, mlx-lm==#{pinned['mlx-lm']}, mlx-metal==#{pinned['mlx-metal']}"
     ].join("\n")
 
   mismatches = []
@@ -222,10 +246,8 @@ print(json.dumps(payload))
 
   if mismatches.length
     throw new Error [
-      "The project virtualenv does not match requirements.txt."
+      "Python virtualenv at #{pythonPath} does not match #{requirementsPath}:"
       mismatches.join("\n")
-      "Remediation:"
-      "  ./.venv/bin/python -m pip install -r requirements.txt"
     ].join("\n")
 
   {
@@ -687,15 +709,15 @@ class Memo
 How a pipeline name (`"test"`, `"diary_ite"`, …) becomes a sorted
 list of executable steps:
 
-1. `createExperimentObject` loads `<EXEC>/config/<name>.yaml`,
-   expands its `include:` list, then deep-merges in
-   `<CWD>/override/<name>.yaml` and `<CWD>/control_override.yaml`
-   (in that order). Strips UI directives. The result is the canonical
-   `experiment` written to `experiment.yaml` and into the Memo.
-2. `resolveOverridePath` handles the legacy → recipe-scoped
-   override migration: if a top-level `override.yaml` exists but
-   `override/<name>.yaml` does not, the top-level one is moved into
-   the recipe-scoped path and rewritten with `pipeline:` set.
+1. `resolveOverrideLayers` returns the override files that exist for
+   this pipeline, low→high precedence: legacy `<CWD>/override.yaml`
+   then recipe-scoped `<CWD>/override/<name>.yaml`. Nothing is copied
+   or migrated.
+2. `createExperimentObject` loads `<EXEC>/config/<name>.yaml`, expands
+   its `include:` list, then deep-merges those override layers and
+   finally `<CWD>/control_override.yaml`. Strips UI directives. The
+   result is the canonical `experiment` written to `experiment.yaml`
+   and into the Memo.
 3. `discoverSteps` walks the experiment dict, picks out anything
    that looks like a step (has `run:` or `run_mlx`), and skips any
    step with `depends_on: never` — the runtime "off switch" for an
@@ -710,33 +732,41 @@ Artifact-key normalization (`needs`/`makes`) and dep normalization
 are deliberately strict: a typo in `needs:` will fail loudly at
 startup rather than silently produce an empty wait.
 ###
-createExperimentObject = (configPath, overridePath, controlOverridePath = null) ->
+createExperimentObject = (configPath, overridePaths, controlOverridePath = null) ->
   recipe = expandIncludes loadYamlSafe(configPath), path.dirname(configPath)
   merged = deepMerge {}, recipe
-  merged = deepMerge merged, loadYamlSafe(overridePath)
+  layers = if Array.isArray(overridePaths) then overridePaths else [overridePaths]
+  for overridePath in layers when overridePath
+    merged = deepMerge merged, loadYamlSafe(overridePath)
   if controlOverridePath? and fs.existsSync(controlOverridePath)
     merged = deepMerge merged, loadYamlSafe(controlOverridePath)
   return stripUiDirectives(merged)
 
-overridePathForPipeline = (pipelineName) ->
-  name = String(pipelineName ? '').trim()
-  return path.join(CWD, 'override.yaml') unless name.length
-  path.join CWD, 'override', "#{name}.yaml"
+###
+**Override layers — non-destructive, documented precedence.**
 
-resolveOverridePath = (pipelineName) ->
-  recipeOverridePath = overridePathForPipeline pipelineName
-  return recipeOverridePath if fs.existsSync recipeOverridePath
+`pipeline_architecture.md` describes legacy `override.yaml` and the
+recipe-scoped `override/<recipe>.yaml` as two *distinct* merge layers —
+legacy lower, recipe-scoped higher. We honor that by returning every
+override file that exists, in ascending precedence, and letting
+`createExperimentObject` deep-merge them in order.
+
+This replaces the old "migrate legacy → recipe-scoped on first run, then
+only ever read the copy" behavior, which silently froze a project's
+`override.yaml`: once the copy existed, later edits to `override.yaml`
+never reached `experiment.yaml`. The runner no longer writes or copies
+anything here — the UI still owns `override/<recipe>.yaml` as its own
+edit surface (`ui_server.coffee` `readOverride`).
+###
+resolveOverrideLayers = (pipelineName) ->
+  layers = []
   legacyPath = path.join CWD, 'override.yaml'
-  if fs.existsSync legacyPath
-    legacy = loadYamlSafe legacyPath
-    if legacy? and typeof legacy is 'object' and not Array.isArray(legacy)
-      name = String(pipelineName ? '').trim()
-      legacy.pipeline ?= name if name.length
-      fs.mkdirSync path.dirname(recipeOverridePath), { recursive: true }
-      fs.writeFileSync recipeOverridePath, yaml.dump(legacy, lineWidth: 120, noRefs: true), 'utf8'
-      return recipeOverridePath
-    return legacyPath
-  recipeOverridePath
+  layers.push legacyPath if fs.existsSync legacyPath
+  name = String(pipelineName ? '').trim()
+  if name.length
+    recipeOverridePath = path.join CWD, 'override', "#{name}.yaml"
+    layers.push recipeOverridePath if fs.existsSync recipeOverridePath
+  layers
 
 normalizeDeps = (d) ->
   return [] unless d?
@@ -1102,7 +1132,16 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
         try uiRecorder?.event type:'step', phase:'finished', step:n, status:'failed', error:String(errMsg ? "failed") catch then null
         rej new Error(String(errMsg ? "failed"))
 
-    script = path.join(EXEC,'scripts',def.run)
+    # **Script needed here — fail directly if it is missing.** No fallback
+    # to a guessed path and no silent drop into the legacy spawn: when
+    # `resolveStepScript` finds nothing, this is the point of use, so we
+    # error with the `run:` value and every location tried. The human reads
+    # the same `run:`/resolved location in `params/#{n}.yaml`.
+    script = resolveStepScript(def.run)
+    unless script?
+      tried = stepScriptCandidates(def.run).join(', ') or '(none)'
+      finish(false, "step #{n}: script not found for run '#{def.run}' (looked: #{tried})")
+      return
 
     primeStepMakes = ->
       for artifactKey in (def.makes ? [])
@@ -1356,9 +1395,9 @@ main = ->
     console.error "control_override.yaml or legacy override.yaml missing pipeline"
     process.exit(1)
 
-  overridePath = resolveOverridePath pipelineName
+  overrideLayers = resolveOverrideLayers pipelineName
   configPath = path.join(EXEC,'config',"#{pipelineName}.yaml")
-  experiment = createExperimentObject configPath, overridePath, controlOverridePath
+  experiment = createExperimentObject configPath, overrideLayers, controlOverridePath
   U.saveRun
     pipeline: pipelineName
     pid: process.pid
@@ -1411,6 +1450,13 @@ main = ->
     for k in steps[n].makes
       throw new Error "Artifact '#{k}' is produced by multiple steps: #{producedBy[k]} and #{n}" if producedBy[k]?
       producedBy[k] = n
+    # Surface the executable script location alongside the step's declared
+    # `run:` so a human comparing `state/` against `params/` can see exactly
+    # which file the runner resolved (`null` = not found, so the step will
+    # fail when it runs). This records; it does NOT pre-validate — a step
+    # restored as `done` is still skipped, and the bad location here is the
+    # clue to clear its state file or fix the override.
+    steps[n].run_resolved = resolveStepScript(steps[n].run) if steps[n].run?
     M.saveThis "params/#{n}.yaml", steps[n]
 
   # ---------------- ARTIFACT WIRING ----------------
@@ -1600,6 +1646,21 @@ main = ->
     console.log "\n(CTRL+C) Exiting..."
     process.exit(130)
 
-# **Entry point.** Everything above is definitions; this is the only
-# top-level invocation in the file.
-main()
+# **Entry point.** Run only when invoked directly (`coffee
+# pipeline_runner.coffee` or the `pipeline` bin). When the file is
+# `require`d instead — e.g. a test harness exercising the spec-merge in
+# isolation — we skip `main()` and expose the internals below for the
+# caller to drive. `ui_server.coffee` *spawns* the runner as a
+# subprocess, so it never trips this guard.
+main() if require.main is module
+
+module.exports = {
+  deepMerge
+  stripUiDirectives
+  loadYamlSafe
+  expandIncludes
+  createExperimentObject
+  resolveOverrideLayers
+  stepScriptCandidates
+  resolveStepScript
+}

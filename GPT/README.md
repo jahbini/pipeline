@@ -74,13 +74,38 @@ Current repository assumptions worth preserving:
     together let the runner pick up at the dead step on next launch. That is
     why the UI prominently features the `Pipeline Death` pane and the
     `Erase pipeline.json` button.
-- overrides are recipe-scoped: prefer `override/<pipeline>.yaml` for human
-  overrides associated with a selected config recipe
-- legacy `override.yaml` remains a fallback/bootstrap file for older pipes and
-  initial pipeline/model inference; when used for a selected pipeline it should
-  be materialized into `override/<pipeline>.yaml` for future runs
-- `control_override.yaml` is UI-owned run control, not a replacement for
-  recipe-scoped human overrides
+- overrides are LAYERED, not either/or. The runner
+  (`createExperimentObject`) deep-merges every override file that exists,
+  low→high precedence: `config/<recipe>.yaml` → legacy `override.yaml` →
+  recipe-scoped `override/<pipeline>.yaml` → `control_override.yaml`.
+  `resolveOverrideLayers` returns that ordered list; the runner copies and
+  migrates nothing.
+- legacy `override.yaml` is the project-root human layer (lowest human
+  precedence) and is **always re-read and merged**, so edits to it always
+  reach `experiment.yaml`. (Older builds migrated it once into
+  `override/<pipeline>.yaml` and then never re-read it; that silently froze
+  later `override.yaml` edits and is the bug this fixed.)
+- recipe-scoped `override/<pipeline>.yaml` is the higher human layer and the
+  surface the UI writes (`ui_server.coffee` `readOverride`). Prefer it for
+  per-recipe human overrides; it wins over legacy `override.yaml` on conflicts.
+- `control_override.yaml` is UI-owned run control (highest precedence), not a
+  replacement for recipe-scoped human overrides
+- step scripts resolve PROJECT-FIRST (`resolveStepScript` over
+  `stepScriptCandidates`): a step's `run:` is tried at `<CWD>/scripts/<run>`
+  before the bundled `<EXEC>/scripts/<run>` (absolute `run:` is literal — no
+  `~` expansion). This is what lets a script referenced from a project's
+  `override.yaml` — living in the project, not in the `node_modules` package —
+  actually run.
+- NO fabricated paths, NO fallbacks. If nothing resolves, `resolveStepScript`
+  returns `null` and `runStep` fails **at the point of use** with a message
+  naming `run:` and every location tried — it does not drop into the legacy
+  spawn with a guessed path (which produced an opaque `coffee exit 1`).
+- the resolved location is recorded as `run_resolved` in `params/<step>.yaml`
+  (`null` = not found). This is the human's cross-check: `state/<step>.json`
+  says what happened, `params/<step>.yaml` says which script the runner
+  resolved. A step restored as `done` is still skipped (crash-resume is
+  intact, not pre-validated); a wrong/`null` `run_resolved` there is the clue
+  to clear that step's state file or fix the override.
 - **`experiment.yaml` is the materialized effective config of a run** —
   the fully-merged result of recipe + override + control_override with
   UI directives stripped, exactly what the runner consumed. When the
