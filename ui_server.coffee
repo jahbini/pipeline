@@ -1264,7 +1264,6 @@ handleSwitchPipe = (req, res) ->
 
   targetCwd = path.join(PIPES_ROOT, pipeName)
   return sendJson(res, 404, { ok: false, error: 'pipe directory not found' }) unless fs.existsSync(targetCwd) and fs.statSync(targetCwd).isDirectory()
-  return sendJson(res, 200, { ok: true, pipe: pipeName, cwd: targetCwd, unchanged: true }) if path.resolve(targetCwd) is path.resolve(CWD)
 
   fs.mkdirSync path.join(targetCwd, 'state'), { recursive: true }
   fs.mkdirSync path.join(targetCwd, 'logs'), { recursive: true }
