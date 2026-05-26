@@ -93,6 +93,18 @@ state. Keep that distinction clean — it is the seam along which
 EXEC = process.env.EXEC ? path.dirname(__filename)
 CWD  = process.cwd()
 
+# BASE — the consuming project's root. When the runner is installed as an
+# npm package, EXEC is `<base>/node_modules/@jahbini/pipeline`, and npm wipes
+# `node_modules/` on every install — so a durable venv can NOT live in EXEC
+# (nor in CWD, which is a transient pipe working dir). BASE is the directory
+# that contains the `node_modules/` EXEC sits under, giving the project one
+# stable place to keep `./.venv`. In the old monolith layout (runner lives at
+# the project root, no node_modules ancestor) BASE == EXEC.
+BASE = do ->
+  marker = "#{path.sep}node_modules#{path.sep}"
+  idx = EXEC.indexOf(marker)
+  if idx isnt -1 then EXEC.slice(0, idx) else EXEC
+
 ###
 Small utilities used throughout. `banner` is the loud section divider in
 console output; `prefixLines` is how step stdout gets the `┆ stepName |`
@@ -138,10 +150,13 @@ resolveStepScript = (runRef) ->
 
 **This entire section is the first plugin candidate.** When the runner
 becomes an npm module, MLX support moves out of the core and a project
-opts in by declaring a runtime plugin. Until then, the runner assumes
-every project has a Python virtualenv at `<CWD>/.venv` and that the
-shipped `requirements.txt` (at `<EXEC>/requirements.txt`) pins exact
-versions of `mlx`, `mlx-lm`, and `mlx-metal`.
+opts in by declaring a runtime plugin. Until then, the runner resolves a
+Python virtualenv from the first of `<CWD>/.venv`, `<BASE>/.venv`, or
+`<EXEC>/.venv` that exists (see `resolvePython` and the `BASE` note above),
+and expects the shipped `requirements.txt` (at `<EXEC>/requirements.txt`)
+to pin exact versions of `mlx`, `mlx-lm`, and `mlx-metal`. The `<BASE>/.venv`
+candidate is what lets a project keep one venv at its root with no per-pipe
+`.venv` and nothing venv-related inside the npm-wiped `node_modules`.
 
 The validation is loud on purpose: a silent venv drift between projects
 caused enough lost afternoons that we now refuse to start the pipeline
@@ -155,19 +170,25 @@ no remediation commands.
 ###
 
 resolvePython = (baseDir = CWD) ->
-  candidates = [
-    path.join(baseDir, '.venv', 'bin', 'python')
-    path.join(baseDir, '.venv', 'bin', 'python3')
-    path.join(EXEC, '.venv', 'bin', 'python')
-    path.join(EXEC, '.venv', 'bin', 'python3')
-  ]
+  # Resolution order: the pipe working dir (baseDir, default CWD), then the
+  # project BASE (durable venv home), then EXEC (monolith / fallback). BASE
+  # and EXEC coincide in the monolith layout, so dedupe to keep the search —
+  # and the error message — clean.
+  roots = []
+  for root in [baseDir, BASE, EXEC] when root not in roots
+    roots.push root
+
+  candidates = []
+  for root in roots
+    candidates.push path.join(root, '.venv', 'bin', 'python')
+    candidates.push path.join(root, '.venv', 'bin', 'python3')
 
   for candidate in candidates when fs.existsSync(candidate)
     return candidate
 
   throw new Error [
     "No Python virtualenv found for this pipeline."
-    "Looked for: #{candidates.join(', ')}"
+    "Looked for (in order): #{candidates.join(', ')}"
   ].join("\n")
 
 loadPinnedRequirements = (requirementsPath, packageNames = []) ->
@@ -1663,4 +1684,8 @@ module.exports = {
   resolveOverrideLayers
   stepScriptCandidates
   resolveStepScript
+  resolvePython
+  EXEC
+  BASE
+  CWD
 }

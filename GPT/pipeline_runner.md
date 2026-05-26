@@ -71,13 +71,24 @@ failing code. Prefer removing a masking fallback over adding a precheck.
 ## Python / MLX env — validate, never fix
 
 - `validatePythonEnvironment(CWD)` (run first in `main()`) resolves the venv
-  python (`<CWD>/.venv` first, `<EXEC>/.venv` fallback) and checks `mlx`,
-  `mlx-lm`, `mlx-metal` against the `==` pins in `<EXEC>/requirements.txt`.
-- `requirements.txt` is read from EXEC (the package); the venv is expected in
-  CWD (the project). The runner only ERRORS on a missing/mismatched venv with
-  a clean log; it does NOT create or repair it. Building `<CWD>/.venv` from
-  `requirements.txt` is the upper-level installer's job (pipeline-demo /
-  pipeline-pipes). Do not add remediation commands or auto-fix here.
+  python via `resolvePython` and checks `mlx`, `mlx-lm`, `mlx-metal` against
+  the `==` pins in `<EXEC>/requirements.txt`.
+- `resolvePython` candidate order: `<CWD>/.venv` → `<BASE>/.venv` →
+  `<EXEC>/.venv` (each `bin/python` then `bin/python3`; dupes collapsed). The
+  error names every path tried, in order.
+- `BASE` is the project root: if `EXEC` sits inside a `node_modules/`, BASE is
+  the dir containing that `node_modules`; otherwise (monolith layout) BASE ==
+  EXEC. **This is the load-bearing candidate**: when consumed as an npm package
+  `EXEC` is `node_modules/@jahbini/pipeline`, which npm WIPES on every install,
+  so a durable venv cannot live in EXEC (nor in CWD, a transient pipe dir). The
+  project keeps one `./.venv` at BASE with nothing venv-related in node_modules.
+- `requirements.txt` is read from EXEC (the package). The runner only ERRORS on
+  a missing/mismatched venv with a clean log; it does NOT create or repair it.
+  Building the venv from `requirements.txt` is the upper-level installer's job
+  (pipeline-demo / pipeline-pipes). Do not add remediation commands or auto-fix
+  here.
+- regression cover: `test/python_base.sh` + `test/python_base_probe.coffee`
+  prove the BASE venv resolves when neither CWD nor EXEC has one.
 
 ## Testing without a venv
 
