@@ -497,6 +497,7 @@
                 <select id="pipe-select"></select>
               </label>
               <button id="switch-pipe-button" type="button">Switch Pipe UI</button>
+              <button id="shutdown-ui-button" type="button">Shutdown UI Server</button>
               <button id="merge-pipe-button" type="button">Merge Adapter And SQLite From Other Machine</button>
               <div id="merge-result" class="hint mono"></div>
               <div id="merge-status" class="hint mono"></div>
@@ -1177,6 +1178,23 @@
       }
     }
 
+    async function shutdownUi() {
+      const result = byId('launch-result');
+      try {
+        const res = await fetch('/api/shutdown_ui', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'shutdown failed');
+        }
+        result.textContent = `UI server (pid ${data.pid}) shutting down — this page is now dead`;
+      } catch (err) {
+        result.textContent = String(err.message || err);
+      }
+    }
+
     async function clearPipelineState() {
       const result = byId('launch-result');
       try {
@@ -1197,16 +1215,11 @@
 
     async function switchPipe() {
       const result = byId('launch-result');
-      const pipe = byId('pipe-select').value;
+      const pipe = byId('pipe-select').value || '';   // empty => restart current workspace in place
       console.debug('[ui] switchPipe:click', {
         selectedPipe: pipe || '',
         currentPipe: currentPipeName || ''
       });
-      if (!pipe) return;
-      if (pipe === currentPipeName) {
-        result.textContent = `already on pipe ${pipe}`;
-        return;
-      }
       try {
         const res = await fetch('/api/switch_pipe', {
           method: 'POST',
@@ -1222,8 +1235,8 @@
         if (!res.ok || !data.ok) {
           throw new Error(data.error || 'switch pipe failed');
         }
-        result.textContent = `switching UI to pipe ${pipe}...`;
-        selectedPipeName = pipe;
+        result.textContent = pipe ? `switching UI to pipe ${pipe}...` : 'restarting UI...';
+        if (pipe) selectedPipeName = pipe;
         window.setTimeout(() => window.location.reload(), 1800);
       } catch (err) {
         result.textContent = String(err.message || err);
@@ -1421,6 +1434,9 @@
     });
 	    byId('switch-pipe-button').addEventListener('click', () => {
 	      switchPipe().catch(console.error);
+	    });
+	    byId('shutdown-ui-button').addEventListener('click', () => {
+	      shutdownUi().catch(console.error);
 	    });
 	    byId('pipe-select').addEventListener('change', (event) => {
 	      selectedPipeName = event.target.value || '';

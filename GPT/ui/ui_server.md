@@ -3,6 +3,35 @@ Area: `ui_server.coffee` + `ui/index.html`
 Purpose:
 - provide the pipe-local UI for selecting recipes, editing overrides, launching runs, and inspecting outputs/logs
 
+Deployment posture (human directive, May 2026):
+- this UI is a DEVELOPMENT-ONLY tool. It is never shipped to consumer/
+  production land. So its endpoints are intentionally UNAUTHENTICATED and
+  no auth is to be added — anyone who can reach `UI_PORT` is, by design, the
+  trusted developer. Do not add auth, CSRF guards, or confirm-dialogs to
+  these endpoints on the grounds of "production safety"; that is out of
+  scope for this surface.
+
+UI lifecycle controls (restart + kill switch):
+- the served page does NOT hot-reload. Relaunching `ui_server` (then
+  reloading the browser) is how edits to `ui_server.coffee` / `ui/index.html`
+  go live.
+- `POST /api/switch_pipe` (`handleSwitchPipe`, "Switch Pipe UI" button) is the
+  canonical RESTART action. A real pipe name switches+relaunches into
+  `pipes/<name>/`; an EMPTY pipe restarts the current workspace IN PLACE
+  (critical for non-`pipes/` workspaces like the repo root). It relaunches the
+  TARGET workspace's own `ui_server.coffee` (falls back to `EXEC_ROOT`'s),
+  preserving a project's edited UI + its `runtime.sqlite`. The button is never
+  disabled.
+- `POST /api/shutdown_ui` (`handleShutdownUi`, "Shutdown UI Server" button) is
+  the KILL SWITCH. A relaunched server is `detached` + `unref`'d, so the
+  browser is the only handle on it; this endpoint responds then
+  `process.exit(0)` after 150 ms (freeing `UI_PORT`). CONFIRMED WORKING.
+  This is distinct from "Kill Run" (`/api/kill`), which SIGTERMs the pipeline
+  run pid, not the server.
+- chicken-and-egg: a running server predates any change to its own restart/
+  shutdown routes, so it cannot load such a fix through itself. After editing
+  those handlers, do ONE manual relaunch; the buttons work thereafter.
+
 Current UI layout contract:
 - left column is observability:
   - `Pipeline Death`
