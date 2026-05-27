@@ -36,14 +36,27 @@ universal-substrate framing and `GPT/README.md` for repo-wide conventions.
 ## Step script resolution — project-first, no fabrication
 
 - `stepScriptCandidates(run)`: `[run]` if absolute (no `~` expansion), else
-  `[<CWD>/scripts/<run>, <EXEC>/scripts/<run>]`.
+  the three tiers, deduped: `[<CWD>/scripts/<run>, <BASE>/scripts/<run>,
+  <EXEC>/scripts/<run>]`. Tiers: CWD = per-pipe override/debug, BASE =
+  project-shared, EXEC = runner-bundled. BASE coincides with CWD or EXEC in
+  some layouts, hence the dedupe (monolith: BASE==EXEC → back to two
+  candidates).
 - `resolveStepScript(run)` returns the first candidate that EXISTS, or `null`.
   It never fabricates a path.
+- recipe configs resolve via `resolveConfigPath(name)`: project-shared
+  `<BASE>/config/<name>.yaml` shadows bundled `<EXEC>/config/<name>.yaml`
+  (no CWD tier — config is repo-common). Used by the runner's `main()` and
+  mirrored in `ui_server.coffee` (`BASE_ROOT` + its own `resolveConfigPath`)
+  so the recipe viewer/selector sees project recipes. Override-LAYER
+  resolution (`resolveOverrideLayers`) is unchanged — still CWD-only.
 - `runStep` resolves at the point of use; if `null`, it fails the step
   directly: `step <n>: script not found for run '<run>' (looked: …)`. No
   fallback into the legacy spawn with a guessed path.
 - `params/<step>.yaml` carries `run_resolved` (the resolved path, or `null`)
   so a human can read it alongside `state/<step>.json`.
+- regression cover for the BASE tier: `test/base_tier.sh` +
+  `test/base_tier_probe.coffee` (script CWD↠BASE↠EXEC shadowing, recipe
+  BASE↠EXEC shadowing).
 
 ## No fallbacks, no prechecks (design standard)
 

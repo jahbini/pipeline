@@ -91,6 +91,28 @@ resolveExecRoot = ->
   candidates[0] ? path.dirname(__filename)
 
 EXEC_ROOT = resolveExecRoot()
+
+# Project base — mirrors pipeline_runner's BASE. When the runner is installed as
+# an npm package EXEC_ROOT is `<base>/node_modules/@jahbini/pipeline` (npm wipes
+# node_modules), so the durable project root is the dir containing node_modules.
+# In the monolith layout BASE_ROOT == EXEC_ROOT.
+BASE_ROOT = do ->
+  marker = "#{path.sep}node_modules#{path.sep}"
+  idx = EXEC_ROOT.indexOf(marker)
+  if idx isnt -1 then EXEC_ROOT.slice(0, idx) else EXEC_ROOT
+
+# Recipe config resolution (mirrors pipeline_runner.resolveConfigPath): project-
+# shared `<BASE_ROOT>/config/<name>.yaml` shadows bundled `<EXEC_ROOT>/config/`.
+# No CWD tier — config is repo-common. Returns first existing; else the bundled path.
+resolveConfigPath = (name) ->
+  candidates = [
+    path.join(BASE_ROOT, 'config', "#{name}.yaml")
+    path.join(EXEC_ROOT, 'config', "#{name}.yaml")
+  ]
+  for candidate in candidates when fs.existsSync(candidate)
+    return candidate
+  candidates[candidates.length - 1]
+
 RUNNER = path.join(EXEC_ROOT, 'pipeline_runner.coffee')
 MERGE_SCRIPT = path.join(EXEC_ROOT, 'merge_sqlite_dbs.coffee')
 
@@ -378,7 +400,7 @@ scanUiFields = (recipe, override, uiControl) ->
 
 readRecipe = (pipeline) ->
   return {} unless typeof pipeline is 'string' and pipeline.length
-  readYaml path.join(EXEC_ROOT, 'config', "#{pipeline}.yaml")
+  readYaml resolveConfigPath(pipeline)
 
 pad2 = (n) ->
   text = String(Number(n) ? 0)
@@ -611,7 +633,7 @@ collectExpectedOutputs = (run) ->
   override = readOverride(pipeline)
   return { out_files: [], diary_files: collectDiaryFiles(run) } unless pipeline?
 
-  configPath = path.join(EXEC_ROOT, 'config', "#{pipeline}.yaml")
+  configPath = resolveConfigPath(pipeline)
   recipe = readYaml(configPath)
   artifacts = recipe?.artifacts ? {}
   runStart = run?.started_at ? null

@@ -123,21 +123,28 @@ above promised this seam: a project may ship its own step script and
 have it shadow a runner-bundled one. The candidate locations, in order:
 
   1. an absolute `run:` — the literal path (no `~` expansion)
-  2. `<CWD>/scripts/<run>`  — project-owned (e.g. a step the project
-     declared in its own `override/<recipe>.yaml`)
-  3. `<EXEC>/scripts/<run>` — runner-bundled
+  2. `<CWD>/scripts/<run>`  — per-pipe override/debug (e.g. a step the
+     project declared in its own `override/<recipe>.yaml`)
+  3. `<BASE>/scripts/<run>` — project-shared (lives at the project root,
+     survives npm wiping `node_modules`)
+  4. `<EXEC>/scripts/<run>` — runner-bundled
 
-`stepScriptCandidates` lists those locations so a caller can name them
-in an error. `resolveStepScript` returns the first that **exists**, or
-`null` — it does NOT fabricate a path. No fallback: when nothing
-resolves the step fails where the script is needed (in `runStep`), with
-a message that names `run:` and every location tried.
+`stepScriptCandidates` lists those locations (deduped — BASE coincides
+with CWD or EXEC in some layouts) so a caller can name them in an error.
+`resolveStepScript` returns the first that **exists**, or `null` — it does
+NOT fabricate a path. No fallback: when nothing resolves the step fails
+where the script is needed (in `runStep`), with a message that names
+`run:` and every location tried.
 ###
 stepScriptCandidates = (runRef) ->
   ref = String(runRef ? '')
   return [] unless ref.length
   return [ref] if path.isAbsolute(ref)
-  [path.join(CWD,'scripts',ref), path.join(EXEC,'scripts',ref)]
+  out = []
+  for root in [CWD, BASE, EXEC]
+    candidate = path.join(root, 'scripts', ref)
+    out.push candidate unless candidate in out
+  out
 
 resolveStepScript = (runRef) ->
   for candidate in stepScriptCandidates(runRef) when fs.existsSync(candidate)
@@ -734,7 +741,9 @@ list of executable steps:
    this pipeline, low→high precedence: legacy `<CWD>/override.yaml`
    then recipe-scoped `<CWD>/override/<name>.yaml`. Nothing is copied
    or migrated.
-2. `createExperimentObject` loads `<EXEC>/config/<name>.yaml`, expands
+2. `createExperimentObject` loads the recipe yaml (resolved by
+   `resolveConfigPath`: project-shared `<BASE>/config/<name>.yaml`
+   shadows runner-bundled `<EXEC>/config/<name>.yaml`), expands
    its `include:` list, then deep-merges those override layers and
    finally `<CWD>/control_override.yaml`. Strips UI directives. The
    result is the canonical `experiment` written to `experiment.yaml`
@@ -753,6 +762,19 @@ Artifact-key normalization (`needs`/`makes`) and dep normalization
 are deliberately strict: a typo in `needs:` will fail loudly at
 startup rather than silently produce an empty wait.
 ###
+# Recipe config resolution: project-shared `<BASE>/config/<name>.yaml` shadows
+# the runner-bundled `<EXEC>/config/<name>.yaml`. Config is repo-common, so there
+# is NO per-pipe (CWD) tier. Returns the first candidate that exists; if neither
+# does, returns the EXEC path so a missing-recipe error names the bundled location.
+resolveConfigPath = (name) ->
+  candidates = [
+    path.join(BASE, 'config', "#{name}.yaml")
+    path.join(EXEC, 'config', "#{name}.yaml")
+  ]
+  for candidate in candidates when fs.existsSync(candidate)
+    return candidate
+  candidates[candidates.length - 1]
+
 createExperimentObject = (configPath, overridePaths, controlOverridePath = null) ->
   recipe = expandIncludes loadYamlSafe(configPath), path.dirname(configPath)
   merged = deepMerge {}, recipe
@@ -1417,7 +1439,7 @@ main = ->
     process.exit(1)
 
   overrideLayers = resolveOverrideLayers pipelineName
-  configPath = path.join(EXEC,'config',"#{pipelineName}.yaml")
+  configPath = resolveConfigPath pipelineName
   experiment = createExperimentObject configPath, overrideLayers, controlOverridePath
   U.saveRun
     pipeline: pipelineName
@@ -1681,6 +1703,7 @@ module.exports = {
   loadYamlSafe
   expandIncludes
   createExperimentObject
+  resolveConfigPath
   resolveOverrideLayers
   stepScriptCandidates
   resolveStepScript
