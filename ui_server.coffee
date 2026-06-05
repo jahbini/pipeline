@@ -113,6 +113,25 @@ resolveConfigPath = (name) ->
     return candidate
   candidates[candidates.length - 1]
 
+# Discover available recipes for the Recipe Selector by enumerating
+# `<BASE_ROOT>/config/*.yaml` and `<EXEC_ROOT>/config/*.yaml` and taking the
+# sorted union of stems. BASE shadows EXEC for same-named recipes via
+# `resolveConfigPath`; here we only need the name set. Dot-prefixed and
+# non-`.yaml` files are ignored.
+discoverPipelineNames = ->
+  names = new Set()
+  for root in [BASE_ROOT, EXEC_ROOT]
+    dir = path.join(root, 'config')
+    continue unless fs.existsSync(dir) and fs.statSync(dir).isDirectory()
+    try
+      for entry in fs.readdirSync(dir)
+        continue if entry.startsWith('.')
+        continue unless entry.endsWith('.yaml')
+        names.add entry.slice(0, -'.yaml'.length)
+    catch
+      null
+  Array.from(names).sort()
+
 RUNNER = path.join(EXEC_ROOT, 'pipeline_runner.coffee')
 MERGE_SCRIPT = path.join(EXEC_ROOT, 'merge_sqlite_dbs.coffee')
 
@@ -585,16 +604,7 @@ buildControls = ->
     realization: pending.realization ? controlStoryStep.realization ? recipeStoryStep.realization ? ''
     continuous: uiControl.continuous is true
     continuous_delay_seconds: normalizeCooldownSeconds(uiControl.continuous_delay_seconds, 60)
-    pipelines: [
-      'base_ite'
-      'oracle_ite'
-      'lora_ite'
-      'diary_ite'
-      'diary_translate_ite'
-      'prompt_ite'
-      'story_scan'
-      'lora_scan'
-    ]
+    pipelines: discoverPipelineNames()
     scene_options: makeOptions 'scenes'
     arrival_options: makeOptions 'characters'
     disturbance_options: makeOptions 'disturbances'
@@ -699,10 +709,18 @@ buildStatus = ->
   latestLog = if stem? then readText(path.join(CWD, 'logs', "#{stem}.log")) else ''
   latestErr = if stem? then readText(path.join(CWD, 'logs', "#{stem}.err")) else ''
 
+  # Workspace summary for the page header: top_level is the project root the
+  # ui_server was first started in (BASE_ROOT — same as EXEC_ROOT in monolith),
+  # pipe is the active `pipes/<name>` workspace if CWD sits under one.
+  workspace =
+    top_level: path.basename(BASE_ROOT)
+    pipe: workspacePipeName(CWD)
+
   {
     run: run
     merge_run: mergeRun
     pipeline_state: pipelineState
+    workspace: workspace
     pipe: pipeSummary
     lora_remaining_count: loraRemaining
     oracle_remaining_count: oracleRemaining

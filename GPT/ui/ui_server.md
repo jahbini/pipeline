@@ -166,11 +166,13 @@ Known pitfalls:
 - do not treat `control_override.yaml` as a substitute for
   `override/<pipeline>.yaml`
 - if a new recipe needs freeform text from the UI, prefer `UI_textarea` over inventing a separate ad hoc endpoint
-- the recipe selector list at `ui_server.coffee` `pipelines: [...]` is
-  hardcoded to the `_ite` covering set plus `story_scan` / `lora_scan`.
-  Add new `_ite` recipes there explicitly; do not enumerate `config/*.yaml`
-  dynamically (non-`_ite` recipes are kept for reference only and must not
-  appear in the dropdown)
+- the recipe selector is populated by `discoverPipelineNames()`, which takes
+  the sorted union of `<BASE_ROOT>/config/*.yaml` and `<EXEC_ROOT>/config/*.yaml`
+  stems (dot-prefixed entries ignored). BASE shadows EXEC for same-named
+  recipes via `resolveConfigPath`; the selector itself only cares about names.
+  Adding a recipe is as simple as dropping a `<name>.yaml` under either
+  `config/`. (This supersedes an earlier rule that hardcoded the `_ite`
+  covering set + `story_scan`/`lora_scan` and forbade dynamic enumeration.)
 - pane-expand state must stay at module scope, not closure-scope. If you
   refactor `setupPaneExpanders()` and trap `paneCurrentlyExpanded` /
   `paneBackdrop` back inside its function body, every `renderControls()`

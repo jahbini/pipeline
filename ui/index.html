@@ -430,7 +430,7 @@
   <div class="wrap">
     <div class="hero">
       <div>
-        <h1>Pipeline Monitor</h1>
+        <h1 id="page-title">Pipeline Monitor</h1>
         <div id="subtitle" class="mono"></div>
       </div>
       <div id="run-status" class="status">unknown</div>
@@ -931,6 +931,15 @@
         mergePid: mergeRun.pid || null
       });
       byId('subtitle').textContent = `${pipe.current || ''}  ${run.pipeline || ''}  ${run.hh_mm || ''}  ${run.logdir || ''}`.trim();
+      // Page title: "Pipeline Monitor — <project> ( <pipe> )" when in a pipe;
+      // omits the parens when ui_server was started at the project root.
+      const ws = data.workspace || {};
+      const wsTop = ws.top_level || '';
+      const wsPipe = ws.pipe || '';
+      byId('page-title').textContent =
+        'Pipeline Monitor' +
+        (wsTop ? ' — ' + wsTop : '') +
+        (wsPipe ? ' (' + wsPipe + ')' : '');
       const status = run.status || 'unknown';
       const mergeStatus = mergeRun.status || '';
       // Poll while EITHER the pipeline OR a merge is active. Without the
