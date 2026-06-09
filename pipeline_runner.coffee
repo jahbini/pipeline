@@ -633,15 +633,6 @@ class Memo
     try entry.resolver?(value) catch then null
 
   saveThis: (key, value) ->
-    # Memo-level trace: catches every write to a traced key, including the
-    # ones that bypass L.saveThis (e.g. runner-internal calls from
-    # primeStepMakes, runStep finish/fail, env/ writes). The step ledger
-    # already traces L-shim writes; this fills in the rest, and also captures
-    # the meta-handler return value that may overwrite entry.value.
-    traceMemoEnter = tracedArtifactSet.has(key)
-    if traceMemoEnter
-      traceArtifactAccess '<memo>', 'saveThis.enter', key, value, source:'Memo.saveThis'
-
     entry = @MM[key]
     unless entry?
       entry = @_newEntry(key, value)
@@ -652,9 +643,6 @@ class Memo
         throw new Error "[Memo.saveThis] meta write failed for #{key}: #{err?.message ? err}"
       entry.value = rv if rv?
       @_resolve(entry, value) if value is true or value is false
-      if traceMemoEnter
-        traceArtifactAccess '<memo>', 'saveThis.exit', key, entry.value,
-          source:'Memo.saveThis', branch:'new', meta_returned: (rv isnt undefined)
       return entry
 
     old = entry.resolver
@@ -667,13 +655,9 @@ class Memo
     entry.value = rv if rv?
     @_resolve(entry, value) if value is true or value is false   # <<< CRITICAL FIX
     entry.notifier.then (nv) -> entry.value = nv if nv?
-    if traceMemoEnter
-      traceArtifactAccess '<memo>', 'saveThis.exit', key, entry.value,
-        source:'Memo.saveThis', branch:'replace', meta_returned: (rv isnt undefined)
     entry
 
   theLowdown: (key) ->
-    traceMemoEnter = tracedArtifactSet.has(key)
     entry = @MM[key]
     unless entry?
       entry = @_newEntry(key, undefined)
@@ -682,9 +666,6 @@ class Memo
       if rv?
         entry.value = rv
         @_resolve(entry, rv)
-      if traceMemoEnter
-        traceArtifactAccess '<memo>', 'theLowdown.miss', key, entry.value,
-          source:'Memo.theLowdown', meta_returned: (rv isnt undefined)
       return entry
 
     if entry.value is undefined
@@ -692,9 +673,6 @@ class Memo
       if rv?
         entry.value = rv
         @_resolve(entry, rv)
-    if traceMemoEnter
-      traceArtifactAccess '<memo>', 'theLowdown.hit', key, entry.value,
-        source:'Memo.theLowdown'
     entry
 
   waitFor: (keys, andDo) ->
@@ -967,26 +945,36 @@ isNewStyleStep = (p) ->
   try /\@step\s*=/.test fs.readFileSync(p,'utf8') catch then false
 
 ###
-§ Artifact access ledger — opt-in accountability for needs/makes
+§ Artifact-access watchdog — empty file = nothing wrong
 ==================================================================
 When `debug_s` is given as an ARRAY of artifact keys (anywhere in the
-experiment — `run.debug_s` or any step's `debug_s`), every L.need /
-L.peek / L.make / L.saveThis call touching one of those keys, in any
-step, appends a JSONL record to `logs/<LOGDIR>.artifacts.jsonl`. This
-is the durable answer to "who else is touching this artifact?". The
-scalar forms `debug_s: true|false` keep their prior per-step verbose-
-console meaning untouched.
+experiment — `run.debug_s` or any step's `debug_s`), the runner watches
+those keys. It keeps a small in-memory ring buffer of step-level events
+(L.need / L.make / L.peek / L.saveThis) and writes NOTHING to disk
+during normal operation.
 
-Two recipe-level checks fire at startup regardless of the array form:
-- multi-maker: an artifact declared in `makes:` by more than one step
-- duplicate-make: a single step calling L.make on the same key twice
-  in one run (tracked run-wide via `artifactMakeCount`)
-Both emit `[artifact-warn]` to stderr; multi-maker also lands in the
-ledger's startup record when the ledger is open.
+The watchdog writes ONLY when it detects an anomaly:
+- MAKE→NEED kind/size mismatch on the same key (silent overwrite bug)
+- duplicate-make: a step's L.make called twice on the same key
+- compat-shim write: L.saveThis on a key not in the step's makes
+- multi-maker: artifact declared in makes: by more than one step (startup)
+- step throws
+
+When an anomaly fires, the runner emits one stderr line and flushes the
+ring buffer to `logs/<LOGDIR>.artifacts.log` — a plain-text columnar
+file with the warning at the top followed by the recent history that
+led up to it. Each warning appends a new section. If the file does not
+exist after a run, nothing tripped the watchdog. That's the contract.
+
+The scalar forms `debug_s: true|false` keep their prior per-step
+verbose-console meaning untouched.
 ###
-tracedArtifactSet  = new Set()        # populated at startup from experiment scan
-artifactLedgerPath = null             # set at startup; null = no writes
-artifactMakeCount  = new Map()        # `${step}|${key}` → count, run-wide
+tracedArtifactSet     = new Set()        # populated at startup from experiment scan
+artifactWatchdogPath  = null             # set at startup when LOGDIR is set
+artifactWatchdogRing  = []               # ring buffer of recent events
+artifactWatchdogMax   = 200              # ring buffer cap
+artifactLastMake      = new Map()        # key → last MAKE event (for compare on NEED)
+artifactMakeCount     = new Map()        # `${step}|${key}` → count, run-wide
 
 collectTracedArtifacts = (experiment) ->
   set = new Set()
@@ -1010,80 +998,92 @@ collectMakerMap = (steps) ->
       (byKey[key] ?= []).push stepName
   byKey
 
-captureCallerFrame = ->
-  # Full raw stack dump for diagnostic — first frame + entire stack string.
+# Compact value summary suitable for a single-line evidence record.
+# kind + size on the left, a short preview (first ~40 chars) on the right.
+artifactSummary = (value) ->
   try
-    stack = String((new Error()).stack ? '')
-    # Drop the first 3 lines (Error, captureCallerFrame, traceArtifactAccess),
-    # keep the next 8 frames as a single string for inspection.
-    frames = stack.split('\n')[3..10].map (l) -> l.trim()
-    return null unless frames.length
-    # First non-tracer frame for the structured fields:
-    firstFile = null; firstLine = null
-    for f in frames
-      m = f.match /\(?([^()\s]+):(\d+):(\d+)\)?$/
-      continue unless m?
-      firstFile = m[1]; firstLine = Number(m[2]); break
-    return { caller_file: firstFile, caller_line: firstLine, caller_stack: frames.join(' || ') }
-  catch
-    return null
-
-kindAndSize = (value) ->
-  return { kind: 'null' } if value is null
-  return { kind: 'undefined' } if value is undefined
-  return { kind: 'array', size: value.length } if Array.isArray(value)
-  t = typeof value
-  if t is 'object'
-    return { kind: 'object', size: Object.keys(value).length }
-  return { kind: 'string', size: value.length } if t is 'string'
-  { kind: t }
-
-# Short, JSON-safe preview of a value — clipped to keep ledger lines small.
-# For arrays of strings we get the first few entries verbatim, which is the
-# fastest "is this train_rows or selected_story_ids?" smoke test.
-artifactPreview = (value) ->
-  try
-    return null if value is undefined or value is null
+    return 'null'      if value is null
+    return 'undefined' if value is undefined
     if Array.isArray(value)
       head = value.slice(0, 3).map (x) ->
-        if typeof x is 'string' then x[0...80]
-        else if x? and typeof x is 'object' then JSON.stringify(x)[0...80]
-        else x
-      return head
-    if typeof value is 'string'
-      return value[0...120]
-    if typeof value is 'object'
-      keys = Object.keys(value)[0...5]
-      out = {}
-      for k in keys
-        v = value[k]
-        out[k] = if typeof v is 'string' then v[0...60] else v
-      return out
-    value
+        if typeof x is 'string' then JSON.stringify(x[0...30])
+        else if x? and typeof x is 'object' then JSON.stringify(x)[0...32]
+        else String(x)
+      "array(#{value.length}) [#{head.join(', ')}#{if value.length > 3 then ', …' else ''}]"
+    else if typeof value is 'string'
+      "string(#{value.length}) #{JSON.stringify(value[0...60])}"
+    else if typeof value is 'object'
+      keys = Object.keys(value)
+      "object(#{keys.length}) {#{keys.slice(0, 3).join(', ')}#{if keys.length > 3 then ', …' else ''}}"
+    else
+      "#{typeof value}(#{String(value)[0...40]})"
   catch
-    null
+    '<unprintable>'
 
-writeArtifactLedger = (record) ->
-  return unless artifactLedgerPath
-  try
-    fs.appendFileSync artifactLedgerPath, JSON.stringify(record) + '\n', 'utf8'
-  catch
-    null
+# Fixed-width event line for human scanning.
+formatWatchdogEvent = (e) ->
+  ts = e.ts.slice(11, 23)
+  "#{ts}  #{(e.step ? '-').padEnd(26)} #{(e.op ? '-').padEnd(6)} #{(e.key ? '-').padEnd(20)} #{e.summary}"
 
-traceArtifactAccess = (stepName, op, key, value, extra = {}) ->
+recordWatchdogEvent = (stepName, op, key, value) ->
   return unless tracedArtifactSet.has(key)
-  ks = kindAndSize(value)
-  caller = captureCallerFrame() ? {}
-  rec = Object.assign
+  ev =
     ts: new Date().toISOString()
     step: stepName
     op: op
     key: key
-    value_kind: ks.kind
-    value_size: ks.size
-    preview: artifactPreview(value)
-  , caller, extra
-  writeArtifactLedger rec
+    value: value      # held only in memory; not serialized
+    summary: artifactSummary(value)
+  artifactWatchdogRing.push ev
+  artifactWatchdogRing.shift() while artifactWatchdogRing.length > artifactWatchdogMax
+  ev
+
+flushWatchdog = (warning, contextLines = []) ->
+  console.error "[artifact-warn] #{warning}"
+  return unless artifactWatchdogPath
+  try
+    out = []
+    out.push "=========================================================="
+    out.push "[#{new Date().toISOString()}] #{warning}"
+    if contextLines.length
+      out.push ""
+      out.push line for line in contextLines
+    if artifactWatchdogRing.length
+      out.push ""
+      out.push "recent events for traced keys (last #{artifactWatchdogRing.length}):"
+      out.push "  " + formatWatchdogEvent(e) for e in artifactWatchdogRing
+    out.push ""
+    fs.appendFileSync artifactWatchdogPath, out.join('\n') + '\n', 'utf8'
+  catch
+    null
+  return
+
+# Anomaly check at L.need time: compare what the producer wrote to what
+# the consumer is about to receive. A kind change or size shrinkage is
+# almost always a silent-overwrite bug (the one wireInputsForStep had).
+checkNeedAgainstLastMake = (stepName, key, value) ->
+  return unless tracedArtifactSet.has(key)
+  lastMake = artifactLastMake.get(key)
+  return unless lastMake?
+  prev = lastMake
+  return if prev.kind is artifactKindOf(value) and prev.size is artifactSizeOf(value)
+  # Mismatch.
+  flushWatchdog "#{key} CHANGED between MAKE and NEED",
+    [
+      "  producer: #{prev.step}.MAKE at #{prev.ts.slice(11,23)}  #{prev.summary}"
+      "  consumer: #{stepName}.NEED  at #{(new Date()).toISOString().slice(11,23)}  #{artifactSummary(value)}"
+    ]
+
+artifactKindOf = (value) ->
+  return 'null'      if value is null
+  return 'undefined' if value is undefined
+  return 'array'     if Array.isArray(value)
+  typeof value
+
+artifactSizeOf = (value) ->
+  return value.length if Array.isArray(value) or typeof value is 'string'
+  return Object.keys(value).length if value? and typeof value is 'object'
+  null
 
 createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder = null) ->
   getDecls = ->
@@ -1205,12 +1205,14 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       if value is undefined
         debug "need missing", describeArtifact(artifactKey)
         ui type:'need', phase:'missing', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey)
-        traceArtifactAccess stepName, 'need', artifactKey, undefined, phase:'missing', declared:declared
+        if tracedArtifactSet.has(artifactKey)
+          flushWatchdog "#{artifactKey} MISSING at #{stepName}.NEED (declared=#{declared})"
         console.error "[#{stepName}] Missing required artifact '#{artifactKey}'"
         throw new Error "[#{stepName}] Missing required artifact '#{artifactKey}'"
       debug "need resolved", describeArtifact(artifactKey), "(#{typeof value})"
       ui type:'need', phase:'resolved', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey), value_summary:summarizeValue(value)
-      traceArtifactAccess stepName, 'need', artifactKey, value, phase:'resolved', declared:declared
+      recordWatchdogEvent stepName, 'NEED', artifactKey, value
+      checkNeedAgainstLastMake stepName, artifactKey, value
       value
 
     peek: (artifactKey, defaultValue = undefined) ->
@@ -1246,11 +1248,11 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       if value is undefined
         debug "peek default", describeArtifact(artifactKey), defaultValue
         ui type:'peek', phase:'default', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey), value_summary:summarizeValue(defaultValue)
-        traceArtifactAccess stepName, 'peek', artifactKey, defaultValue, phase:'default'
+        recordWatchdogEvent stepName, 'PEEK', artifactKey, defaultValue
         return defaultValue
       debug "peek resolved", describeArtifact(artifactKey), "(#{typeof value})"
       ui type:'peek', phase:'resolved', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey), value_summary:summarizeValue(value)
-      traceArtifactAccess stepName, 'peek', artifactKey, value, phase:'resolved'
+      recordWatchdogEvent stepName, 'PEEK', artifactKey, value
       value
 
     make: (artifactKey, value) ->
@@ -1258,22 +1260,24 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       debug "make request", describeArtifact(artifactKey), "declared makes=", makes.join(',')
       ui type:'make', phase:'request', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey), value_summary:summarizeValue(value)
       throw new Error "[#{stepName}] Artifact '#{artifactKey}' must be declared in makes" unless makes.includes artifactKey
-      # Run-wide duplicate-make count: a step calling L.make on the same
-      # artifact more than once is almost always a bug — the second write
-      # silently overwrites the first.
-      ckey = "#{stepName}|#{artifactKey}"
-      prev = artifactMakeCount.get(ckey) ? 0
-      artifactMakeCount.set ckey, prev + 1
-      duplicate = prev > 0
-      if duplicate
-        console.error "[artifact-warn] step '#{stepName}' L.make('#{artifactKey}') called #{prev + 1}× (silent overwrite)"
       memo.saveThis artifactKey, value
       debug "make wrote", describeArtifact(artifactKey), "(#{typeof value})"
       ui type:'make', phase:'written', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey), value_summary:summarizeValue(value)
-      traceArtifactAccess stepName, 'make', artifactKey, value,
-        phase: 'written'
-        duplicate: duplicate
-        make_count: prev + 1
+      if tracedArtifactSet.has(artifactKey)
+        ev = recordWatchdogEvent stepName, 'MAKE', artifactKey, value
+        # Track the latest MAKE per key so NEED can compare kind/size.
+        artifactLastMake.set artifactKey,
+          step: stepName
+          ts: ev.ts
+          kind: artifactKindOf(value)
+          size: artifactSizeOf(value)
+          summary: ev.summary
+        # Duplicate-make detection (run-wide per step+key).
+        ckey = "#{stepName}|#{artifactKey}"
+        prev = artifactMakeCount.get(ckey) ? 0
+        artifactMakeCount.set ckey, prev + 1
+        if prev > 0
+          flushWatchdog "#{artifactKey} L.make called #{prev + 1}× by step #{stepName} (silent overwrite)"
       value
 
     done: ->
@@ -1290,16 +1294,12 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
 
     saveThis: (key, value) ->
       memo.saveThis key, value
-      # Trace and warn when the compat shim writes a TRACED artifact key from a
-      # step that doesn't declare it in makes — this is the most common way the
-      # declaration guard gets bypassed (and the most likely cause of a
-      # mysterious second writer).
       if tracedArtifactSet.has(key)
         { makes } = getDecls()
         declared = makes.includes(key)
+        recordWatchdogEvent stepName, 'SAVE', key, value
         unless declared
-          console.error "[artifact-warn] step '#{stepName}' L.saveThis('#{key}') — key is not in this step's makes (compat-shim write)"
-        traceArtifactAccess stepName, 'saveThis', key, value, declared: declared
+          flushWatchdog "#{key} L.saveThis from step #{stepName} (NOT in this step's makes — compat-shim write)"
       value
     theLowdown: (key) -> memo.theLowdown key
     waitFor: (keys, andDo) -> memo.waitFor keys, andDo
@@ -1635,31 +1635,24 @@ main = ->
   graph  = downstreamMap steps
   finals = terminalSteps steps
 
-  # ---------------- ARTIFACT ACCESS LEDGER (opt-in) ----------------
-  # Pick up `debug_s: [...]` arrays from `run:` or any step block — those keys
-  # become the traced set, run-wide. If LOGDIR is set, open
-  # `logs/<LOGDIR>.artifacts.jsonl` (truncated) and write a startup record.
+  # ---------------- ARTIFACT WATCHDOG (opt-in via debug_s: [keys]) ----------------
+  # Watch named artifacts; surface evidence ONLY when something looks wrong.
+  # Empty `logs/<LOGDIR>.artifacts.log` after a run = nothing tripped.
   tracedArtifactSet = collectTracedArtifacts experiment
-  if process.env.LOGDIR?
+  if process.env.LOGDIR? and tracedArtifactSet.size
     fs.mkdirSync path.join(CWD, 'logs'), {recursive: true}
-    artifactLedgerPath = path.join(CWD, 'logs', "#{process.env.LOGDIR}.artifacts.jsonl")
-    try fs.writeFileSync artifactLedgerPath, '', 'utf8' catch then artifactLedgerPath = null
-  if tracedArtifactSet.size
-    console.log "[artifact-trace] tracing artifacts: #{Array.from(tracedArtifactSet).join(', ')}" +
-      (if artifactLedgerPath then " → #{path.relative(CWD, artifactLedgerPath)}" else " (no LOGDIR; stderr only)")
+    artifactWatchdogPath = path.join(CWD, 'logs', "#{process.env.LOGDIR}.artifacts.log")
+    # Truncate so a clean run leaves an empty file (= all clear).
+    try fs.writeFileSync artifactWatchdogPath, '', 'utf8' catch then artifactWatchdogPath = null
+    console.log "[artifact-watch] watching: #{Array.from(tracedArtifactSet).join(', ')}" +
+      (if artifactWatchdogPath then " (evidence → #{path.relative(CWD, artifactWatchdogPath)} if anomalies fire)" else "")
 
-  # Recipe-level: any artifact with more than one declared maker is almost
-  # always a bug — emit a loud warning at startup AND log it to the ledger.
+  # Recipe-level: artifacts declared in makes: by more than one step are almost
+  # always a bug — fires once at startup, dumps the multi-maker map and exits
+  # via the same flush path as runtime anomalies.
   makerMap = collectMakerMap steps
-  multiMakers = ({ artifact: k, makers: v } for own k, v of makerMap when v.length > 1)
-  for { artifact, makers } in multiMakers
-    console.error "[artifact-warn] artifact '#{artifact}' is declared in `makes:` by #{makers.length} steps: #{makers.join(', ')}"
-  if artifactLedgerPath and (tracedArtifactSet.size or multiMakers.length)
-    writeArtifactLedger
-      ts: new Date().toISOString()
-      op: 'startup'
-      traced: Array.from(tracedArtifactSet)
-      multi_makers: multiMakers
+  for own artifact, makers of makerMap when makers.length > 1
+    flushWatchdog "#{artifact} is declared in `makes:` by #{makers.length} steps: #{makers.join(', ')}"
 
 
   # ---------------- GLOBAL PARAMS (AUTHORITATIVE) ----------------
