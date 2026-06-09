@@ -65,6 +65,53 @@ pre-validate data at startup to "help." If something is missing, let the
 error happen WHERE it is needed and make the log point directly at the
 failing code. Prefer removing a masking fallback over adding a precheck.
 
+## Artifact access ledger — opt-in accountability for needs/makes
+
+When `debug_s` is given as an ARRAY of artifact keys (anywhere in the
+experiment: `run.debug_s` or any step's `debug_s`), every
+`L.need / L.peek / L.make / L.saveThis` call touching one of those keys, in
+any step, appends a JSONL line to `logs/<LOGDIR>.artifacts.jsonl`. The
+scalar forms `debug_s: true|false` keep their prior per-step verbose-console
+meaning — only the array form opens the ledger.
+
+Use this to find rogue writers (e.g. "valid_rows gets corrupted — who else
+is writing it?"):
+```yaml
+# in override/<recipe>.yaml
+run:
+  debug_s: [valid_rows]
+```
+Each record carries `{ts, step, op, key, value_kind, value_size,
+caller_file, caller_line, ...}`. `op` is one of `need|peek|make|saveThis`.
+For `make`, `duplicate` and `make_count` flag a step calling `L.make` on
+the same key more than once (silent overwrite). For `saveThis`,
+`declared` is false when the compat shim writes a traced artifact key
+from a step that does not declare it in `makes:` — the single most common
+"second writer" bug.
+
+**Smoking gun example — June 2026 valid_rows bug.** Setting
+`run.debug_s: [valid_rows, train_rows, test_rows, selected_story_ids]`
+on writediary's `lora_ite` revealed `wireInputsForStep` (the pre-step
+"wire each need into the memo" loop) was concurrently interleaving with
+`collectOutputsForStep` and writing each need's *previous iteration's*
+`v` (the `selected_story_ids` size-4 array) into `train_rows`,
+`valid_rows`, `test_rows` — silently corrupting all three artifacts
+right before `run_lora_train_ite` read them. Stack capture + a probe
+proved the loop variables `k` and `v` desync across `await` boundaries
+when other Promise chains run between iterations. **Resolution**:
+`wireInputsForStep` now only `await resolveArtifact(k)` to block on the
+producer's notifier and does NOT re-save the value to the memo — the
+producer's own `L.make` already wrote it there, and the re-save was the
+sole source of the race. Do not add back the `M.saveThis k, v` line.
+
+Two recipe-level checks fire at startup regardless of the array form:
+- **multi-maker**: an artifact declared in `makes:` by more than one step
+  (`[artifact-warn] artifact 'X' is declared in makes: by N steps: ...`)
+- **duplicate-make** at runtime: a step calling `L.make` on the same key
+  twice in one run (run-wide via `artifactMakeCount`).
+Both write to stderr; the multi-maker scan also lands in the ledger's
+startup record when it's open.
+
 ## state/ ↔ params/ correspondence
 
 - `state/step-<name>.json` records what happened; `params/<step>.yaml` records
