@@ -1194,13 +1194,16 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       declared = needs.includes(artifactKey) or makes.includes(artifactKey)
       throw new Error "[#{stepName}] Artifact '#{artifactKey}' must be declared in needs or makes" unless declared
 
-      entry = memo.theLowdown artifactKey
-      value = entry?.value
-      if value is undefined and needs.includes(artifactKey)
-        debug "need waiting", describeArtifact(artifactKey)
-        ui type:'need', phase:'waiting', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey)
-        value = await entry.notifier
-        debug "need awakened", describeArtifact(artifactKey), "(#{typeof value})"
+      # Delegate to resolveArtifact so source-backed artifacts read from the
+      # source key, not from the artifact name. Reading memo[artifactKey]
+      # directly only works for producer-produced artifacts (where L.make
+      # already wrote to that key); for `source:` declarations the value
+      # lives under the source path, and only resolveArtifact follows that
+      # indirection.
+      debug "need waiting", describeArtifact(artifactKey)
+      ui type:'need', phase:'waiting', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey)
+      value = await resolveArtifact(artifactKey)
+      debug "need awakened", describeArtifact(artifactKey), "(#{typeof value})"
 
       if value is undefined
         debug "need missing", describeArtifact(artifactKey)
