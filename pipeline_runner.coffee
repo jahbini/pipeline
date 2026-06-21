@@ -768,13 +768,46 @@ startup rather than silently produce an empty wait.
 # is NO per-pipe (CWD) tier. Returns the first candidate that exists; if neither
 # does, returns the EXEC path so a missing-recipe error names the bundled location.
 resolveConfigPath = (name) ->
+  # CWD wins (per-pipe recipe), then BASE (project-shared), then EXEC (bundled).
+  # `experiments-withqwen` convention puts the recipe under the active pipe,
+  # so CWD is consulted first.
   candidates = [
+    path.join(CWD,  'config', "#{name}.yaml")
     path.join(BASE, 'config', "#{name}.yaml")
     path.join(EXEC, 'config', "#{name}.yaml")
   ]
   for candidate in candidates when fs.existsSync(candidate)
     return candidate
   candidates[candidates.length - 1]
+
+###
+§ Brace substitution for {BASE}/{EXEC}/{CWD} in param values
+==================================================================
+Recipes routinely need to reference paths that live outside the pipe
+CWD — typically a model in `BASE/build/` shared across pipes. Hard-
+coding a relative `../../build/model4` is brittle; absolute paths
+break portability. `substituteBraces` walks any param value and
+replaces `{BASE}`, `{EXEC}`, `{CWD}` with the current path constants.
+Applied at `L.param` / `getStepParam` read time so the merged
+`experiment.yaml` stays literal (the substitution is what the step
+sees, not what the recipe says).
+###
+substituteBraces = (value) ->
+  return value if value is null or value is undefined
+  if typeof value is 'string'
+    return value.replace /\{(BASE|EXEC|CWD)\}/g, (_, name) ->
+      switch name
+        when 'BASE' then BASE
+        when 'EXEC' then EXEC
+        when 'CWD'  then CWD
+  if Array.isArray(value)
+    return (substituteBraces(v) for v in value)
+  if typeof value is 'object'
+    out = {}
+    for own k, v of value
+      out[k] = substituteBraces(v)
+    return out
+  value
 
 createExperimentObject = (configPath, overridePaths, controlOverridePath = null) ->
   recipe = expandIncludes loadYamlSafe(configPath), path.dirname(configPath)
@@ -1172,19 +1205,20 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       if value is undefined and arguments.length >= 2
         debug "param default", key, defaultValue
         ui type:'param', phase:'default', key:key, value_summary:summarizeValue(defaultValue)
-        return defaultValue
+        return substituteBraces(defaultValue)
       if value is undefined
         debug "param missing", key
         ui type:'param', phase:'missing', key:key
         console.error "[#{stepName}] Missing required param '#{key}'"
         throw new Error "[#{stepName}] Missing required param '#{key}'"
+      value = substituteBraces(value)
       debug "param resolved", key, "(#{typeof value})", value
       ui type:'param', phase:'resolved', key:key, value_summary:summarizeValue(value)
       value
 
     getStepParam: (nameOrKey, key, defaultValue = undefined) ->
       if arguments.length >= 2
-        return memo.getStepParam(nameOrKey, key, defaultValue)
+        return substituteBraces(memo.getStepParam(nameOrKey, key, defaultValue))
       @param(nameOrKey, defaultValue)
 
     need: (artifactKey) ->
@@ -1907,6 +1941,7 @@ module.exports = {
   stepScriptCandidates
   resolveStepScript
   resolvePython
+  substituteBraces
   EXEC
   BASE
   CWD

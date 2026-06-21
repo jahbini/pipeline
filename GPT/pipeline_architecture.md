@@ -151,6 +151,84 @@ A new "agent" / "_ite" recipe is added by:
 
 ---
 
+---
+
+## Project layout — the `experiments-withqwen` convention (June 2026)
+
+The canonical layout for new projects (everything under `~/experiments-withqwen/`):
+
+```
+~/experiments-withqwen/<project>/                  ← BASE
+  node_modules/
+    @jahbini/pipeline/                             ← EXEC (the runner package)
+  build/                                           ← model artifacts, shared across pipes
+  pipe/<pipe-name>/                                ← CWD when running a pipe
+    config/                                        ← per-pipe recipes (NEW: CWD-tier)
+    data/                                          ← per-pipe inputs
+    scripts/                                       ← per-pipe step code
+    runtime.sqlite                                 ← per-pipe DB
+```
+
+History — this layout is the completion of a halted notebook→pipeline→SQLite
+reorganization. Original code came out of a Python notebook (Oct 2025), was
+re-cast as pipeline steps over the following months, and then the `_ite`
+recipes were added when state migrated from on-disk artifacts to SQLite.
+The migration paused because the UI watches the filesystem (artifact `target:`
+files), not the DB. The new convention finishes the move: each pipe is a
+self-contained experiment whose recipes, scripts, and DB live in the pipe
+directory, while the runner and the model live above at the project root.
+
+Naming clarifications worth keeping in mind:
+
+- The `_ite` suffix on steps/recipes/scripts marks the SQLite-aware re-coding
+  of the original notebook steps. Non-`_ite` variants exist as the pre-SQLite
+  references; do not promote them back over the `_ite` versions.
+- `pipe/` is **singular** (per-project we have many pipes but the directory
+  itself is named `pipe`, not `pipes`). The earlier `pipes/` plural was
+  renamed in June 2026 — `ui_server.coffee`'s `PIPE_ROOT` reflects this.
+- `config/` is the per-tier directory name across CWD, BASE, and EXEC.
+
+Three resolution tiers, applied uniformly across recipes, scripts, and (now)
+configs (highest precedence first):
+
+| concern | CWD | BASE | EXEC |
+|---|---|---|---|
+| scripts (`<run>` ref) | `CWD/scripts/<run>` | `BASE/scripts/<run>` | `EXEC/scripts/<run>` |
+| recipes (named pipelines) | `CWD/config/<name>.yaml` | `BASE/config/<name>.yaml` | `EXEC/config/<name>.yaml` |
+| Python venv | `CWD/.venv/` | `BASE/.venv/` | `EXEC/.venv/` |
+
+The runner deduplicates when tiers coincide (e.g., monolith layouts where
+BASE == EXEC). Override layers (`override.yaml`, `override/<recipe>.yaml`,
+`control_override.yaml`) remain **CWD-only** — they are intentionally
+per-pipe and never travel.
+
+### Brace substitution in param values
+
+Recipes that need to reach paths outside the pipe CWD (a model in
+`BASE/build/`, a runner-bundled asset in `EXEC/`, etc.) write
+`{BASE}`, `{EXEC}`, or `{CWD}` literally into param strings. The
+runner substitutes those tokens to the matching path at
+`L.param` / `getStepParam` read time. The merged `experiment.yaml`
+stays literal — the substitution is what the step sees, not what the
+recipe says, so a human inspecting `experiment.yaml` reads the intent
+not the resolution.
+
+Example recipe fragment:
+
+```yaml
+run_lora_train_ite:
+  quantized_model_dir: '{BASE}/build/model4'
+  adapter_path: '{BASE}/build/adapter'
+  mlx:
+    config: '{BASE}/build/lora_config.yaml'
+```
+
+Substitution walks strings, arrays, and plain objects recursively;
+non-strings (numbers, booleans, null) pass through unchanged. Test
+coverage lives in `test/base_tier_probe.coffee` under "substituteBraces".
+
+---
+
 ## Two orbits to keep distinct
 
 When working on this codebase, mentally separate:

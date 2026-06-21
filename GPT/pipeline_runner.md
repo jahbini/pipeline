@@ -43,12 +43,20 @@ universal-substrate framing and `GPT/README.md` for repo-wide conventions.
   candidates).
 - `resolveStepScript(run)` returns the first candidate that EXISTS, or `null`.
   It never fabricates a path.
-- recipe configs resolve via `resolveConfigPath(name)`: project-shared
-  `<BASE>/config/<name>.yaml` shadows bundled `<EXEC>/config/<name>.yaml`
-  (no CWD tier — config is repo-common). Used by the runner's `main()` and
-  mirrored in `ui_server.coffee` (`BASE_ROOT` + its own `resolveConfigPath`)
-  so the recipe viewer/selector sees project recipes. Override-LAYER
-  resolution (`resolveOverrideLayers`) is unchanged — still CWD-only.
+- recipe configs resolve via `resolveConfigPath(name)`: per-pipe
+  `<CWD>/config/<name>.yaml` shadows project-shared `<BASE>/config/<name>.yaml`
+  shadows bundled `<EXEC>/config/<name>.yaml`. The CWD tier was added in
+  June 2026 with the `experiments-withqwen` convention (see
+  `GPT/pipeline_architecture.md`) so a pipe can carry its own recipes.
+  Used by the runner's `main()` and mirrored in `ui_server.coffee`
+  (`BASE_ROOT` + its own `resolveConfigPath`) so the recipe viewer/selector
+  sees per-pipe recipes too. Override-LAYER resolution
+  (`resolveOverrideLayers`) is unchanged — still CWD-only.
+- param values are run through `substituteBraces` at `L.param` /
+  `getStepParam` read time: any `{BASE}`, `{EXEC}`, or `{CWD}` literal in a
+  param string (or any string nested in an array/object) is replaced with
+  the matching path constant. The merged `experiment.yaml` stays literal —
+  substitution is what the step sees, not what the recipe says.
 - `runStep` resolves at the point of use; if `null`, it fails the step
   directly: `step <n>: script not found for run '<run>' (looked: …)`. No
   fallback into the legacy spawn with a guessed path.
