@@ -174,6 +174,16 @@ runSqliteRequest = (requestKey) ->
     console.error "[ui/sqlite] request '#{requestKey}' failed:", err?.message ? err
     return undefined
 
+# Same as runSqliteRequest but rethrows so the caller can surface the meta
+# layer's specific reason (e.g. "arg 'bogus' is not a uuid..."). Used by
+# /api/sqlite/diff so the agent sees the exact validation message.
+runSqliteRequestStrict = (requestKey) ->
+  pipeCwd = CWD
+  M = getSqliteMemoForPipe(pipeCwd)
+  throw new Error 'meta loader not available' unless M?
+  entry = M.theLowdown(requestKey)
+  entry?.value
+
 PIPE_ROOT = path.join(BASE_ROOT, 'pipe')
 DEFAULT_KAG_KEYWORDS = [
   'joy'
@@ -271,6 +281,267 @@ buildPipeSummary = ->
     workspace: CWD
     pipes: pipes
   }
+
+# === Agent manifest (step 2) ============================================
+# Single entry point a fresh Claude session calls to learn what's available
+# in this project, this active pipe. Cheap to assemble — no I/O beyond the
+# recipe loads, which we cap by enumerating discovered names.
+runnerExports = require RUNNER
+sqliteMetaFactory = (try require path.join(EXEC_ROOT, 'meta', 'sqlite.coffee') catch then null)
+
+parseRecipeForManifest = (name) ->
+  configPath = resolveConfigPath(name)
+  return null unless configPath? and fs.existsSync(configPath)
+  try
+    recipe = runnerExports.expandIncludes runnerExports.loadYamlSafe(configPath), path.dirname(configPath)
+  catch
+    return null
+  steps = []
+  artifacts = []
+  for own key, val of (recipe ? {})
+    continue unless val? and typeof val is 'object' and not Array.isArray(val)
+    if val.run? or val.run_mlx?
+      steps.push
+        name: key
+        run: val.run ? null
+        depends_on: val.depends_on ? []
+        needs: val.needs ? []
+        makes: val.makes ? []
+        desc: val.desc ? null
+  if recipe?.artifacts? and typeof recipe.artifacts is 'object'
+    for own aKey, aSpec of recipe.artifacts
+      artifacts.push Object.assign({name: aKey}, (if typeof aSpec is 'object' then aSpec else {value: aSpec}))
+  {
+    name: name
+    config_path: path.relative(BASE_ROOT, configPath)
+    steps: steps
+    artifacts: artifacts
+  }
+
+listArtifactsOnDisk = (dir = 'out') ->
+  full = path.join(CWD, dir)
+  return [] unless fs.existsSync(full) and fs.statSync(full).isDirectory()
+  out = []
+  walk = (rel) ->
+    abs = path.join(CWD, rel)
+    for name in fs.readdirSync(abs)
+      continue if name.startsWith('.')
+      sub = path.join(rel, name)
+      stat = try fs.statSync(path.join(CWD, sub)) catch then null
+      continue unless stat?
+      if stat.isDirectory()
+        walk sub
+      else
+        out.push { path: sub, size: stat.size, mtime: stat.mtime.toISOString() }
+  try walk(dir) catch then null
+  out
+
+KNOWN_ENDPOINTS = [
+  { method: 'GET',  path: '/api/manifest',                         summary: 'this manifest — agent bootstrap' }
+  { method: 'GET',  path: '/api/status',                           summary: 'live run/pipe/steps state for the active pipe' }
+  { method: 'GET',  path: '/api/sqlite/<request-key>',             summary: 'dispatch a meta/sqlite request key through the active pipe' }
+  { method: 'GET',  path: '/api/sqlite/diff?since=<run_id|ts|change_id>', summary: 'precise change-log diff since an anchor (uuid, ISO timestamp, or change_id)' }
+  { method: 'GET',  path: '/api/run/<run-id>',                     summary: 'composite run-evaluation: runs row + log tails + artifacts written + sqlite rows added' }
+  { method: 'GET',  path: '/api/recipe?name=…',                    summary: 'read recipe yaml + parsed step/artifact view' }
+  { method: 'PUT',  path: '/api/recipe?name=…',                    summary: 'create/replace CWD/config/<name>.yaml; body {content}; returns merged experiment + warnings' }
+  { method: 'GET',  path: '/api/override?recipe=…',                summary: 'read per-pipe override yaml (CWD/override/<recipe>.yaml)' }
+  { method: 'PUT',  path: '/api/override?recipe=…',                summary: 'create/replace per-pipe override; body {content}; returns merged experiment + toposort check' }
+  { method: 'GET',  path: '/api/script?path=…',                    summary: 'read step script source via three-tier resolution' }
+  { method: 'PUT',  path: '/api/script?path=…',                    summary: 'write CWD/scripts/<path>; body {content}; .coffee bodies are compile-checked' }
+  { method: 'GET',  path: '/api/file?path=<rel>',                  summary: 'read a file under CWD (artifact, log)' }
+  { method: 'POST', path: '/api/launch',                           summary: 'launch the active pipe (idempotent via ensureSingleInstance)' }
+  { method: 'POST', path: '/api/kill',                             summary: 'SIGTERM the active pipeline run' }
+  { method: 'POST', path: '/api/control',                          summary: 'write UI-control values (recipe selector, continuous flag, …)' }
+  { method: 'POST', path: '/api/human_override',                   summary: 'write the human override YAML for the active recipe' }
+  { method: 'POST', path: '/api/clear_pipeline_state',             summary: 'erase pipeline.json (death record)' }
+  { method: 'POST', path: '/api/switch_pipe',                      summary: 'switch the UI to a different pipe (or restart in place)' }
+  { method: 'POST', path: '/api/merge_pipe',                       summary: 'merge sqlite + adapter from another machine (project-specific)' }
+  { method: 'POST', path: '/api/shutdown_ui',                      summary: 'stop the UI server process' }
+]
+
+buildManifest = ->
+  activePipe = workspacePipeName(CWD)
+  pipes = listPipeDirectories()
+  recipeNames = discoverPipelineNames()
+  recipesByName = {}
+  for name in recipeNames
+    parsed = parseRecipeForManifest(name)
+    recipesByName[name] = parsed if parsed?
+  sqliteRequests = sqliteMetaFactory?.requestNames ? []
+  artifactsOnDisk = listArtifactsOnDisk('out').concat listArtifactsOnDisk('build/train')
+  {
+    base:         BASE_ROOT
+    exec:         EXEC_ROOT
+    cwd:          CWD
+    pipe_root:    PIPE_ROOT
+    active_pipe:  activePipe
+    pipes:        pipes
+    recipes:
+      available:  recipeNames
+      by_name:    recipesByName
+    sqlite_requests: sqliteRequests
+    artifacts_on_disk: artifactsOnDisk
+    endpoints:    KNOWN_ENDPOINTS
+    generated_at: new Date().toISOString()
+  }
+
+# === Run evaluation (step 3) ============================================
+# Composite endpoint: given a run_id, return the runs-table row, log tails,
+# the artifact files that were touched during the run's window, and a
+# heuristic "rows added in this window" block for tables with timestamps.
+# This is the evaluation surface a Claude (or a human looking at "Run
+# Detail" in the UI) consults after a run finishes. Precise diffs of all
+# tables come in step 5 (per-table change log); step 3 ships with the
+# timestamp-based approximation, which is honest about what it can and
+# can't determine — `null` in `sqlite_rows_added` means "no timestamp on
+# that table, see step 5."
+
+# Files under one or more directories whose mtime falls within [start, end].
+# `end` may be null (still-running) — treated as "now".
+filesInWindow = (dirs, startedAt, finishedAt) ->
+  startMs = if startedAt? then Date.parse(startedAt) else null
+  endMs   = if finishedAt? then Date.parse(finishedAt) else Date.now()
+  return [] unless Number.isFinite(startMs)
+  endMs = Date.now() unless Number.isFinite(endMs)
+  out = []
+  for dir in dirs
+    full = path.join(CWD, dir)
+    continue unless fs.existsSync(full) and fs.statSync(full).isDirectory()
+    walk = (rel) ->
+      abs = path.join(CWD, rel)
+      for name in fs.readdirSync(abs)
+        continue if name.startsWith('.')
+        sub = path.join(rel, name)
+        stat = try fs.statSync(path.join(CWD, sub)) catch then null
+        continue unless stat?
+        if stat.isDirectory()
+          walk sub
+        else
+          mtimeMs = stat.mtimeMs ? stat.mtime.getTime()
+          # Accept files whose mtime is at or after start, and at or before
+          # end (we add a 2-second grace on each side for clock skew + the
+          # registration timestamp racing the first artifact write).
+          continue unless mtimeMs >= (startMs - 2000) and mtimeMs <= (endMs + 2000)
+          out.push
+            path: sub
+            size: stat.size
+            mtime: stat.mtime.toISOString()
+    try walk(dir) catch then null
+  out
+
+# Per-table heuristic of "what got added during this run". For tables with
+# an obvious timestamp column we can answer precisely; for tables without
+# one we return `null` (step 5's change log will close this gap).
+# Returned shape:
+#   { runs: {count, ids}, lora_training_runs: {count, ids}, kag_entries: null, ... }
+sqliteRowsInWindow = (startedAt, finishedAt) ->
+  startMs = if startedAt? then Date.parse(startedAt) else null
+  endMs   = if finishedAt? then Date.parse(finishedAt) else Date.now()
+  endMs   = Date.now() unless Number.isFinite(endMs)
+  inWindow = (iso) ->
+    return false unless typeof iso is 'string'
+    ms = Date.parse(iso)
+    Number.isFinite(ms) and ms >= (startMs - 2000) and ms <= (endMs + 2000)
+
+  out = {}
+
+  # runs table — the canonical timestamp surface.
+  history = runSqliteRequest('runHistory.jsonl') ? []
+  matched = (r.run_id for r in history when inWindow(r.started_at))
+  out.runs = { count: matched.length, ids: matched }
+
+  # lora_training_runs — has started_at. The lora-specific run_id is
+  # independent of the generic runs.run_id; match by time window.
+  loraRuns = runSqliteRequest('loraTrainingRuns.jsonl') ? []
+  matched = (r.run_id for r in loraRuns when inWindow(r.started_at))
+  out.lora_training_runs = { count: matched.length, ids: matched }
+
+  # lora_story_usage — last_trained_at is the closest signal.
+  usage = runSqliteRequest('loraStoryUsage.jsonl') ? []
+  matched = (r.story_id for r in usage when inWindow(r.last_trained_at))
+  out.lora_story_usage = { count: matched.length, ids: matched }
+
+  # Tables without a timestamp column.
+  out.stories              = null
+  out.kag_entries          = null
+  out.story_parts          = null
+  out.expanded_story_parts = null
+  out.lora_trained_stories = null
+  out.oracle_story_attempts = null
+
+  out
+
+# Tables that have INSERT/UPDATE/DELETE triggers wired up. When the change
+# log is the source of truth, any of these missing from `diff.by_table`
+# genuinely had zero changes during the window — surface that as a precise
+# {count: 0} rather than the heuristic `null`.
+TRACKED_TABLES = [
+  'stories'
+  'story_parts'
+  'expanded_story_parts'
+  'kag_entries'
+  'oracle_story_attempts'
+  'lora_trained_stories'
+  'lora_story_usage'
+  'lora_training_runs'
+  'lora_training_run_stories'
+  'runs'
+]
+
+# Step 5: replace the heuristic `sqlite_rows_added` block with precise
+# change-log counts whenever `_change_log` is populated. Every tracked
+# table is surfaced — present-with-changes from the diff, absent-but-
+# tracked as a precise `{count: 0}`. Heuristic values for non-tracked
+# tables are left in place.
+mergeChangeLogCounts = (heuristic, startedAt) ->
+  return heuristic unless startedAt?
+  try
+    diff = runSqliteRequest "changesSince{#{startedAt}}.json"
+  catch then diff = null
+  return heuristic unless diff? and diff.by_table?
+  merged = Object.assign {}, heuristic
+  for table in TRACKED_TABLES
+    stats = diff.by_table[table]
+    if stats?
+      merged[table] = {
+        count: stats.count
+        inserts: stats.inserts
+        updates: stats.updates
+        deletes: stats.deletes
+        ids: stats.ids
+        source: 'change_log'
+      }
+    else
+      merged[table] = { count: 0, inserts: 0, updates: 0, deletes: 0, ids: [], source: 'change_log' }
+  merged
+
+buildRunEvaluation = (runId) ->
+  run = runSqliteRequest("runById{#{runId}}.json")
+  return null unless run?
+
+  startedAt  = run.started_at
+  finishedAt = run.finished_at
+
+  log_tail = null
+  err_tail = null
+  artifact_log_tail = null
+  if run.logdir
+    log_tail = tailText path.join(CWD, 'logs', "#{run.logdir}.log"), 60
+    err_tail = tailText path.join(CWD, 'logs', "#{run.logdir}.err"), 60
+    artifactLogPath = path.join(CWD, 'logs', "#{run.logdir}.artifacts.log")
+    if fs.existsSync(artifactLogPath)
+      artifact_log_tail = tailText artifactLogPath, 200
+
+  artifacts_written = filesInWindow ['out', 'build/train', 'state'], startedAt, finishedAt
+  sqlite_rows_added = mergeChangeLogCounts sqliteRowsInWindow(startedAt, finishedAt), startedAt
+
+  Object.assign {}, run,
+    log_tail: log_tail
+    err_tail: err_tail
+    artifact_log_tail: artifact_log_tail
+    artifacts_written: artifacts_written
+    sqlite_rows_added: sqlite_rows_added
+    evaluated_at: new Date().toISOString()
 
 writeUiRunPatch = (patch) ->
   runPath = path.join(CWD, 'state', 'ui-run.json')
@@ -1329,6 +1600,248 @@ handleHumanOverride = (req, res) ->
     ok: true
     override: override
 
+# === Mutation endpoints (step 4) ========================================
+# Agent (and human) write surfaces for recipes, overrides, and step
+# scripts. All writes are CWD-scoped (per-pipe). Every PUT returns the
+# post-write effective state — for recipe/override that's the merged
+# experiment.yaml; for scripts that's the resolved path. Failure returns
+# 4xx with the specific reason (no silent overwrites, no half-states).
+
+ensureSafeRelPath = (rel) ->
+  return false unless typeof rel is 'string' and rel.length > 0
+  return false if rel.startsWith('/') or rel.includes(' ')
+  normalized = path.posix.normalize(rel.split(path.sep).join('/'))
+  return false if normalized is '..' or normalized.startsWith('../') or normalized.includes('/../')
+  true
+
+isPlainObjectLocal = (o) ->
+  o? and typeof o is 'object' and not Array.isArray(o)
+
+parseYamlSafely = (text) ->
+  try
+    parsed = yaml.load(text)
+    return { ok: false, error: 'YAML must parse to an object' } unless isPlainObjectLocal(parsed)
+    { ok: true, parsed: parsed }
+  catch err
+    { ok: false, error: "invalid YAML: #{err?.message ? err}" }
+
+# Pluck step entries from a parsed recipe (anything with `run:` or `run_mlx`).
+discoverStepsLocal = (recipe) ->
+  out = {}
+  for own k, v of (recipe ? {})
+    continue unless isPlainObjectLocal(v)
+    continue unless v.run? or v.run_mlx
+    out[k] = v
+  out
+
+# Kahn's-algorithm sanity check on step `depends_on:` graph. Returns
+# `{ok}`, `{ok:false, error}` with a specific reason (unknown dep,
+# cycle, etc.), and on success also `order: [step names...]`.
+validateToposort = (steps) ->
+  indeg = {}
+  graph = {}
+  for own name of steps
+    indeg[name] = 0
+    graph[name] = []
+  for own name, def of steps
+    deps = def.depends_on ? []
+    deps = [deps] if typeof deps is 'string'
+    for dep in deps
+      continue if String(dep).toLowerCase() is 'never'   # the runtime off-switch
+      unless steps[dep]?
+        return { ok: false, error: "step '#{name}' depends on undefined step '#{dep}'" }
+      indeg[name] += 1
+      graph[dep].push name
+  q = (n for own n, d of indeg when d is 0)
+  order = []
+  while q.length > 0
+    n = q.shift()
+    order.push n
+    for m in graph[n]
+      indeg[m] -= 1
+      q.push m if indeg[m] is 0
+  if order.length isnt Object.keys(steps).length
+    return { ok: false, error: 'cycle detected in step dependencies' }
+  { ok: true, order: order }
+
+# Build the post-write merged experiment for `name`. Returns the merged
+# object, or rethrows whatever createExperimentObject throws.
+buildMergedExperimentForName = (name) ->
+  configPath = runnerExports.resolveConfigPath(name)
+  return null unless configPath? and fs.existsSync(configPath)
+  layers = runnerExports.resolveOverrideLayers(name)
+  controlPath = path.join(CWD, 'control_override.yaml')
+  controlArg = if fs.existsSync(controlPath) then controlPath else null
+  runnerExports.createExperimentObject configPath, layers, controlArg
+
+writeTextFile = (p, content) ->
+  fs.mkdirSync path.dirname(p), { recursive: true }
+  fs.writeFileSync p, content, 'utf8'
+
+handleGetRecipe = (req, res, query) ->
+  name = String(query.get('name') ? '').trim()
+  return sendJson(res, 400, { ok: false, error: 'name is required' }) unless name.length
+  return sendJson(res, 400, { ok: false, error: 'invalid name' }) if name.includes('/') or name.includes('..')
+  configPath = runnerExports.resolveConfigPath(name)
+  return sendJson(res, 404, { ok: false, error: 'recipe not found', name: name }) unless configPath? and fs.existsSync(configPath)
+  text = readText configPath
+  parsed = parseRecipeForManifest(name)
+  sendJson res, 200,
+    ok: true
+    name: name
+    config_path: path.relative(BASE_ROOT, configPath)
+    text: text
+    parsed: parsed
+
+handlePutRecipe = (req, res, query) ->
+  name = String(query.get('name') ? '').trim()
+  return sendJson(res, 400, { ok: false, error: 'name is required' }) unless name.length
+  return sendJson(res, 400, { ok: false, error: 'invalid name' }) if name.includes('/') or name.includes('..')
+  bodyText = await readRequestBody req
+  payload = {}
+  try
+    payload = JSON.parse(bodyText ? '{}')
+  catch
+    return sendJson res, 400, { ok: false, error: 'invalid json body — expected {"content": "<yaml>"}' }
+  content = if typeof payload.content is 'string' then payload.content else null
+  return sendJson(res, 400, { ok: false, error: 'content is required' }) unless content?
+
+  parsed = parseYamlSafely content
+  return sendJson(res, 400, { ok: false, error: parsed.error }) unless parsed.ok
+
+  steps = discoverStepsLocal parsed.parsed
+  topo = validateToposort steps
+  return sendJson(res, 400, { ok: false, error: "toposort: #{topo.error}" }) unless topo.ok
+
+  warnings = []
+  for own stepName, def of steps
+    runRef = def.run
+    continue unless typeof runRef is 'string' and runRef.length
+    resolved = runnerExports.resolveStepScript(runRef)
+    warnings.push "step '#{stepName}' run:'#{runRef}' did not resolve to any existing script" unless resolved?
+
+  target = path.join(CWD, 'config', "#{name}.yaml")
+  try
+    writeTextFile target, content
+  catch err
+    return sendJson res, 500, { ok: false, error: "write failed: #{err?.message ? err}" }
+
+  experiment = null
+  mergeError = null
+  try
+    experiment = buildMergedExperimentForName name
+  catch err
+    mergeError = String(err?.message ? err)
+
+  sendJson res, 200,
+    ok: true
+    recipe_path: path.relative(BASE_ROOT, target)
+    experiment: experiment
+    warnings: warnings
+    merge_error: mergeError
+
+handleGetOverride = (req, res, query) ->
+  recipe = String(query.get('recipe') ? '').trim()
+  return sendJson(res, 400, { ok: false, error: 'recipe is required' }) unless recipe.length
+  return sendJson(res, 400, { ok: false, error: 'invalid recipe name' }) if recipe.includes('/') or recipe.includes('..')
+  overridePath = path.join(CWD, 'override', "#{recipe}.yaml")
+  exists = fs.existsSync(overridePath)
+  text = if exists then readText(overridePath) else ''
+  sendJson res, 200,
+    ok: true
+    recipe: recipe
+    override_path: path.relative(BASE_ROOT, overridePath)
+    exists: exists
+    text: text
+
+handlePutOverride = (req, res, query) ->
+  recipe = String(query.get('recipe') ? '').trim()
+  return sendJson(res, 400, { ok: false, error: 'recipe is required' }) unless recipe.length
+  return sendJson(res, 400, { ok: false, error: 'invalid recipe name' }) if recipe.includes('/') or recipe.includes('..')
+  bodyText = await readRequestBody req
+  payload = {}
+  try
+    payload = JSON.parse(bodyText ? '{}')
+  catch
+    return sendJson res, 400, { ok: false, error: 'invalid json body — expected {"content": "<yaml>"}' }
+  content = if typeof payload.content is 'string' then payload.content else null
+  return sendJson(res, 400, { ok: false, error: 'content is required' }) unless content?
+
+  parsed = parseYamlSafely content
+  return sendJson(res, 400, { ok: false, error: parsed.error }) unless parsed.ok
+
+  target = path.join(CWD, 'override', "#{recipe}.yaml")
+  try
+    writeTextFile target, content
+  catch err
+    return sendJson res, 500, { ok: false, error: "write failed: #{err?.message ? err}" }
+
+  # Validate the merged result toposorts after the write.
+  experiment = null
+  mergeError = null
+  toposortError = null
+  try
+    experiment = buildMergedExperimentForName recipe
+    if experiment?
+      steps = discoverStepsLocal experiment
+      topo = validateToposort steps
+      toposortError = topo.error unless topo.ok
+  catch err
+    mergeError = String(err?.message ? err)
+
+  sendJson res, 200,
+    ok: true
+    override_path: path.relative(BASE_ROOT, target)
+    experiment: experiment
+    merge_error: mergeError
+    toposort_error: toposortError
+
+handleGetScript = (req, res, query) ->
+  rel = String(query.get('path') ? '').trim()
+  return sendJson(res, 400, { ok: false, error: 'path is required (and must be safe — no .., no leading /)' }) unless ensureSafeRelPath rel
+  resolved = runnerExports.resolveStepScript rel
+  candidates = runnerExports.stepScriptCandidates rel
+  return sendJson(res, 404, { ok: false, error: 'script not found', path: rel, candidates: candidates }) unless resolved?
+  sendJson res, 200,
+    ok: true
+    path: rel
+    resolved: resolved
+    text: readText(resolved, '')
+    candidates: candidates
+
+handlePutScript = (req, res, query) ->
+  rel = String(query.get('path') ? '').trim()
+  return sendJson(res, 400, { ok: false, error: 'path is required (and must be safe — no .., no leading /)' }) unless ensureSafeRelPath rel
+  bodyText = await readRequestBody req
+  payload = {}
+  try
+    payload = JSON.parse(bodyText ? '{}')
+  catch
+    return sendJson res, 400, { ok: false, error: 'invalid json body — expected {"content": "<text>"}' }
+  content = if typeof payload.content is 'string' then payload.content else null
+  return sendJson(res, 400, { ok: false, error: 'content is required' }) unless content?
+
+  # Optional compile-check for .coffee bodies — catches the most common
+  # mistake (a syntax error from a Claude-generated step) before write.
+  if rel.endsWith('.coffee')
+    try
+      require('coffeescript').compile(content)
+    catch err
+      return sendJson res, 400, { ok: false, error: "compile error: #{err?.message ? err}" }
+
+  target = path.join(CWD, 'scripts', rel)
+  try
+    writeTextFile target, content
+  catch err
+    return sendJson res, 500, { ok: false, error: "write failed: #{err?.message ? err}" }
+
+  sendJson res, 200,
+    ok: true
+    path: rel
+    written_to: path.relative(BASE_ROOT, target)
+    resolved: runnerExports.resolveStepScript(rel)
+    candidates: runnerExports.stepScriptCandidates(rel)
+
 handleClearPipelineState = (req, res) ->
   pipelinePath = path.join(CWD, 'pipeline.json')
   removed = false
@@ -1422,6 +1935,45 @@ server = http.createServer (req, res) ->
     return sendHtml res, resolveUiAsset('index.html')
   if url is '/api/status'
     return sendJson res, 200, buildStatus()
+  if url is '/api/manifest'
+    try
+      return sendJson res, 200, { ok: true, manifest: buildManifest() }
+    catch err
+      return sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+  if url.startsWith('/api/run/')
+    rawId = url.slice('/api/run/'.length).split('?')[0]
+    try
+      runId = decodeURIComponent(rawId)
+    catch
+      return sendJson res, 400, { ok: false, error: 'invalid run_id encoding' }
+    try
+      payload = buildRunEvaluation(runId)
+    catch err
+      return sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+    return sendJson res, 404, { ok: false, error: 'run not found', run_id: runId } unless payload?
+    return sendJson res, 200, { ok: true, run: payload }
+  if url is '/api/sqlite/diff' or url.startsWith('/api/sqlite/diff?')
+    # Convenience wrapper over the `changesSince{<arg>}.json` meta request.
+    # GET /api/sqlite/diff?since=<run_id|ISO-ts|change_id>
+    query = new URL(url, 'http://127.0.0.1').searchParams
+    sinceArg = String(query.get('since') ? '').trim()
+    return sendJson(res, 400, { ok: false, error: 'since=<run_id|ISO-timestamp|change_id> is required' }) unless sinceArg.length
+    # Validate shape client-side so we can return a specific 400 (the Memo
+    # layer's internal try/catch otherwise hides the meta-handler throw).
+    isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sinceArg)
+    isInt  = /^\d+$/.test(sinceArg)
+    isIso  = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(sinceArg)
+    unless isUuid or isInt or isIso
+      return sendJson res, 400,
+        ok: false
+        error: "since='#{sinceArg}' is not a uuid, ISO 8601 timestamp, or change_id"
+        accepted_shapes: ['uuid', 'ISO-8601-timestamp', 'change_id (non-negative integer)']
+    try
+      value = runSqliteRequestStrict "changesSince{#{sinceArg}}.json"
+    catch err
+      return sendJson res, 400, { ok: false, error: String(err?.message ? err), since: sinceArg }
+    return sendJson res, 404, { ok: false, error: 'change-log diff did not resolve', since: sinceArg } if value is undefined
+    return sendJson res, 200, { ok: true, since: sinceArg, diff: value }
   if url.startsWith('/api/sqlite/')
     # /api/sqlite/<encoded-request-key>  → dispatch through meta/sqlite.coffee
     # Args go inside the request key using the meta layer's own `name{arg}.suffix`
@@ -1445,6 +1997,34 @@ server = http.createServer (req, res) ->
     payload = readViewerFile(relativePath)
     return sendJson(res, 404, { ok: false, error: 'file not found' }) unless payload?
     return sendJson res, 200, { ok: true, file: payload }
+  # Mutation endpoints (step 4). Dispatch on method; GET reads, PUT writes.
+  if url is '/api/recipe' or url.startsWith('/api/recipe?')
+    query = new URL(url, 'http://127.0.0.1').searchParams
+    if req.method is 'GET'
+      return Promise.resolve(handleGetRecipe(req, res, query)).catch (err) ->
+        sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+    if req.method is 'PUT'
+      return Promise.resolve(handlePutRecipe(req, res, query)).catch (err) ->
+        sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+    return sendJson res, 405, { ok: false, error: 'method not allowed; use GET or PUT' }
+  if url is '/api/override' or url.startsWith('/api/override?')
+    query = new URL(url, 'http://127.0.0.1').searchParams
+    if req.method is 'GET'
+      return Promise.resolve(handleGetOverride(req, res, query)).catch (err) ->
+        sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+    if req.method is 'PUT'
+      return Promise.resolve(handlePutOverride(req, res, query)).catch (err) ->
+        sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+    return sendJson res, 405, { ok: false, error: 'method not allowed; use GET or PUT' }
+  if url is '/api/script' or url.startsWith('/api/script?')
+    query = new URL(url, 'http://127.0.0.1').searchParams
+    if req.method is 'GET'
+      return Promise.resolve(handleGetScript(req, res, query)).catch (err) ->
+        sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+    if req.method is 'PUT'
+      return Promise.resolve(handlePutScript(req, res, query)).catch (err) ->
+        sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+    return sendJson res, 405, { ok: false, error: 'method not allowed; use GET or PUT' }
   if url is '/api/launch' and req.method is 'POST'
     return Promise.resolve(handleLaunch(req, res)).catch (err) ->
       sendJson res, 500,

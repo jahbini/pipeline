@@ -165,24 +165,98 @@ lib/
 Aligns with the streamlining sketched in earlier discussion: leaf
 extractions first, then the api/ subfolder once endpoints multiply.
 
-## Implementation sequence (suggested)
+## Status (June 2026) — all five steps landed
 
-Each step independently shippable:
+The five-step implementation sequence from the original design is now
+in production. Each landed as an independently-shipped commit on `api`.
 
-1. **Observability foundation.** New left-column panel showing per-pipe
-   SQLite views: Stories (count, list, click-detail), KAG (recent entries),
-   Training Runs (history table). Backed by `/api/sqlite/{key}` reusing
-   the existing `REQUESTS` map. No mutation yet.
-2. **Manifest + stable run IDs.** `/api/manifest` and a UUID run id
-   stamped into `run.id` at launch. Run history table in SQLite.
-3. **Run evaluation endpoint.** `/api/run/{id}` returning the produced
-   block (artifacts + sqlite rows). Powers a "Run Detail" pane in the UI.
-4. **Mutation endpoints + validation.** `/api/recipe`, `/api/override`,
-   `/api/script` CRUD with server-side validation. The existing
-   `Recipe And Overrides` textareas become thin wrappers around these.
-5. **SQLite diff.** Per-pipe `_change_log` table + triggers + the
-   `/api/sqlite/diff?since=...` endpoint. The killer feature for agent
-   evaluation.
+1. **Observability foundation.** ✅
+   `GET /api/sqlite/<encoded-request-key>` dispatches through the same
+   `meta/sqlite.coffee` REQUESTS map the steps use, via a per-CWD `Memo`
+   cache (`getSqliteMemoForPipe` in `ui_server.coffee`). Three new
+   collapsible left-column panels: **Stories** (`allStories.jsonl`),
+   **Training Runs** (`loraTrainingRuns.jsonl`), **Story Usage**
+   (`loraStoryUsage.jsonl`). All default collapsed; refresh on the
+   existing 2-second poll cycle.
+
+2. **Manifest + stable run IDs.** ✅
+   `GET /api/manifest` returns the full bootstrap payload
+   (`base / exec / cwd / pipe_root / active_pipe / pipes / recipes /
+   sqlite_requests / artifacts_on_disk / endpoints`). Recipes are parsed
+   with `expandIncludes` + step/artifact extraction. The runner generates
+   a UUID at launch (`crypto.randomUUID()`), stamps it into
+   `state/ui-run.json.id` AND a new `runs` SQLite table via the new
+   `runRegister{<id>}.json` / `runUpdate{<id>}.json` meta requests
+   (`finalizeRunStatus()` wraps both surfaces). Three additional meta
+   requests cover the read side: `runById{<id>}.json`, `runHistory.jsonl`.
+
+3. **Run evaluation endpoint.** ✅
+   `GET /api/run/<run-id>` composes: the `runs` row, log+err+artifact-log
+   tails, `artifacts_written` (files in `out/` + `build/train/` + `state/`
+   whose mtime falls in `[started_at-2s, finished_at+2s]`), and
+   `sqlite_rows_added` (per-table count + ids). New "Run History" panel
+   in the left column lists the most recent 20 runs; clicking a row
+   loads the detail inline. Still-running rows refresh on each poll
+   tick via `currentRunDetailId` carry-over.
+
+4. **Mutation endpoints + validation.** ✅
+   Six routes — `GET/PUT /api/recipe?name=…`, `GET/PUT /api/override?recipe=…`,
+   `GET/PUT /api/script?path=…`. All writes are CWD-scoped. Each PUT
+   accepts `{content: "<yaml-or-coffee>"}`; YAML PUTs run through
+   `parseYamlSafely` + `discoverStepsLocal` + `validateToposort` (Kahn's
+   algorithm; recognizes the `depends_on: never` off-switch); `.coffee`
+   script PUTs are compile-checked before write. Path-safety helper
+   `ensureSafeRelPath` rejects `..`, leading `/`, embedded spaces, and
+   `path.sep` escapes. Every PUT returns the post-write effective state
+   — the merged `experiment.yaml` for recipe/override, the resolved
+   path + candidates for scripts — so the caller never has to guess.
+   405 on method mismatch.
+
+5. **SQLite diff.** ✅
+   New `_change_log(change_id, ts, table_name, op, row_id)` table with
+   `ts` and `table_name` indexes. 30 triggers cover INSERT/UPDATE/DELETE
+   on the ten tracked tables (`stories`, `story_parts`,
+   `expanded_story_parts`, `kag_entries`, `oracle_story_attempts`,
+   `lora_trained_stories`, `lora_story_usage`, `lora_training_runs`,
+   `lora_training_run_stories`, `runs`); compound primary keys are joined
+   with `|`. Triggers timestamp via `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+   so they compare lex-cleanly against `runs.started_at`. New
+   `changesSince{<arg>}.json` meta request — discriminates UUID
+   (resolves to `runs.started_at`), ISO timestamp (direct), or integer
+   (treated as `change_id` anchor). `GET /api/sqlite/diff?since=…` is the
+   client-friendly route, registered **before** the generic
+   `/api/sqlite/<key>` handler to avoid mis-dispatch; performs
+   client-side shape validation and returns specific 400s with an
+   `accepted_shapes` hint on malformed input. `buildRunEvaluation`
+   pipes `sqliteRowsInWindow(...)` through `mergeChangeLogCounts(...)`
+   so every tracked table reports a precise `{count, source: 'change_log'}`
+   in `/api/run/{id}`, including the previously-`null` ones at
+   `{count: 0}` when no changes occurred.
+
+The endpoint count in `KNOWN_ENDPOINTS` advertised by `/api/manifest`
+is 20 (12 read + 6 mutation + 2 lifecycle composites). The recipe selector
+auto-discovers from CWD + BASE + EXEC `config/` (the three-tier
+`resolveConfigPath`). Every recipe in `config/<name>.yaml` is callable
+through this API without further setup.
+
+## Operational notes
+
+- **Where things land:**
+  - SQLite schema + triggers + `changesSince`: `meta/sqlite.coffee`.
+  - Run lifecycle hooks (UUID, `finalizeRunStatus`): `pipeline_runner.coffee`.
+  - All routes + composite endpoints + helpers: `ui_server.coffee`.
+  - UI panels + the click-to-load Run Detail JS: `ui/index.html`.
+- **State files affected:** `state/ui-run.json` gains an `id` field
+  (UUID). Existing readers tolerate unknown fields.
+- **DB migrations:** the bootstrap `db.exec` block is `CREATE TABLE IF
+  NOT EXISTS` / `CREATE TRIGGER IF NOT EXISTS`. Existing DBs add the
+  `_change_log` table and triggers on next runner or `ui_server` boot
+  with no manual migration. **Historical rows predating the triggers
+  are not in `_change_log`**; the diff is honest about its window.
+- **Path conventions:** all PUTs write under CWD (`config/`, `override/`,
+  `scripts/`). The agent **cannot** write into BASE or EXEC via these
+  routes — intentional, so generated artifacts stay scoped to the active
+  pipe.
 
 ## Out of scope (deliberately)
 
@@ -197,6 +271,26 @@ Each step independently shippable:
 - WebSocket / SSE event streams — polling at the existing cadence is
   sufficient until proven otherwise. The 2-second poll gate that already
   exists is the right granularity for an agent loop too.
+
+## Deferred follow-ups (will compound the agent surface, not yet built)
+
+- **`_change_log` pruning.** The table grows unbounded. A
+  `pruneChangeLog{<keep-after-change-id>}.json` write request or a
+  retention policy (e.g., keep last N runs' worth) becomes worth
+  building once the table approaches single-digit MB. Until then, it's
+  cheap append-only storage and Claude's diffs all care about the
+  recent tail.
+- **Streaming / SSE.** If poll latency becomes a problem for fast
+  agent loops, an SSE channel reading `_change_log` tail-style is
+  the natural fit. The change-log architecture already supports it;
+  only the transport is missing.
+- **Cross-pipe / project-wide manifest.** A separate
+  `GET /api/projects` or `GET /api/all_runs` could roll up across pipes
+  if the agent loop ever spans them. Add as a *new* endpoint, never by
+  widening the per-pipe contracts.
+- **`lib/api/` extraction.** `ui_server.coffee` is now ~2 KLoC. The
+  per-concern split sketched in "Recommended file layout" above is the
+  natural next refactor. Independent of features.
 
 ## See also
 

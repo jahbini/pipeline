@@ -243,7 +243,10 @@ When working on this codebase, mentally separate:
 
 GPT/ docs reflect this split:
 - framework-orbit docs: `GPT/README.md` overall conventions,
-  `GPT/ui/ui_server.md`, this file, future `GPT/pipeline_runner.md`
+  `GPT/ui/ui_server.md`, `GPT/ui/agent_surface.md` (the `/api/*`
+  contract that lets a Claude session drive the runner end-to-end),
+  this file, `GPT/pipeline_runner.md` (runner contract + the SQLite
+  `runs` table + change-log/triggers).
 - domain-orbit docs: `GPT/lora_ite/*`, `GPT/prompt_ite/*`, `GPT/diary_ite/*`,
   `GPT/base_ite/*`, `GPT/lepa-ite/*`, `GPT/oracle_ite/*`, `GPT/gypsy_strategy.md`
 

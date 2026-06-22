@@ -1649,15 +1649,51 @@ main = ->
   overrideLayers = resolveOverrideLayers pipelineName
   configPath = resolveConfigPath pipelineName
   experiment = createExperimentObject configPath, overrideLayers, controlOverridePath
-  U.saveRun
+
+  # Stable run identifier — survives across the run, persisted to both
+  # state/ui-run.json (existing surface) AND the SQLite `runs` table
+  # (agent-callable via `/api/sqlite/runById{id}.json` and `runHistory.jsonl`).
+  runId      = require('crypto').randomUUID()
+  startedAt  = new Date().toISOString()
+  runPayload =
+    id: runId
     pipeline: pipelineName
     pid: process.pid
     cwd: CWD
     exec: EXEC
     hh_mm: process.env.HH_MM ? null
     logdir: process.env.LOGDIR ? null
-    started_at: new Date().toISOString()
+    started_at: startedAt
     status: 'running'
+  U.saveRun runPayload
+
+  # Mirror into the runs table. Best-effort: a missing sqlite meta (project
+  # without it) must not abort the run.
+  try
+    M.saveThis "runRegister{#{runId}}.json",
+      run_id: runId
+      pipeline: pipelineName
+      started_at: startedAt
+      status: 'running'
+      logdir: process.env.LOGDIR ? null
+      pid: process.pid
+      cwd: CWD
+  catch err
+    console.error "[runs] could not register run #{runId} in sqlite:", String(err?.message ? err)
+
+  # Helper used at every exit path to mark the run done/failed/shutdown.
+  # Updates both `state/ui-run.json` (via U.updateRun) and the SQLite row.
+  finalizeRunStatus = (status, extra = {}) ->
+    finishedAt = new Date().toISOString()
+    patch = Object.assign {status, finished_at: finishedAt}, extra
+    U.updateRun patch
+    try
+      M.saveThis "runUpdate{#{runId}}.json",
+        status: status
+        finished_at: finishedAt
+        shutdown: extra.shutdown ? null
+    catch err
+      console.error "[runs] could not finalize run #{runId} in sqlite:", String(err?.message ? err)
   if experiment.run?.model and experiment.run?.loraLand
     modelDirName = experiment.run.model.replace /\//g, '--'
     targetDir    = path.resolve experiment.run.loraLand, modelDirName
@@ -1850,10 +1886,7 @@ main = ->
     if sd?
       S.writePipelineShutdown sd
       exitCode = if sd.failed is true then 1 else 0
-      U.updateRun
-        status: if sd.failed is true then 'failed' else 'shutdown'
-        shutdown: sd
-        finished_at: new Date().toISOString()
+      finalizeRunStatus (if sd.failed is true then 'failed' else 'shutdown'), { shutdown: sd }
       banner if sd.failed is true then "💥 PIPELINE FAILED" else "🛑 PIPELINE SHUTDOWN"
       console.log "  by:", sd.by
       console.log "  reason:", sd.reason
@@ -1871,15 +1904,11 @@ main = ->
 
     if doneFinals and active.count is 0
       if anyFail
-        U.updateRun
-          status: 'failed'
-          finished_at: new Date().toISOString()
+        finalizeRunStatus 'failed'
         banner "💥 Pipeline finished with failures (final: #{finals.join(', ')})"
         process.exit(1)
       else
-        U.updateRun
-          status: 'done'
-          finished_at: new Date().toISOString()
+        finalizeRunStatus 'done'
         banner "🌟 Pipeline finished (final: #{finals.join(', ')})"
         process.exit(0)
 

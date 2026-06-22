@@ -120,6 +120,66 @@ Two recipe-level checks fire at startup regardless of the array form:
 Both write to stderr; the multi-maker scan also lands in the ledger's
 startup record when it's open.
 
+## Stable run IDs + the SQLite `runs` table
+
+Every launch of `main()` mints a `runId = crypto.randomUUID()` after
+the experiment is built. The UUID lives in two places:
+
+- **`state/ui-run.json.id`** — the existing JSON-file surface the UI
+  reads. Pre-existing readers tolerate the new field.
+- **The `runs` table in `runtime.sqlite`** — populated via the
+  `runRegister{<id>}.json` meta request at launch and updated via
+  `runUpdate{<id>}.json` from `finalizeRunStatus(status, extra)` at
+  every exit path (`shutdown`, `failed`, `done`). The runs table is
+  initialized by `meta/sqlite.coffee`'s schema bootstrap, so projects
+  without an existing DB get it on first runner boot.
+
+Three read requests cover the agent surface (called from
+`ui_server.coffee` via `/api/sqlite/<key>` and `/api/run/<id>`):
+
+- `runById{<id>}.json` — single row + parsed `shutdown` blob.
+- `runHistory.jsonl` — all rows, newest first.
+- `changesSince{<arg>}.json` — see below.
+
+If the sqlite meta is absent (a non-sqlite project), the runner logs
+`[runs] could not register run …` to stderr and continues — the
+filesystem `state/ui-run.json` surface still works without the DB.
+
+## Change log + diff (the agent's evaluation surface)
+
+The sqlite meta also bootstraps a `_change_log` table with INSERT/UPDATE/
+DELETE triggers on every tracked table (`stories`, `story_parts`,
+`expanded_story_parts`, `kag_entries`, `oracle_story_attempts`,
+`lora_trained_stories`, `lora_story_usage`, `lora_training_runs`,
+`lora_training_run_stories`, `runs`). Each trigger records
+`(ts, table_name, op, row_id)`. Compound primary keys are stored as
+`<col1>|<col2>`.
+
+`changesSince{<arg>}.json` discriminates the arg shape — UUID resolves
+through the `runs` table; ISO 8601 timestamps and integer `change_id`s
+are used directly — and returns:
+
+```json
+{
+  "anchor":        {"kind": "...", "value": "...", "resolved_ts": "...", "resolved_change_id": ...},
+  "total_changes": N,
+  "by_table":      {"<table>": {"count": N, "inserts": N, "updates": N, "deletes": N, "ids": [...]}}
+}
+```
+
+`ui_server.coffee`'s `mergeChangeLogCounts` consumes this to replace the
+heuristic-`null` entries in `buildRunEvaluation`'s `sqlite_rows_added`
+block with precise change-log counts.
+
+**Historical caveat.** Rows in tracked tables that predate the triggers
+are not in `_change_log`; the diff is honest about its window. The
+schema is idempotent — `CREATE TABLE IF NOT EXISTS` and `CREATE TRIGGER
+IF NOT EXISTS` — so existing DBs gain the new surface without manual
+migration on next boot.
+
+The full agent contract built atop this is in
+[`GPT/ui/agent_surface.md`](ui/agent_surface.md).
+
 ## state/ ↔ params/ correspondence
 
 - `state/step-<name>.json` records what happened; `params/<step>.yaml` records

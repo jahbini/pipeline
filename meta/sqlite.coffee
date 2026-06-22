@@ -165,6 +165,170 @@ module.exports = (M, opts={}) ->
       story_id TEXT NOT NULL,
       PRIMARY KEY (run_id, story_id)
     );
+
+    -- Generic pipeline-run history (every recipe launch, not just LoRA).
+    -- Powers GET /api/run/{id} and the agent surface's evaluation step.
+    CREATE TABLE IF NOT EXISTS runs (
+      run_id      TEXT PRIMARY KEY,
+      pipeline    TEXT,
+      started_at  TEXT,
+      finished_at TEXT,
+      status      TEXT,
+      logdir      TEXT,
+      pid         INTEGER,
+      cwd         TEXT,
+      shutdown    TEXT
+    );
+
+    -- Per-row change log (step 5 of the agent surface). Every INSERT,
+    -- UPDATE, and DELETE on a tracked table fires a trigger that drops one
+    -- row here. Powers GET /api/sqlite/diff?since=<run_id|ts|change_id> for
+    -- precise "what changed because of this run" answers.
+    CREATE TABLE IF NOT EXISTS _change_log (
+      change_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts         TEXT NOT NULL,
+      table_name TEXT NOT NULL,
+      op         TEXT NOT NULL,
+      row_id     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_change_log_ts    ON _change_log (ts);
+    CREATE INDEX IF NOT EXISTS idx_change_log_table ON _change_log (table_name);
+
+    -- Triggers: one INSERT/UPDATE/DELETE trigger per tracked table.
+    -- row_id is the primary key (compound keys are concatenated with '|').
+    -- ts uses strftime so it matches JS Date.toISOString() format and can
+    -- be compared lexicographically against runs.started_at.
+
+    CREATE TRIGGER IF NOT EXISTS trg_stories_ins AFTER INSERT ON stories BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'stories', 'INSERT', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_stories_upd AFTER UPDATE ON stories BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'stories', 'UPDATE', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_stories_del AFTER DELETE ON stories BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'stories', 'DELETE', OLD.story_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_story_parts_ins AFTER INSERT ON story_parts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'story_parts', 'INSERT', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_story_parts_upd AFTER UPDATE ON story_parts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'story_parts', 'UPDATE', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_story_parts_del AFTER DELETE ON story_parts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'story_parts', 'DELETE', OLD.story_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_expanded_story_parts_ins AFTER INSERT ON expanded_story_parts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'expanded_story_parts', 'INSERT', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_expanded_story_parts_upd AFTER UPDATE ON expanded_story_parts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'expanded_story_parts', 'UPDATE', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_expanded_story_parts_del AFTER DELETE ON expanded_story_parts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'expanded_story_parts', 'DELETE', OLD.story_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_kag_entries_ins AFTER INSERT ON kag_entries BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'kag_entries', 'INSERT',
+              NEW.story_id || '|' || NEW.entry_index);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_kag_entries_upd AFTER UPDATE ON kag_entries BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'kag_entries', 'UPDATE',
+              NEW.story_id || '|' || NEW.entry_index);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_kag_entries_del AFTER DELETE ON kag_entries BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'kag_entries', 'DELETE',
+              OLD.story_id || '|' || OLD.entry_index);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_oracle_story_attempts_ins AFTER INSERT ON oracle_story_attempts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'oracle_story_attempts', 'INSERT', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_oracle_story_attempts_upd AFTER UPDATE ON oracle_story_attempts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'oracle_story_attempts', 'UPDATE', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_oracle_story_attempts_del AFTER DELETE ON oracle_story_attempts BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'oracle_story_attempts', 'DELETE', OLD.story_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_lora_trained_stories_ins AFTER INSERT ON lora_trained_stories BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_trained_stories', 'INSERT', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_lora_trained_stories_upd AFTER UPDATE ON lora_trained_stories BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_trained_stories', 'UPDATE', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_lora_trained_stories_del AFTER DELETE ON lora_trained_stories BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_trained_stories', 'DELETE', OLD.story_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_lora_story_usage_ins AFTER INSERT ON lora_story_usage BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_story_usage', 'INSERT', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_lora_story_usage_upd AFTER UPDATE ON lora_story_usage BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_story_usage', 'UPDATE', NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_lora_story_usage_del AFTER DELETE ON lora_story_usage BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_story_usage', 'DELETE', OLD.story_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_lora_training_runs_ins AFTER INSERT ON lora_training_runs BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_training_runs', 'INSERT', NEW.run_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_lora_training_runs_upd AFTER UPDATE ON lora_training_runs BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_training_runs', 'UPDATE', NEW.run_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_lora_training_runs_del AFTER DELETE ON lora_training_runs BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_training_runs', 'DELETE', OLD.run_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_lora_training_run_stories_ins AFTER INSERT ON lora_training_run_stories BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_training_run_stories', 'INSERT',
+              NEW.run_id || '|' || NEW.story_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_lora_training_run_stories_del AFTER DELETE ON lora_training_run_stories BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_training_run_stories', 'DELETE',
+              OLD.run_id || '|' || OLD.story_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_runs_ins AFTER INSERT ON runs BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'runs', 'INSERT', NEW.run_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_runs_upd AFTER UPDATE ON runs BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'runs', 'UPDATE', NEW.run_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_runs_del AFTER DELETE ON runs BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'runs', 'DELETE', OLD.run_id);
+    END;
     """
 
     kagColumns = db.prepare("PRAGMA table_info(kag_entries)").all()
@@ -948,10 +1112,215 @@ module.exports = (M, opts={}) ->
             mode: value.mode ? 'full'
           }
       }
+
+      # --- Generic pipeline-run lifecycle ---------------------------------
+      # `runRegister{<id>}.json` (write-only)  — INSERT or REPLACE a runs row
+      # at launch. Body is the full row payload (status defaults to 'running').
+      # `runUpdate{<id>}.json` (write-only)    — partial UPDATE; only the keys
+      # present in the body are written. Use at shutdown/finish to set
+      # finished_at + status (+ optional shutdown reason).
+      # `runById{<id>}.json`   (read-only)     — SELECT one row.
+      # `runHistory.jsonl`     (read-only)     — SELECT all rows, newest first.
+      {
+        name: 'runRegister'
+        regex: /^runRegister\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: null
+        write: (db, value, runID) ->
+          throw new Error "sqlite meta runRegister write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          writeRunID = value.run_id ? runID
+          throw new Error "sqlite meta runRegister run_id mismatch" unless writeRunID is runID
+
+          db.prepare("""
+            INSERT INTO runs (run_id, pipeline, started_at, finished_at, status, logdir, pid, cwd, shutdown)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+              pipeline    = excluded.pipeline,
+              started_at  = excluded.started_at,
+              finished_at = excluded.finished_at,
+              status      = excluded.status,
+              logdir      = excluded.logdir,
+              pid         = excluded.pid,
+              cwd         = excluded.cwd,
+              shutdown    = excluded.shutdown
+          """).run(
+            writeRunID
+            value.pipeline ? null
+            value.started_at ? null
+            value.finished_at ? null
+            value.status ? 'running'
+            value.logdir ? null
+            (if Number.isFinite(Number(value.pid)) then Number(value.pid) else null)
+            value.cwd ? null
+            (if value.shutdown? then JSON.stringify(value.shutdown) else null)
+          )
+          { ok: true, run_id: writeRunID }
+      }
+
+      {
+        name: 'runUpdate'
+        regex: /^runUpdate\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: null
+        write: (db, value, runID) ->
+          throw new Error "sqlite meta runUpdate write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          # Build a partial UPDATE from whichever fields the caller sent.
+          sets = []
+          binds = []
+          for col in ['pipeline', 'started_at', 'finished_at', 'status', 'logdir', 'cwd']
+            if Object.prototype.hasOwnProperty.call(value, col)
+              sets.push "#{col} = ?"
+              binds.push value[col]
+          if Object.prototype.hasOwnProperty.call(value, 'pid')
+            sets.push "pid = ?"
+            binds.push (if Number.isFinite(Number(value.pid)) then Number(value.pid) else null)
+          if Object.prototype.hasOwnProperty.call(value, 'shutdown')
+            sets.push "shutdown = ?"
+            binds.push (if value.shutdown? then JSON.stringify(value.shutdown) else null)
+          if sets.length is 0
+            return { ok: true, run_id: runID, updated: 0 }
+          binds.push runID
+          info = db.prepare("UPDATE runs SET #{sets.join(', ')} WHERE run_id = ?").run binds...
+          { ok: true, run_id: runID, updated: info.changes ? 0 }
+      }
+
+      {
+        name: 'runById'
+        regex: /^runById\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: (db, runID) ->
+          row = db.prepare("""
+            SELECT run_id, pipeline, started_at, finished_at, status, logdir, pid, cwd, shutdown
+            FROM runs WHERE run_id = ?
+          """).get(runID)
+          return null unless row?
+          shutdown = null
+          if row.shutdown
+            try shutdown = JSON.parse(row.shutdown) catch then shutdown = row.shutdown
+          {
+            run_id: row.run_id
+            pipeline: row.pipeline
+            started_at: row.started_at
+            finished_at: row.finished_at
+            status: row.status
+            logdir: row.logdir
+            pid: row.pid
+            cwd: row.cwd
+            shutdown: shutdown
+          }
+        write: null
+      }
+
+      # --- Change-log diff (step 5) -------------------------------------
+      # `changesSince{<arg>}.json` — return aggregated per-table changes since
+      # an anchor. The arg can be:
+      #   • a UUID run_id  → resolve to runs.started_at, anchor by ts
+      #   • an ISO 8601 ts → use directly as the ts anchor
+      #   • an integer     → anchor by change_id
+      # Returns:
+      #   {
+      #     anchor: { kind, value, resolved_ts?, resolved_change_id },
+      #     total_changes: N,
+      #     by_table: {
+      #       stories: { count, inserts, updates, deletes, ids: [...] },
+      #       ...
+      #     }
+      #   }
+      {
+        name: 'changesSince'
+        regex: /^changesSince\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: (db, arg) ->
+          # Discriminate the arg shape.
+          anchorChangeId = null
+          anchorTs = null
+          kind = null
+          if /^\d+$/.test(arg)
+            anchorChangeId = parseInt(arg, 10)
+            kind = 'change_id'
+          else if /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(arg)
+            row = db.prepare("SELECT started_at FROM runs WHERE run_id = ?").get(arg)
+            throw new Error "sqlite meta changesSince: no run with run_id '#{arg}'" unless row?
+            anchorTs = row.started_at
+            kind = 'run_id'
+          else if /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(arg)
+            anchorTs = arg
+            kind = 'timestamp'
+          else
+            throw new Error "sqlite meta changesSince: arg '#{arg}' is not a uuid, ISO timestamp, or change_id"
+
+          rows = if anchorChangeId?
+            db.prepare("""
+              SELECT change_id, ts, table_name, op, row_id
+              FROM _change_log
+              WHERE change_id > ?
+              ORDER BY change_id ASC
+            """).all(anchorChangeId)
+          else
+            db.prepare("""
+              SELECT change_id, ts, table_name, op, row_id
+              FROM _change_log
+              WHERE ts >= ?
+              ORDER BY change_id ASC
+            """).all(anchorTs)
+
+          resolvedChangeId = if rows.length then rows[0].change_id - 1 else null
+          resolvedChangeId = anchorChangeId if anchorChangeId? and resolvedChangeId is null
+
+          byTable = {}
+          for r in rows
+            t = r.table_name
+            byTable[t] ?= { count: 0, inserts: 0, updates: 0, deletes: 0, ids: [] }
+            byTable[t].count += 1
+            switch r.op
+              when 'INSERT' then byTable[t].inserts += 1
+              when 'UPDATE' then byTable[t].updates += 1
+              when 'DELETE' then byTable[t].deletes += 1
+            byTable[t].ids.push r.row_id if r.row_id? and byTable[t].ids.length < 200
+
+          {
+            anchor:
+              kind: kind
+              value: arg
+              resolved_ts: anchorTs
+              resolved_change_id: resolvedChangeId
+            total_changes: rows.length
+            by_table: byTable
+          }
+        write: null
+      }
+
+      {
+        name: 'runHistory'
+        regex: /^runHistory$/
+        allowedSuffixes: ['jsonl']
+        read: (db) ->
+          rows = db.prepare("""
+            SELECT run_id, pipeline, started_at, finished_at, status, logdir, pid, cwd, shutdown
+            FROM runs
+            ORDER BY started_at DESC
+          """).all()
+          for row in rows
+            shutdown = null
+            if row.shutdown
+              try shutdown = JSON.parse(row.shutdown) catch then shutdown = row.shutdown
+            {
+              run_id: row.run_id
+              pipeline: row.pipeline
+              started_at: row.started_at
+              finished_at: row.finished_at
+              status: row.status
+              logdir: row.logdir
+              pid: row.pid
+              cwd: row.cwd
+              shutdown: shutdown
+            }
+        write: null
+      }
     ]
 
     M.addMetaRule "sqlite",
-      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll)\.(json|jsonl|txt|csv)$/i,
+      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\})\.(json|jsonl|txt|csv)$/i,
       (key, value) ->
         debugLog "meta key", key, "write?", value isnt undefined
 
@@ -1003,3 +1372,15 @@ module.exports = (M, opts={}) ->
           debugLog "write start", matchedRequest.name, "args=#{JSON.stringify(matchedArgs)}", "type=#{typeof decoded}"
         matchedRequest.write(db, decoded, matchedArgs...)
         debugLog "write done", matchedRequest.name, "args=#{JSON.stringify(matchedArgs)}"
+
+# Surface the request catalogue for introspection (the agent manifest reads
+# this to advertise what request keys exist). Mirrors the REQUESTS list above;
+# kept in sync by hand when a new request is added.
+module.exports.requestNames = [
+  'storyByID',          'partsFor',         'kagFor',          'oracleFailureFor'
+  'expandedPartsFor',   'storiesWithKag',   'storiesMissingKag'
+  'allStories',         'trainedStories',   'loraStoryUsage'
+  'loraTrainingRun',    'loraTrainingRuns', 'sqliteResetAll',  'loraCycleReset'
+  'runRegister',        'runUpdate',        'runById',         'runHistory'
+  'changesSince'
+]

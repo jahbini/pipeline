@@ -465,6 +465,18 @@
         </section>
 
         <section class="panel" data-default-collapsed="1">
+          <h2>Run History</h2>
+          <div id="run-history-meta" class="hint mono"></div>
+          <table class="steps">
+            <thead>
+              <tr><th>started</th><th>pipeline</th><th>status</th><th>run_id</th></tr>
+            </thead>
+            <tbody id="run-history-body"></tbody>
+          </table>
+          <div id="run-detail" class="hint mono" style="margin-top:8px; white-space:pre-wrap;"></div>
+        </section>
+
+        <section class="panel" data-default-collapsed="1">
           <h2>Stories</h2>
           <div id="sqlite-stories-meta" class="hint mono"></div>
           <table class="steps">
@@ -931,7 +943,95 @@
 
     const SQLITE_PANEL_LIMIT = 20;
 
+    let currentRunDetailId = null;
+
+    function renderRunDetail(payload) {
+      const el = byId('run-detail');
+      if (!payload || !payload.ok) {
+        el.textContent = payload?.error ? `error: ${payload.error}` : '';
+        return;
+      }
+      const r = payload.run;
+      const elapsed = (() => {
+        if (!r.started_at) return '';
+        const start = Date.parse(r.started_at);
+        const end = r.finished_at ? Date.parse(r.finished_at) : Date.now();
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return '';
+        return `${((end - start) / 1000).toFixed(1)}s`;
+      })();
+      const arts = r.artifacts_written || [];
+      const rowsAdded = r.sqlite_rows_added || {};
+      const rowsLines = Object.entries(rowsAdded).map(([table, val]) => {
+        if (val === null) return `  ${table}: (no timestamp — see step 5 diff)`;
+        const ids = (val.ids || []).slice(0, 5);
+        const more = (val.ids || []).length > ids.length ? `, +${val.ids.length - ids.length} more` : '';
+        return `  ${table}: ${val.count}${ids.length ? `  [${ids.map((i) => String(i).slice(0,12) + '…').join(', ')}${more}]` : ''}`;
+      }).join('\n');
+      el.textContent = [
+        `run_id      : ${r.run_id}`,
+        `pipeline    : ${r.pipeline || ''}`,
+        `status      : ${r.status || ''}${elapsed ? `   elapsed=${elapsed}` : ''}`,
+        `started_at  : ${r.started_at || ''}`,
+        `finished_at : ${r.finished_at || '(still running)'}`,
+        `logdir      : ${r.logdir || ''}`,
+        `pid         : ${r.pid || ''}`,
+        r.shutdown ? `shutdown    : ${JSON.stringify(r.shutdown)}` : '',
+        '',
+        `artifacts_written (${arts.length}):`,
+        ...arts.slice(0, 20).map((a) => `  ${a.path}  (${a.size}B, ${a.mtime})`),
+        arts.length > 20 ? `  …and ${arts.length - 20} more` : '',
+        '',
+        'sqlite_rows_added:',
+        rowsLines,
+        '',
+        '── stderr tail ────────────────────────',
+        r.err_tail || '(empty)',
+        '',
+        '── stdout tail ────────────────────────',
+        r.log_tail || '(empty)',
+      ].filter((s) => s !== '').join('\n');
+    }
+
+    async function loadRunDetail(runId) {
+      currentRunDetailId = runId;
+      byId('run-detail').textContent = `loading ${runId}…`;
+      try {
+        const res = await fetch(`/api/run/${encodeURIComponent(runId)}`, { cache: 'no-store' });
+        const data = await res.json();
+        renderRunDetail(data);
+      } catch (err) {
+        renderRunDetail({ ok: false, error: String(err.message || err) });
+      }
+    }
+
     async function refreshSqlitePanels() {
+      // Run History (the agent-surface step-3 panel: lists rows, click for /api/run/{id})
+      const history = await fetchSqliteRequest('runHistory.jsonl');
+      const hBody = byId('run-history-body');
+      const hMeta = byId('run-history-meta');
+      if (!history.ok || !Array.isArray(history.value)) {
+        hBody.innerHTML = '';
+        hMeta.textContent = history.ok ? '(no rows — runs table empty until first launch with new runner)' : `error: ${history.error}`;
+      } else {
+        const rows = history.value;
+        const head = rows.slice(0, SQLITE_PANEL_LIMIT);
+        hMeta.textContent = `${rows.length} total${rows.length > head.length ? ` (showing newest ${head.length})` : ''}`;
+        hBody.innerHTML = head.map((row) => `
+          <tr data-run-id="${escapeHtml(row.run_id)}" style="cursor:pointer">
+            <td class="mono">${escapeHtml(formatLocalTime(row.started_at || ''))}</td>
+            <td class="mono">${escapeHtml(row.pipeline ?? '')}</td>
+            <td>${escapeHtml(row.status ?? '')}</td>
+            <td class="mono">${escapeHtml((row.run_id || '').slice(0, 8))}…</td>
+          </tr>
+        `).join('');
+        // Re-bind click handlers (innerHTML wipes them).
+        for (const tr of hBody.querySelectorAll('tr[data-run-id]')) {
+          tr.addEventListener('click', () => loadRunDetail(tr.dataset.runId));
+        }
+        // If a run is currently being inspected, refresh its detail too.
+        if (currentRunDetailId) loadRunDetail(currentRunDetailId).catch(console.error);
+      }
+
       // Stories
       const stories = await fetchSqliteRequest('allStories.jsonl');
       const sBody = byId('sqlite-stories-body');
@@ -1055,14 +1155,14 @@
         mergePid: mergeRun.pid || null
       });
       byId('subtitle').textContent = `${pipe.current || ''}  ${run.pipeline || ''}  ${run.hh_mm || ''}  ${run.logdir || ''}`.trim();
-      // Page title: "Pipeline Monitor — <project> ( <pipe> )" when in a pipe;
-      // omits the parens when ui_server was started at the project root.
+      // Page title: "Pipeline Monitor for <project> (<pipe>)" so the human
+      // sees at a glance which BASE and which active pipe they're driving.
       const ws = data.workspace || {};
       const wsTop = ws.top_level || '';
       const wsPipe = ws.pipe || '';
       byId('page-title').textContent =
         'Pipeline Monitor' +
-        (wsTop ? ' — ' + wsTop : '') +
+        (wsTop ? ' for ' + wsTop : '') +
         (wsPipe ? ' (' + wsPipe + ')' : '');
       const status = run.status || 'unknown';
       const mergeStatus = mergeRun.status || '';
