@@ -138,6 +138,42 @@ discoverPipelineNames = ->
 RUNNER = path.join(EXEC_ROOT, 'pipeline_runner.coffee')
 MERGE_SCRIPT = path.join(EXEC_ROOT, 'merge_sqlite_dbs.coffee')
 
+# === SQLite query layer (agent surface step 1) =========================
+# A per-pipe (per-CWD) Memo instance with the EXEC meta loader applied,
+# used solely for read-only dispatch of sqlite request keys through the
+# same `meta/sqlite.coffee` REQUESTS map that steps use. Cached by CWD
+# path so we open each DB once. See GPT/ui/agent_surface.md.
+{ Memo } = require RUNNER
+sqliteMemoCache = new Map()
+
+getSqliteMemoForPipe = (pipeCwd) ->
+  cached = sqliteMemoCache.get(pipeCwd)
+  return cached if cached?
+  M = new Memo()
+  try
+    metaLoader = require path.join(EXEC_ROOT, 'meta')
+    metaLoader M, { baseDir: pipeCwd }
+  catch err
+    console.error "[ui/sqlite] meta loader failed for #{pipeCwd}:", err?.message ? err
+    return null
+  sqliteMemoCache.set pipeCwd, M
+  M
+
+# Dispatch a sqlite request key (e.g. 'allStories.jsonl',
+# 'storyByID{abc-123}.json') through the active pipe's Memo. Returns the
+# resolved value or undefined; never throws — the API layer decides how to
+# represent errors.
+runSqliteRequest = (requestKey) ->
+  pipeCwd = CWD
+  M = getSqliteMemoForPipe(pipeCwd)
+  return undefined unless M?
+  try
+    entry = M.theLowdown(requestKey)
+    return entry?.value
+  catch err
+    console.error "[ui/sqlite] request '#{requestKey}' failed:", err?.message ? err
+    return undefined
+
 PIPE_ROOT = path.join(BASE_ROOT, 'pipe')
 DEFAULT_KAG_KEYWORDS = [
   'joy'
@@ -1386,6 +1422,23 @@ server = http.createServer (req, res) ->
     return sendHtml res, resolveUiAsset('index.html')
   if url is '/api/status'
     return sendJson res, 200, buildStatus()
+  if url.startsWith('/api/sqlite/')
+    # /api/sqlite/<encoded-request-key>  → dispatch through meta/sqlite.coffee
+    # Args go inside the request key using the meta layer's own `name{arg}.suffix`
+    # grammar, URL-encoded. Examples:
+    #   /api/sqlite/allStories.jsonl
+    #   /api/sqlite/loraTrainingRuns.jsonl
+    #   /api/sqlite/storyByID%7Babc-123%7D.json
+    rawKey = url.slice('/api/sqlite/'.length)
+    rawKey = rawKey.split('?')[0]   # strip any querystring; key lives in the path
+    try
+      requestKey = decodeURIComponent(rawKey)
+    catch
+      return sendJson res, 400, { ok: false, error: 'invalid request key encoding' }
+    value = runSqliteRequest(requestKey)
+    if value is undefined
+      return sendJson res, 404, { ok: false, error: 'request key did not resolve', request: requestKey }
+    return sendJson res, 200, { ok: true, request: requestKey, value: value }
   if url.startsWith('/api/file?')
     query = new URL(url, 'http://127.0.0.1').searchParams
     relativePath = query.get('path')

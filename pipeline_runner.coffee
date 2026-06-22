@@ -1942,6 +1942,7 @@ module.exports = {
   resolveStepScript
   resolvePython
   substituteBraces
+  Memo
   EXEC
   BASE
   CWD
