@@ -1178,6 +1178,18 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       legacy[cliKey] = value if value isnt undefined
     legacy
 
+  # Per-subcommand whitelist of keys allowed from the step's `mlx:` block.
+  # `null` (or absence) means "allow all" — the historical default and
+  # what every existing recipe relies on for `generate`. `cache_prompt`
+  # is the first subcommand that DOES NOT accept generate's full flag
+  # set (no `--max-tokens`, no `--temp`, etc.); without this filter
+  # those flags leak in and argparse rejects the call.
+  mlxAllowedFlags =
+    cache_prompt: [
+      'max-kv-size', 'kv-bits', 'kv-group-size', 'quantized-kv-start'
+      'trust-remote-code', 'eos-token', 'adapter-path'
+    ]
+
   getMlxConfig = (cmdType) ->
     stepParams = getStepParams()
     mlxCfg = stepParams.mlx
@@ -1187,7 +1199,11 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
     #   mlx:
     #     temp: 0.7
     #     max-tokens: 2000
-    Object.assign merged, mlxCfg
+    allowed = mlxAllowedFlags[cmdType]
+    for own k, v of mlxCfg
+      continue if allowed? and k not in allowed
+      merged[k] = v
+    merged
 
   mergeMlxPayload = (cmdType, payload) ->
     merged = getMlxConfig(cmdType)

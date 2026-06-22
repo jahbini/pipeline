@@ -1,0 +1,74 @@
+# =====================================================================
+#   eval_ite.yaml — adapter evaluation pipeline
+# =====================================================================
+#   Brings the evaluation pattern from `~/development/pipeline` (the
+#   legacy package) into the modern _ite world. Generates ablation
+#   completions for the current adapter (vs the base model), summarizes
+#   per-variant metrics — including `distinct2_mean` and `mem_sub_rate`
+#   from the legacy scoring formula — and writes an `eval_score` verdict.
+#
+#   Companion to `lora_ite.yaml`: launch this after a training cycle to
+#   score the adapter that was just produced. Each launch records one
+#   row in the `runs` SQLite table (UUID-stamped), so the agent surface
+#   can later compare evaluations across runs.
+#
+#   See `GPT/legacy_pipeline.md` for the historical "one daily test →
+#   champion-after-N-days judge" workflow this descends from.
+#
+run:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  output_dir: out
+  data_dir: data
+  loraLand: build/model
+
+artifacts:
+  ablations:
+    target: eval_out/ablations.jsonl
+  ablation_summary:
+    target: eval_out/ablation_summary.json
+  voice_similarity:
+    target: eval_out/voice_similarity.json
+  eval_score:
+    target: eval_out/eval_score.json
+
+generate_ablations_ite:
+  run: eval_ite/generate_ablations_ite.coffee
+  depends_on: []
+  needs: []
+  makes: [ablations]
+  quantized_model_dir: '{BASE}/build/model4'
+  adapter_path: '{BASE}/build/adapter'
+  max_tokens: 160
+  temp: 0.7
+  # Default prompt set — override per pipe via override/eval_ite.yaml
+  # to evaluate on prompts that match your training corpus's domain.
+  eval_prompts:
+    - "Tell me a story in the voice you know best."
+    - "Share an important thought you've had recently."
+    - "What truth do most people overlook?"
+    - "Write a short observation about modern life."
+    - "Describe an everyday moment that holds meaning."
+
+summarize_ablations_ite:
+  run: eval_ite/summarize_ablations_ite.coffee
+  depends_on: [generate_ablations_ite]
+  needs: [ablations]
+  makes: [ablation_summary]
+  # Substring length (in chars) used for the memorization-rate check:
+  # a completion that contains ANY contiguous substring of this length
+  # found in the training corpus is counted as a memorization hit.
+  mem_substring_length: 40
+
+voice_similarity_ite:
+  run: eval_ite/voice_similarity_ite.coffee
+  depends_on: [generate_ablations_ite]
+  needs: [ablations]
+  makes: [voice_similarity]
+  quantized_model_dir: '{BASE}/build/model4'
+  adapter_path: null   # base-only encoder by default; set to '{BASE}/build/adapter' to encode-with-adapter
+
+judge_run_ite:
+  run: eval_ite/judge_run_ite.coffee
+  depends_on: [summarize_ablations_ite, voice_similarity_ite]
+  needs: [ablation_summary]
+  makes: [eval_score]

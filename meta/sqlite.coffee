@@ -180,6 +180,22 @@ module.exports = (M, opts={}) ->
       shutdown    TEXT
     );
 
+    -- KAG-chunk embeddings, populated at oracle time from the prompt cache.
+    -- One row per (story_id, chunk_index): the cache's last-layer V tensor
+    -- mean-pooled across seq_len positions, stored as a Float32 BLOB. The
+    -- chunk_text is duplicated here from kag_entries so the embedding is
+    -- self-contained for centroid-building queries.
+    CREATE TABLE IF NOT EXISTS kag_embeddings (
+      story_id     TEXT NOT NULL,
+      chunk_index  INTEGER NOT NULL,
+      dim          INTEGER NOT NULL,
+      source       TEXT,         -- e.g. 'cache_prompt/last_v_meanpool'
+      embedding    BLOB NOT NULL,
+      created_at   TEXT,
+      PRIMARY KEY (story_id, chunk_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_kag_embeddings_story_id ON kag_embeddings (story_id);
+
     -- Per-row change log (step 5 of the agent surface). Every INSERT,
     -- UPDATE, and DELETE on a tracked table fires a trigger that drops one
     -- row here. Powers GET /api/sqlite/diff?since=<run_id|ts|change_id> for
@@ -315,6 +331,22 @@ module.exports = (M, opts={}) ->
       INSERT INTO _change_log (ts, table_name, op, row_id)
       VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'lora_training_run_stories', 'DELETE',
               OLD.run_id || '|' || OLD.story_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_kag_embeddings_ins AFTER INSERT ON kag_embeddings BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'kag_embeddings', 'INSERT',
+              NEW.story_id || '|' || NEW.chunk_index);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_kag_embeddings_upd AFTER UPDATE ON kag_embeddings BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'kag_embeddings', 'UPDATE',
+              NEW.story_id || '|' || NEW.chunk_index);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_kag_embeddings_del AFTER DELETE ON kag_embeddings BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'kag_embeddings', 'DELETE',
+              OLD.story_id || '|' || OLD.chunk_index);
     END;
 
     CREATE TRIGGER IF NOT EXISTS trg_runs_ins AFTER INSERT ON runs BEGIN
@@ -1113,6 +1145,99 @@ module.exports = (M, opts={}) ->
           }
       }
 
+      # --- KAG chunk embeddings -------------------------------------------
+      # `kagEmbeddingRegister{<story|chunk>}.json` (write-only):
+      #   INSERT or REPLACE a kag_embeddings row. Body shape:
+      #     {story_id, chunk_index, dim, source, embedding (Buffer or {data, type:'Buffer'})}
+      # `kagEmbedding{<story|chunk>}.json` (read-only):
+      #   Single row + decoded embedding-as-base64 (caller decodes).
+      # `kagAllEmbeddings.jsonl` (read-only):
+      #   All rows, each with embedding as base64. Caller decodes per-row.
+      # The arg parsing for the {<story|chunk>}-shaped keys uses '|' as a
+      # separator inside the curly braces (a tuple key).
+      {
+        name: 'kagEmbeddingRegister'
+        regex: /^kagEmbeddingRegister\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: null
+        write: (db, value, tupleArg) ->
+          throw new Error "sqlite meta kagEmbeddingRegister write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          [argStory, argChunk] = String(tupleArg).split '|'
+          storyID  = value.story_id ? argStory
+          chunkIdx = if value.chunk_index? then Number(value.chunk_index) else Number(argChunk)
+          throw new Error "sqlite meta kagEmbeddingRegister story_id mismatch" unless storyID is argStory
+          throw new Error "sqlite meta kagEmbeddingRegister chunk_index mismatch" unless chunkIdx is Number(argChunk)
+
+          # Accept Buffer directly or the JSON-serialized {data:[...], type:'Buffer'} form.
+          emb = value.embedding
+          if emb? and typeof emb is 'object' and emb.type is 'Buffer' and Array.isArray(emb.data)
+            emb = Buffer.from emb.data
+          throw new Error "sqlite meta kagEmbeddingRegister embedding must be Buffer-like" unless Buffer.isBuffer(emb)
+
+          db.prepare("""
+            INSERT INTO kag_embeddings (story_id, chunk_index, dim, source, embedding, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(story_id, chunk_index) DO UPDATE SET
+              dim        = excluded.dim,
+              source     = excluded.source,
+              embedding  = excluded.embedding,
+              created_at = excluded.created_at
+          """).run(
+            storyID
+            chunkIdx
+            Number(value.dim ? (emb.length / 4))
+            value.source ? 'cache_prompt/last_v_meanpool'
+            emb
+            value.created_at ? new Date().toISOString()
+          )
+          { ok: true, story_id: storyID, chunk_index: chunkIdx, bytes: emb.length }
+      }
+
+      {
+        name: 'kagEmbedding'
+        regex: /^kagEmbedding\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: (db, tupleArg) ->
+          [storyID, chunkStr] = String(tupleArg).split '|'
+          chunkIdx = Number chunkStr
+          row = db.prepare("""
+            SELECT story_id, chunk_index, dim, source, embedding, created_at
+            FROM kag_embeddings WHERE story_id = ? AND chunk_index = ?
+          """).get(storyID, chunkIdx)
+          return null unless row?
+          {
+            story_id: row.story_id
+            chunk_index: row.chunk_index
+            dim: row.dim
+            source: row.source
+            embedding_b64: Buffer.from(row.embedding).toString('base64')
+            created_at: row.created_at
+          }
+        write: null
+      }
+
+      {
+        name: 'kagAllEmbeddings'
+        regex: /^kagAllEmbeddings$/
+        allowedSuffixes: ['jsonl']
+        read: (db) ->
+          rows = db.prepare("""
+            SELECT story_id, chunk_index, dim, source, embedding, created_at
+            FROM kag_embeddings
+            ORDER BY story_id ASC, chunk_index ASC
+          """).all()
+          for row in rows
+            {
+              story_id: row.story_id
+              chunk_index: row.chunk_index
+              dim: row.dim
+              source: row.source
+              embedding_b64: Buffer.from(row.embedding).toString('base64')
+              created_at: row.created_at
+            }
+        write: null
+      }
+
       # --- Generic pipeline-run lifecycle ---------------------------------
       # `runRegister{<id>}.json` (write-only)  — INSERT or REPLACE a runs row
       # at launch. Body is the full row payload (status defaults to 'running').
@@ -1320,7 +1445,7 @@ module.exports = (M, opts={}) ->
     ]
 
     M.addMetaRule "sqlite",
-      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\})\.(json|jsonl|txt|csv)$/i,
+      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings)\.(json|jsonl|txt|csv)$/i,
       (key, value) ->
         debugLog "meta key", key, "write?", value isnt undefined
 
@@ -1383,4 +1508,5 @@ module.exports.requestNames = [
   'loraTrainingRun',    'loraTrainingRuns', 'sqliteResetAll',  'loraCycleReset'
   'runRegister',        'runUpdate',        'runById',         'runHistory'
   'changesSince'
+  'kagEmbeddingRegister', 'kagEmbedding',   'kagAllEmbeddings'
 ]

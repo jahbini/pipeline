@@ -8,7 +8,18 @@
   the `kagFor{...}.json` sqlite request key. Failed
   parses increment `oracleFailureFor{...}` for backoff.
   The longest of the kag_oracle_ite scripts.
+
+  Embedding pipeline (June 2026, agent-surface step 5+):
+  For each chunk, ALSO produce a 1024-dim Float32 embedding via
+  `mlx_lm cache_prompt`. The cache file is the K/V state of the
+  oracle prompt; the embedding is its last-layer V tensor mean-
+  pooled across positions. Two payloads, one model invocation —
+  see GPT/legacy_pipeline.md and scripts/_helpers/cache_embedding.coffee.
 ###
+path  = require 'path'
+fsExt = require 'fs'
+osMod = require 'os'
+cacheEmbedding = require '../_helpers/cache_embedding.coffee'
 cleanFragment = (value) ->
   text = String(value ? '').trim()
   text = text.replace /^\*+|\*+$/g, ''
@@ -139,21 +150,53 @@ isUsableEmotionList = (emotions) ->
   Object.keys(emotions).length >= 1
 
 runOracleOnce = (S, modelDir, prompt, adapterPath, mlxConfig, debugMlx = false) ->
-  args =
+  # Two-call dance: cache_prompt builds the K/V state for the full
+  # oracle prompt, then generate continues from that cache. The cache
+  # file itself contains the K/V tensors we'll later pool into an
+  # embedding — return it alongside the parsed result so the caller
+  # can persist the embedding into kag_embeddings.
+  cacheFile = path.join osMod.tmpdir(), "oracle_cache_#{process.pid}_#{Date.now()}.safetensors"
+
+  cacheArgs =
     model: modelDir
     prompt: prompt
+    'prompt-cache-file': cacheFile
+  cacheArgs['adapter-path'] = adapterPath if adapterPath?
+  try S.callMLX 'cache_prompt', cacheArgs, debugMlx
+  catch err
+    throw new Error "cache_prompt failed: #{err?.message ? err}"
 
-  args["adapter-path"] = adapterPath if adapterPath?
+  # Pool the cache into a 1024-dim Float32 embedding (last-layer V mean).
+  embedding = null
+  embeddingError = null
+  if fsExt.existsSync cacheFile
+    try
+      embedding = cacheEmbedding.embeddingFromCacheFile cacheFile
+    catch err
+      embeddingError = String(err?.message ? err)
+      console.error "[oracle_ask_sqlite] embedding extract failed: #{embeddingError}"
+
+  # Generate using the cached prompt — empty --prompt continues from
+  # where the cache left off, so the assistant produces its response.
+  genArgs =
+    model: modelDir
+    prompt: ' '   # mlx_lm needs a non-empty string; one space is benign continuation
+    'prompt-cache-file': cacheFile
+  genArgs['adapter-path'] = adapterPath if adapterPath?
   if mlxConfig? and typeof mlxConfig is 'object' and not Array.isArray(mlxConfig)
     for own key, value of mlxConfig
       continue unless value?
-      args[key] = value
+      genArgs[key] = value
 
-  raw = S.callMLX 'generate', args, debugMlx
+  raw = S.callMLX 'generate', genArgs, debugMlx
+
+  # Cleanup the temp cache file. Best-effort — leaving stragglers in
+  # /tmp is harmless if the process dies before this runs.
+  try fsExt.unlinkSync cacheFile catch then null
 
   parsed = extractJSON raw
   filtered = filterEmotions parsed
-  {raw, parsed, filtered}
+  { raw, parsed, filtered, embedding, embeddingError }
 
 renderPrompt = (template, text) ->
   throw new Error "oracle prompt_text must be a string" unless typeof template is 'string'
@@ -355,6 +398,23 @@ mergeEmotionLists = (rows) ->
           storyRetryAttempts.push retryAttempt
 
         continue unless isUsableEmotionList finalAttempt.filtered
+
+        # Persist the chunk's embedding (one row per story+chunk) — the
+        # first attempt's cache embedding is the canonical one (the cache
+        # for the full unmodified chunk; retry attempts use sub-chunks
+        # which are noisier voice signal).
+        if attempt1.embedding?
+          try
+            S.saveThis "kagEmbeddingRegister{#{storyID}|#{group.group_index}}.json",
+              story_id: storyID
+              chunk_index: group.group_index
+              dim: attempt1.embedding.length
+              source: 'cache_prompt/last_v_meanpool'
+              embedding: cacheEmbedding.floatArrayToBlob attempt1.embedding
+          catch err
+            console.error "[oracle_ask_sqlite] could not persist embedding for #{storyID}/#{group.group_index}: #{err?.message ? err}"
+        else if attempt1.embeddingError?
+          console.error "[oracle_ask_sqlite] no embedding for #{storyID}/#{group.group_index} (#{attempt1.embeddingError})"
 
         paragraphLabel = if group.start_paragraph is group.end_paragraph
           pad3 group.start_paragraph
