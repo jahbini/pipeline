@@ -1803,9 +1803,39 @@ main = ->
         outVal = await outEntry.notifier if outVal is undefined
         return outVal
       throw new Error "Artifact '#{artifactKey}' missing source/value declaration"
+
+    # Source-only artifact path. The meta layer reads the source file
+    # synchronously when there's a matching handler; if it can't (file
+    # missing, no matching meta, or empty), we must NOT await
+    # `srcEntry.notifier` — for a source-only artifact, no producer step
+    # exists to fire that notifier and the await silently hangs. Return
+    # undefined and let the consumer's `L.need` raise its own clean
+    # "Missing required artifact" with the step name. A loud stderr
+    # diagnostic surfaces the runner-side info the consumer error can't
+    # carry (source path, CWD).
+    #
+    # On success, publish the value under the artifact name. The June
+    # 2026 wireInputsForStep fix (correctly) stopped re-saving every
+    # need — that masked the missing publish here. Source-only
+    # artifacts must publish under their own name from this one place
+    # so consumers that read `M.theLowdown(artifactKey)` directly (and
+    # the artifact ledger's traced-key bookkeeping) see the value.
     srcEntry = M.theLowdown(source)
     val = srcEntry.value
-    val = await srcEntry.notifier if val is undefined
+    unless val?
+      console.error "[runner] resolveArtifact: source-only artifact '#{artifactKey}' did not resolve"
+      console.error "[runner]   source key : #{source}"
+      console.error "[runner]   cwd        : #{CWD}"
+      console.error "[runner]   (meta layer returned undefined — file missing, path wrong, or no matching meta handler)"
+      return undefined
+
+    # Publish-once: skip if a later resolveArtifact call has already
+    # populated the artifact-name entry. The publish is idempotent
+    # (same value, same source) but avoids re-emitting watchdog events.
+    existing = M.MM?[artifactKey]
+    if not existing? or existing.value is undefined
+      M.saveThis artifactKey, val
+      recordWatchdogEvent '<resolveArtifact>', 'SAVE', artifactKey, val
     val
 
   materializeArtifact = (artifactKey, value) ->

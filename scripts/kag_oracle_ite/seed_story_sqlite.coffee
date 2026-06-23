@@ -58,8 +58,14 @@ safe = (title) ->
       return
 
     raw = await S.need 'stories_md'
-    throw new Error "[#{S.stepName}] stories_md must be a string artifact" unless typeof raw is 'string'
-
+    # No prescreen on `raw`'s type — per GPT/CONVENTIONS.md ("No
+    # parameter prescreens") and GPT/pipeline_runner.md's "No
+    # fallbacks, no prechecks" design standard. If the artifact
+    # resolves to a non-string, the downstream `raw.split` throws a
+    # native TypeError with a useful stack — the prescreen here
+    # produced nothing the natural error wouldn't, and the doc
+    # already calls out "do not add brittle pre-checks that block
+    # fresh DB seeding" as a known pitfall.
     lines = raw.split /\r?\n/
     stories = []
     currentTitle = null

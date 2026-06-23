@@ -73,6 +73,61 @@ pre-validate data at startup to "help." If something is missing, let the
 error happen WHERE it is needed and make the log point directly at the
 failing code. Prefer removing a masking fallback over adding a precheck.
 
+## Artifact resolution — `source:` vs `target:` vs `value:`
+
+The recipe's `artifacts:` block declares one of three shapes per key:
+
+- **`value: <literal>`** — the artifact's value is the literal. `resolveArtifact`
+  returns it immediately. No meta interaction.
+- **`target: <path>`** — the artifact is produced by some step's `L.make` and
+  later persisted to the named file via the meta layer (jsonl/json/txt/etc.).
+  `resolveArtifact` reads from the memo entry under the artifact name, then
+  from the target as a fallback when the producer is already `done`. The
+  producer step's `L.make` is the publish point.
+- **`source: <path>`** — the artifact's value lives on disk **before any step
+  runs**. There is no producer; `resolveArtifact` reads via the meta layer
+  using the source path as the key (`txt.coffee` for `.md`/`.txt`, `json.coffee`
+  for `.json`, etc.).
+
+For source-only artifacts (`source:` set, `target:` absent), `resolveArtifact`
+has a contract that's load-bearing and easy to get wrong:
+
+1. **Synchronous read only.** Call `M.theLowdown(sourcePath)` to invoke the
+   matching meta. If the meta returns a value, use it. Do **NOT** `await
+   srcEntry.notifier` — no producer step exists to fire that notifier, and the
+   await silently hangs forever.
+2. **Publish under the artifact name.** Once read, `M.saveThis(artifactKey, val)`
+   bridges the source value into the artifact-name slot so consumers that read
+   `M.theLowdown(artifactKey)` directly see it (and so the artifact ledger
+   records a `SAVE` event symmetric with target-backed artifacts). Idempotent:
+   skip when the entry already has a defined value.
+3. **Loud diagnostic on miss.** If the meta returns undefined (file missing,
+   path wrong, no matching meta handler), `console.error` a structured block
+   naming the artifact, the source path, and CWD — then return `undefined`.
+   The consumer's `L.need` then raises its own clean
+   `Missing required artifact '<key>'` with the step name. Two diagnostics for
+   one fault: where the runner looked, and which step couldn't proceed.
+
+History (June 2026): the June fix to `wireInputsForStep` correctly stopped
+re-saving every need's resolved value back to its artifact-name key — that
+re-save was masking a concurrent-iteration desync that corrupted
+`train_rows`/`valid_rows`/`test_rows`. But that re-save had ALSO been
+incidentally bridging source-only artifacts under their own name. With the
+re-save gone and no explicit publish in `resolveArtifact`, source-only
+artifacts silently hung any consumer's `await L.need`. The fix is the publish
+above, not a revert of the wireInputsForStep change. Regression cover:
+`run.debug_s: [<source-only-artifact-key>]` should record both a `NEED` event
+(from the step) and a `SAVE` event (from `<resolveArtifact>` tagged as the
+synthetic step name).
+
+Consumer-side rule: a step that `L.need`s a source-only artifact does **not**
+need a type-check prescreen on the result. If the source resolves, the meta
+returned the right shape (string for txt, array for jsonl, object for json,
+etc.); if it didn't, `resolveArtifact` returned undefined and `L.need` already
+threw with the step name. A prescreen like `throw unless typeof raw is 'string'`
+produces nothing the natural error wouldn't and violates the no-prechecks rule
+above.
+
 ## Artifact access ledger — opt-in accountability for needs/makes
 
 When `debug_s` is given as an ARRAY of artifact keys (anywhere in the
