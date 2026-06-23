@@ -1,6 +1,6 @@
 {
   "name": "@jahbini/pipeline",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A small dependency-aware step runner for shell-friendly AI experiments. Pipelines declared in YAML; steps coordinate through a shared in-memory Memo with pluggable meta devices.",
   "main": "pipeline_runner.coffee",
   "bin": {
@@ -11,6 +11,7 @@
     "pipeline_runner.coffee",
     "ui_server.coffee",
     "meta/",
+    "GPT/",
     "scripts/",
     "config/",
     "ui/",
