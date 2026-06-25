@@ -67,6 +67,16 @@ module.exports = (M, opts={}) ->
     dbPath = if path.isAbsolute(dbFile) then dbFile else path.join(baseDir, dbFile)
     db = new DatabaseSync(dbPath)
 
+    # HEY JIM! WAL + busy_timeout. WAL lets readers (UI server, ad-hoc
+    # sqlite3 shells, the agent surface) coexist with the pipeline's
+    # writers without grabbing the exclusive lock that rollback-journal
+    # mode forces. busy_timeout makes any remaining contention retry
+    # for 5 s instead of failing the step with "database is locked"
+    # (see oracleFailureFor{...} crash, June 2026).
+    db.exec "PRAGMA journal_mode = WAL;"
+    db.exec "PRAGMA busy_timeout = 5000;"
+    db.exec "PRAGMA synchronous = NORMAL;"
+
     debugEnabled = ->
         try
             globalParams = M.theLowdown("params/_global.yaml")?.value ? {}
