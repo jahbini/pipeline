@@ -59,12 +59,13 @@ Invariants:
   this falls back cleanly
 - the verdict reflects whichever score was used; not different verdict
   rules per formula
-- this step is single-run scoring only. Cross-run ranking (the
-  legacy "champion of the day" pattern) is intentionally not here —
-  that's a future `champion_ite.yaml` recipe that consumes the
-  `evaluations` SQLite table (also future) and ranks across rows.
-  Yesterday's design captured this as deferred work in
-  `GPT/legacy_pipeline.md`
+- this step also persists to the `evaluations` SQLite table (see
+  `GPT/eval_ite/evaluations_table.md`) — one row per run, keyed by
+  `run_id` read from `L.theLowdown('run/current_run_id')`. Best-effort:
+  a failed write logs to stderr but never fails the step (the
+  `eval_score` artifact is the source of truth; the row is for
+  historical queries). Cross-run ranking — the "champion of the day"
+  pattern — would consume this table; that recipe is still future work
 
 Known pitfalls:
 - the ±0.5 threshold for better/worse is generous; on small prompt
@@ -82,8 +83,9 @@ Known pitfalls:
   spans) costs 5 score points — meaningful but not catastrophic.
   Tune the coefficient if memorization detection matters more for
   your use case
-- final scores are NOT persisted to SQLite. The `evaluations` table
-  doesn't exist yet (see `GPT/legacy_pipeline.md`'s "deferred follow-ups").
-  For now, `eval_out/eval_score.json` (the artifact's `target:` file)
-  is the only durable surface; agent surface `/api/run/<id>` shows it
-  via `artifacts_written`
+- the `evaluations` write is BEST-EFFORT. A missing `run/current_run_id`
+  (runner version mismatch), missing sqlite meta, or any other write
+  failure logs to stderr and the step still succeeds. The artifact
+  `eval_score` and its target file `eval_out/eval_score.json` remain
+  the durable source of truth; the SQLite row is for cross-run queries
+  the advice loop (`/CLAUDE.md`) makes.

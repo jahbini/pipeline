@@ -206,6 +206,37 @@ module.exports = (M, opts={}) ->
     );
     CREATE INDEX IF NOT EXISTS idx_kag_embeddings_story_id ON kag_embeddings (story_id);
 
+    -- One row per pipeline run that reached judge_run_ite. Captures the
+    -- score, the formula used, key metric breakdowns, a hash of the eval
+    -- prompts (so historical comparability is queryable), a hyperparams
+    -- snapshot of the tunable steps, and the full eval_score artifact as
+    -- details_json for forensics. The advice loop (CLAUDE.md status 1)
+    -- reads this table to compare runs.
+    CREATE TABLE IF NOT EXISTS evaluations (
+      run_id                    TEXT PRIMARY KEY,
+      pipeline                  TEXT,
+      judged_at                 TEXT,
+      formula                   TEXT,
+      fallback_used             INTEGER,    -- 1 if voice_similarity was unavailable, 0 if used
+      score_base                REAL,
+      score_with_adapter        REAL,
+      delta                     REAL,       -- with_adapter - base (NULL when only one variant)
+      verdict                   TEXT,       -- 'better'/'worse'/'unchanged'/'single-variant'
+      voice_cosine_base         REAL,       -- NULL when fallback_used = 1
+      voice_cosine_with_adapter REAL,       -- NULL when fallback_used = 1
+      mem_sub_rate_base         REAL,
+      mem_sub_rate_with_adapter REAL,
+      distinct2_base            REAL,
+      distinct2_with_adapter    REAL,
+      eval_prompts_hash         TEXT,       -- sha1 hex of the eval_prompts array
+      eval_prompts_count        INTEGER,
+      hyperparams_json          TEXT,       -- JSON: per-step tunable params at run time
+      details_json              TEXT,       -- JSON: the full eval_score artifact
+      created_at                TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_evaluations_judged_at ON evaluations (judged_at);
+    CREATE INDEX IF NOT EXISTS idx_evaluations_pipeline  ON evaluations (pipeline);
+
     -- Per-row change log (step 5 of the agent surface). Every INSERT,
     -- UPDATE, and DELETE on a tracked table fires a trigger that drops one
     -- row here. Powers GET /api/sqlite/diff?since=<run_id|ts|change_id> for
@@ -370,6 +401,19 @@ module.exports = (M, opts={}) ->
     CREATE TRIGGER IF NOT EXISTS trg_runs_del AFTER DELETE ON runs BEGIN
       INSERT INTO _change_log (ts, table_name, op, row_id)
       VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'runs', 'DELETE', OLD.run_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_evaluations_ins AFTER INSERT ON evaluations BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'evaluations', 'INSERT', NEW.run_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_evaluations_upd AFTER UPDATE ON evaluations BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'evaluations', 'UPDATE', NEW.run_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_evaluations_del AFTER DELETE ON evaluations BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'evaluations', 'DELETE', OLD.run_id);
     END;
     """
 
@@ -663,6 +707,34 @@ module.exports = (M, opts={}) ->
             entries: value.entries
             keywords: value.keywords
           }
+      }
+
+      # `kagByKeyword{<keyword>}.jsonl` (read-only) — JOIN of kag_entries
+      # to stories on story_id, filtered by `kag_entries.keyword = ?`.
+      # Returns the row shape collect_diary_kag_ite consumes (story title
+      # and text travel with each kag chunk so the consumer can recompute
+      # chunk_text from story.text when the row's chunk_text is empty —
+      # legacy data path). Ordering matches what the diary step requires
+      # for stable per-event match selection. Migrated 2026-06-26 to retire
+      # collect_diary_kag_ite's direct DatabaseSync use.
+      {
+        name: 'kagByKeyword'
+        regex: /^kagByKeyword\{([^}]+)\}$/
+        allowedSuffixes: ['jsonl']
+        read: (db, keyword) ->
+          db.prepare("""
+            SELECT kag_entries.story_id, stories.title, stories.text,
+                   kag_entries.chunk_index, kag_entries.start_paragraph,
+                   kag_entries.end_paragraph, kag_entries.chunk_text,
+                   kag_entries.keyword, kag_entries.headline,
+                   kag_entries.entry_index
+            FROM kag_entries
+            INNER JOIN stories
+              ON stories.story_id = kag_entries.story_id
+            WHERE kag_entries.keyword = ?
+            ORDER BY kag_entries.story_id ASC, kag_entries.chunk_index ASC, kag_entries.entry_index ASC
+          """).all(keyword)
+        write: null
       }
 
       {
@@ -1452,10 +1524,255 @@ module.exports = (M, opts={}) ->
             }
         write: null
       }
+
+      # `evaluationRegister{<run_id>}.json` (write-only) — INSERT OR REPLACE
+      # one row in `evaluations`. Body is the full row payload as built by
+      # judge_run_ite (numeric metrics + hyperparams_json + details_json).
+      # `evaluation{<run_id>}.json`  (read-only) — SELECT one row, parses
+      # hyperparams_json + details_json back to objects.
+      # `evaluationHistory.jsonl`    (read-only) — SELECT all rows newest first.
+      # `evaluationLatest.json`      (read-only) — SELECT the most recent row.
+      {
+        name: 'evaluationRegister'
+        regex: /^evaluationRegister\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: null
+        write: (db, value, runID) ->
+          throw new Error "sqlite meta evaluationRegister write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          writeRunID = value.run_id ? runID
+          throw new Error "sqlite meta evaluationRegister run_id mismatch" unless writeRunID is runID
+
+          asReal = (v) -> if typeof v is 'number' and Number.isFinite(v) then v else null
+          asText = (v) -> if v? then String(v) else null
+          asJson = (v) -> if v? then (if typeof v is 'string' then v else JSON.stringify(v)) else null
+          asInt  = (v) -> if Number.isFinite(Number(v)) then Math.trunc(Number(v)) else null
+
+          db.prepare("""
+            INSERT INTO evaluations (
+              run_id, pipeline, judged_at, formula, fallback_used,
+              score_base, score_with_adapter, delta, verdict,
+              voice_cosine_base, voice_cosine_with_adapter,
+              mem_sub_rate_base, mem_sub_rate_with_adapter,
+              distinct2_base, distinct2_with_adapter,
+              eval_prompts_hash, eval_prompts_count,
+              hyperparams_json, details_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+              pipeline                  = excluded.pipeline,
+              judged_at                 = excluded.judged_at,
+              formula                   = excluded.formula,
+              fallback_used             = excluded.fallback_used,
+              score_base                = excluded.score_base,
+              score_with_adapter        = excluded.score_with_adapter,
+              delta                     = excluded.delta,
+              verdict                   = excluded.verdict,
+              voice_cosine_base         = excluded.voice_cosine_base,
+              voice_cosine_with_adapter = excluded.voice_cosine_with_adapter,
+              mem_sub_rate_base         = excluded.mem_sub_rate_base,
+              mem_sub_rate_with_adapter = excluded.mem_sub_rate_with_adapter,
+              distinct2_base            = excluded.distinct2_base,
+              distinct2_with_adapter    = excluded.distinct2_with_adapter,
+              eval_prompts_hash         = excluded.eval_prompts_hash,
+              eval_prompts_count        = excluded.eval_prompts_count,
+              hyperparams_json          = excluded.hyperparams_json,
+              details_json              = excluded.details_json,
+              created_at                = excluded.created_at
+          """).run(
+            writeRunID
+            asText(value.pipeline)
+            asText(value.judged_at)
+            asText(value.formula)
+            (if value.fallback_used then 1 else 0)
+            asReal(value.score_base)
+            asReal(value.score_with_adapter)
+            asReal(value.delta)
+            asText(value.verdict)
+            asReal(value.voice_cosine_base)
+            asReal(value.voice_cosine_with_adapter)
+            asReal(value.mem_sub_rate_base)
+            asReal(value.mem_sub_rate_with_adapter)
+            asReal(value.distinct2_base)
+            asReal(value.distinct2_with_adapter)
+            asText(value.eval_prompts_hash)
+            asInt(value.eval_prompts_count)
+            asJson(value.hyperparams)
+            asJson(value.details)
+            asText(value.created_at ? new Date().toISOString())
+          )
+          { ok: true, run_id: writeRunID }
+      }
+
+      {
+        name: 'evaluation'
+        regex: /^evaluation\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: (db, runID) ->
+          row = db.prepare("SELECT * FROM evaluations WHERE run_id = ?").get(runID)
+          return null unless row?
+          row.hyperparams = (try JSON.parse(row.hyperparams_json) catch then null) if row.hyperparams_json?
+          row.details     = (try JSON.parse(row.details_json)     catch then null) if row.details_json?
+          row
+        write: null
+      }
+
+      {
+        name: 'evaluationHistory'
+        regex: /^evaluationHistory$/
+        allowedSuffixes: ['jsonl']
+        read: (db) ->
+          rows = db.prepare("SELECT * FROM evaluations ORDER BY judged_at DESC").all()
+          for row in rows
+            row.hyperparams = (try JSON.parse(row.hyperparams_json) catch then null) if row.hyperparams_json?
+            row.details     = (try JSON.parse(row.details_json)     catch then null) if row.details_json?
+            row
+        write: null
+      }
+
+      {
+        name: 'evaluationLatest'
+        regex: /^evaluationLatest$/
+        allowedSuffixes: ['json']
+        read: (db) ->
+          row = db.prepare("SELECT * FROM evaluations ORDER BY judged_at DESC LIMIT 1").get()
+          return null unless row?
+          row.hyperparams = (try JSON.parse(row.hyperparams_json) catch then null) if row.hyperparams_json?
+          row.details     = (try JSON.parse(row.details_json)     catch then null) if row.details_json?
+          row
+        write: null
+      }
+
+      # `evaluationsByPromptHash{<hash>}.jsonl` (read-only) — every
+      # evaluation row sharing one `eval_prompts_hash`, newest first.
+      # This is the only honest way to trend a score across runs:
+      # different prompt sets aren't comparable. The advice loop reads
+      # this once per turn to build its baseline + delta narrative.
+      {
+        name: 'evaluationsByPromptHash'
+        regex: /^evaluationsByPromptHash\{([^}]+)\}$/
+        allowedSuffixes: ['jsonl']
+        read: (db, promptsHash) ->
+          rows = db.prepare("""
+            SELECT * FROM evaluations
+            WHERE eval_prompts_hash = ?
+            ORDER BY judged_at DESC
+          """).all(promptsHash)
+          for row in rows
+            row.hyperparams = (try JSON.parse(row.hyperparams_json) catch then null) if row.hyperparams_json?
+            row.details     = (try JSON.parse(row.details_json)     catch then null) if row.details_json?
+            row
+        write: null
+      }
+
+      # `trainingHistoryJoinEval.jsonl` (read-only) — one row per
+      # `evaluations` entry, joined to the most recent
+      # `lora_training_runs` row whose `finished_at <= e.judged_at`.
+      # The two tables use different `run_id` keys (the runner's UUID
+      # vs the training subprocess's `lora-<ts>` id), so the join is
+      # **temporal**, not foreign-key. Semantics: "for each eval, what
+      # training was in effect when we scored?" — exactly what the
+      # advice loop needs to attribute scores to training settings.
+      # Training columns prefixed `training_` to avoid collisions.
+      # NULL training_* columns mean "scored before any training row
+      # was recorded" (early corpus / failed training).
+      {
+        name: 'trainingHistoryJoinEval'
+        regex: /^trainingHistoryJoinEval$/
+        allowedSuffixes: ['jsonl']
+        read: (db) ->
+          rows = db.prepare("""
+            SELECT
+              e.*,
+              t.run_id              AS training_run_id,
+              t.started_at          AS training_started_at,
+              t.finished_at         AS training_finished_at,
+              t.status              AS training_status,
+              t.model_dir           AS training_model_dir,
+              t.adapter_path        AS training_adapter_path,
+              t.train_rows_count    AS training_train_rows_count,
+              t.valid_rows_count    AS training_valid_rows_count,
+              t.test_rows_count     AS training_test_rows_count,
+              t.checkpoint_path     AS training_checkpoint_path
+            FROM evaluations e
+            LEFT JOIN lora_training_runs t ON t.run_id = (
+              SELECT run_id FROM lora_training_runs
+              WHERE finished_at IS NOT NULL AND finished_at <= e.judged_at
+              ORDER BY finished_at DESC
+              LIMIT 1
+            )
+            ORDER BY e.judged_at DESC
+          """).all()
+          for row in rows
+            row.hyperparams = (try JSON.parse(row.hyperparams_json) catch then null) if row.hyperparams_json?
+            row.details     = (try JSON.parse(row.details_json)     catch then null) if row.details_json?
+            row
+        write: null
+      }
+
+      # `corpusHealth.json` (read-only) — single object summarizing the
+      # state of the corpus and the eval history. Cheap aggregation reads
+      # (a handful of COUNT / GROUP BY). The advice loop's first read each
+      # turn: "is the corpus in a state where my recommendations make
+      # sense?" — e.g. if `kag_chunks_without_embedding > 0` then voice
+      # signal is partial; if `evaluations_total == 0` there's no history
+      # to reason from; the per-emotion distribution reveals corpus bias.
+      {
+        name: 'corpusHealth'
+        regex: /^corpusHealth$/
+        allowedSuffixes: ['json']
+        read: (db) ->
+          scalar = (sql) -> Object.values(db.prepare(sql).get() ? {})[0] ? 0
+          storiesTotal       = scalar "SELECT COUNT(*) AS n FROM stories"
+          storiesWithKag     = scalar "SELECT COUNT(DISTINCT story_id) AS n FROM kag_entries"
+          kagEntriesTotal    = scalar "SELECT COUNT(*) AS n FROM kag_entries"
+          kagChunksDistinct  = scalar "SELECT COUNT(DISTINCT story_id || '|' || chunk_index) AS n FROM kag_entries WHERE chunk_index IS NOT NULL"
+          kagEmbeddingsTotal = scalar "SELECT COUNT(*) AS n FROM kag_embeddings"
+          chunksWithoutEmb   = scalar """
+            SELECT COUNT(DISTINCT ke.story_id || '|' || ke.chunk_index) AS n
+            FROM kag_entries ke
+            WHERE ke.chunk_index IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM kag_embeddings emb
+                WHERE emb.story_id = ke.story_id AND emb.chunk_index = ke.chunk_index
+              )
+          """
+          evaluationsTotal   = scalar "SELECT COUNT(*) AS n FROM evaluations"
+          runsTotal          = scalar "SELECT COUNT(*) AS n FROM runs"
+
+          perEmotionRows = db.prepare("""
+            SELECT keyword, COUNT(*) AS n
+            FROM kag_entries
+            WHERE keyword IS NOT NULL AND length(keyword) > 0
+            GROUP BY keyword
+            ORDER BY n DESC, keyword ASC
+          """).all()
+          perEmotionChunkCount = {}
+          for r in perEmotionRows
+            perEmotionChunkCount[r.keyword] = r.n
+
+          embSample = db.prepare("SELECT dim, source FROM kag_embeddings LIMIT 1").get()
+
+          {
+            as_of:                       new Date().toISOString()
+            stories_total:               storiesTotal
+            stories_with_kag:            storiesWithKag
+            stories_missing_kag:         Math.max(0, storiesTotal - storiesWithKag)
+            kag_entries_total:           kagEntriesTotal
+            kag_chunks_distinct:         kagChunksDistinct
+            kag_embeddings_total:        kagEmbeddingsTotal
+            kag_chunks_without_embedding: chunksWithoutEmb
+            per_emotion_chunk_count:     perEmotionChunkCount
+            embedding_dim:               embSample?.dim ? null
+            embedding_source:            embSample?.source ? null
+            evaluations_total:           evaluationsTotal
+            runs_total:                  runsTotal
+          }
+        write: null
+      }
     ]
 
     M.addMetaRule "sqlite",
-      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings)\.(json|jsonl|txt|csv)$/i,
+      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval)\.(json|jsonl|txt|csv)$/i,
       (key, value) ->
         debugLog "meta key", key, "write?", value isnt undefined
 
@@ -1512,11 +1829,13 @@ module.exports = (M, opts={}) ->
 # this to advertise what request keys exist). Mirrors the REQUESTS list above;
 # kept in sync by hand when a new request is added.
 module.exports.requestNames = [
-  'storyByID',          'partsFor',         'kagFor',          'oracleFailureFor'
+  'storyByID',          'partsFor',         'kagFor',          'kagByKeyword',    'oracleFailureFor'
   'expandedPartsFor',   'storiesWithKag',   'storiesMissingKag'
   'allStories',         'trainedStories',   'loraStoryUsage'
   'loraTrainingRun',    'loraTrainingRuns', 'sqliteResetAll',  'loraCycleReset'
   'runRegister',        'runUpdate',        'runById',         'runHistory'
   'changesSince'
   'kagEmbeddingRegister', 'kagEmbedding',   'kagAllEmbeddings'
+  'evaluationRegister',   'evaluation',     'evaluationHistory', 'evaluationLatest'
+  'evaluationsByPromptHash', 'corpusHealth', 'trainingHistoryJoinEval'
 ]

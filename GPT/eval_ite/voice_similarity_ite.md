@@ -37,14 +37,16 @@ Outputs:
     ```
 
 Encoding pattern:
-- one `L.callMLX 'cache_prompt'` per completion → writes
-  `/tmp/voice_eval_<pid>_<i>.safetensors`
-- `scripts/_helpers/cache_embedding.coffee` reads the cache file,
-  extracts the last-layer V tensor, mean-pools across `seq_len` →
+- `L.tools.tmp_file.make 'voice_eval', 'safetensors'` mints a unique
+  tempdir path, then one `L.callMLX 'cache_prompt'` per completion
+  writes the K/V cache there
+- `L.tools.cache_embedding.embeddingFromCacheFile cacheFile` reads
+  it, extracts the last-layer V tensor, mean-pools across `seq_len` →
   1024-dim Float32 (for Qwen3-4B's 8 KV-heads × 128 head-dim)
-- cosine vs centroid is plain dot/sqrt-norm arithmetic in CoffeeScript
-- temp file deleted after encoding (try/catch finally — strays in
-  `/tmp` are harmless)
+- cosine vs centroid is plain dot/sqrt-norm arithmetic via
+  `L.tools.cache_embedding.cosineSimilarity`
+- `L.tools.tmp_file.remove cacheFile` after encoding — best-effort
+  unlink, strays in `/tmp` are harmless
 
 Centroid construction:
 - read every `kagAllEmbeddings` row

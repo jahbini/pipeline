@@ -66,6 +66,36 @@ universal-substrate framing and `GPT/README.md` for repo-wide conventions.
   `test/base_tier_probe.coffee` (script CWD↠BASE↠EXEC shadowing, recipe
   BASE↠EXEC shadowing).
 
+## Tools — `S.tools.<name>.<entrypoint>` (design standard)
+
+Shared utilities live in `tools/<name>.coffee` and are reached only via
+`S.tools.<name>.<entrypoint>(args...)`. The runner resolves `<name>` with
+the same BASE↠EXEC↠CWD shadowing it uses for step scripts: a per-pipe
+`{CWD}/tools/<name>.coffee` wins over an experiment override over the
+repo-level over the pipeline-bundled default. Resolved path lands in
+`params/<step>.yaml` as `tools_resolved.<name>`.
+
+Hard rules: a tool holds no state, takes no runner-injected objects,
+cannot `L.need`/`L.make`/`L.callMLX`, is never a recipe step. Tools may
+do filesystem I/O — that is not state, the tool remembers nothing
+between calls. See `GPT/CONVENTIONS.md` § "Tools: shared utilities
+behind `S.tools`" for the canonical rule and the `fs`-stinginess
+corollary.
+
+## Step scripts are location-anonymous (design standard)
+
+A step script cannot know where on disk it executes from. No path-relative
+`require`, no `__dirname`-relative reads, no hardcoded sibling-directory
+references. The runner is free to load step scripts from anywhere — the
+current `scripts/<category>/<step>.coffee` layout is incidental.
+
+The legal surface is the `S` ledger, request keys dispatched by the meta
+layer, Node built-ins, and packages resolvable by name. Anything else
+needed by more than one step belongs in the runner (`S`-exposed) or the
+meta layer (request-key-exposed). See `GPT/CONVENTIONS.md` § "Step
+scripts are location-anonymous" for the canonical rule and remediation
+status of known violations.
+
 ## No fallbacks, no prechecks (design standard)
 
 Human directive, repo standard: do not fabricate defaults, guess paths, or

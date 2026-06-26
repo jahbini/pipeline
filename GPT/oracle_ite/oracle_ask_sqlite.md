@@ -36,11 +36,12 @@ Retry behavior:
 Embedding pipeline (June 2026):
 - `runOracleOnce` no longer calls `mlx_lm generate` directly. It now
   does a two-step dance per chunk:
-  1. `L.callMLX 'cache_prompt'` writes the prompt's K/V cache to a
-     temp safetensors file under `os.tmpdir()`
-  2. `scripts/_helpers/cache_embedding.coffee` reads that file,
-     extracts last-layer V, mean-pools across `seq_len` → 1024-dim
-     Float32 embedding for the chunk
+  1. `S.tools.tmp_file.make 'oracle_cache', 'safetensors'` mints a
+     unique tempdir path, then `L.callMLX 'cache_prompt'` writes the
+     prompt's K/V cache to it
+  2. `S.tools.cache_embedding.embeddingFromCacheFile cacheFile` reads
+     that file, extracts last-layer V, mean-pools across `seq_len` →
+     1024-dim Float32 embedding for the chunk
   3. `L.callMLX 'generate'` with `--prompt-cache-file <same file>`
      continues from the cached K/V to produce the emotion output —
      one forward-pass cost for both outputs
@@ -87,8 +88,7 @@ KAG shape:
 - INSERT/UPDATE/DELETE triggers populate `_change_log` so the agent
   surface's `/api/sqlite/diff?since=<run_id>` sees population events
 - read via `kagAllEmbeddings.jsonl` (returns base64-encoded blobs;
-  caller decodes via `scripts/_helpers/cache_embedding.coffee`'s
-  `blobToFloatArray`)
+  caller decodes via `S.tools.cache_embedding.blobToFloatArray`)
 
 Known pitfalls:
 - do not revert to whole-story-only prompting

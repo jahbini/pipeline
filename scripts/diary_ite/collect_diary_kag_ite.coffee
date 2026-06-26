@@ -2,13 +2,24 @@
   collect_diary_kag_ite.coffee  —  DIARY_ITE pipeline step
   =====================================================
   Pulls KAG rows (keywords + headlines) from sqlite for
-  the selected story and shapes them into the context
-  block the diary prompt builder consumes. Uses
-  `DatabaseSync` directly rather than the sqlite meta
-  device because the query joins multiple request keys.
+  the selected diary events and shapes them into the context
+  block the diary prompt builder consumes.
+
+  Reads kag-joined-to-story rows via the meta layer's
+  `kagByKeyword{<keyword>}.jsonl` request. The per-step business
+  logic (cross-iteration dedup of story IDs, regenerating chunk_text
+  from story.text when the legacy row's chunk_text is empty,
+  dedup by chunk identity, per-event match limit) stays here —
+  only the SQL moved out.
+
+  Migration history: through 2026-06-25 this step opened
+  `runtime.sqlite` directly via `node:sqlite` `DatabaseSync`, with
+  a header comment claiming the JOIN required bypassing the meta
+  layer. That was a misreading — the right fix was a new request
+  key, not a second DB connection. Migrated 2026-06-26; see
+  GPT/CONVENTIONS.md § "fs stinginess in step scripts" for the
+  rule and `GPT/diary_ite/collect_diary_kag_ite.md` for context.
 ###
-path = require 'path'
-{ DatabaseSync } = require 'node:sqlite'
 
 coerceJSON = (value) ->
   return value unless typeof value is 'string'
@@ -53,18 +64,10 @@ buildStoryGroups = (text) ->
 
   groups
 
-queryEmotionMatches = (db, emotionKeyword, limit, usedStoryIDs = null) ->
-  return [] unless typeof emotionKeyword is 'string' and emotionKeyword.trim().length
-
-  rows = db.prepare("""
-    SELECT kag_entries.story_id, stories.title, stories.text, kag_entries.chunk_index, kag_entries.start_paragraph, kag_entries.end_paragraph, kag_entries.chunk_text, kag_entries.keyword, kag_entries.headline, kag_entries.entry_index
-    FROM kag_entries
-    INNER JOIN stories
-      ON stories.story_id = kag_entries.story_id
-    WHERE kag_entries.keyword = ?
-    ORDER BY kag_entries.story_id ASC, kag_entries.chunk_index ASC, kag_entries.entry_index ASC
-  """).all(emotionKeyword)
-
+# Apply the diary's per-emotion match-selection rules to a raw list
+# of kag-rows. Returns at most `limit` matches; mutates `usedStoryIDs`
+# so subsequent emotions in the same diary skip stories already used.
+selectMatches = (rows, limit, usedStoryIDs = null) ->
   matches = []
   seen = new Set()
 
@@ -143,21 +146,20 @@ flattenEntries = (eventMap) ->
     limit = Number limitRaw
     throw new Error "[#{L.stepName}] per_event_match_limit must be a positive integer" unless Number.isFinite(limit) and limit > 0 and Math.floor(limit) is limit
 
-    dbPath = path.join process.cwd(), 'runtime.sqlite'
-    db = new DatabaseSync dbPath
     eventMap = {}
     usedStoryIDs = new Set()
 
-    try
-      for kind in ['scene', 'arrival', 'disturbance', 'reflection', 'realization']
-        selectedEmotion = String(L.param("#{kind}_emotion", '') ? '').trim()
-        matches = queryEmotionMatches db, selectedEmotion, limit, usedStoryIDs
-        eventMap[kind] =
-          kind: kind
-          selected_emotion: selectedEmotion
-          matches: matches
-    finally
-      try db.close() catch then null
+    for kind in ['scene', 'arrival', 'disturbance', 'reflection', 'realization']
+      selectedEmotion = String(L.param("#{kind}_emotion", '') ? '').trim()
+      rows = if selectedEmotion.length
+        L.theLowdown("kagByKeyword{#{selectedEmotion}}.jsonl")?.value ? []
+      else
+        []
+      matches = selectMatches rows, limit, usedStoryIDs
+      eventMap[kind] =
+        kind: kind
+        selected_emotion: selectedEmotion
+        matches: matches
 
     flattened = flattenEntries eventMap
 

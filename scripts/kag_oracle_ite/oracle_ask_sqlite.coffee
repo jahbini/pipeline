@@ -14,12 +14,13 @@
   `mlx_lm cache_prompt`. The cache file is the K/V state of the
   oracle prompt; the embedding is its last-layer V tensor mean-
   pooled across positions. Two payloads, one model invocation —
-  see GPT/legacy_pipeline.md and scripts/_helpers/cache_embedding.coffee.
+  see GPT/legacy_pipeline.md and tools/cache_embedding.coffee
+  (reached via S.tools.cache_embedding — see GPT/CONVENTIONS.md § "Tools").
 ###
-path  = require 'path'
-fsExt = require 'fs'
-osMod = require 'os'
-cacheEmbedding = require '../_helpers/cache_embedding.coffee'
+# Temp safetensors files for `cache_prompt` go through `S.tools.tmp_file`
+# (mint a path + best-effort unlink). cache_embedding is reached as
+# `S.tools.cache_embedding.<fn>(...)`. The runner
+# resolves it BASE↠CWD↠EXEC. See GPT/CONVENTIONS.md § "Tools".
 cleanFragment = (value) ->
   text = String(value ? '').trim()
   text = text.replace /^\*+|\*+$/g, ''
@@ -155,7 +156,7 @@ runOracleOnce = (S, modelDir, prompt, adapterPath, mlxConfig, debugMlx = false) 
   # file itself contains the K/V tensors we'll later pool into an
   # embedding — return it alongside the parsed result so the caller
   # can persist the embedding into kag_embeddings.
-  cacheFile = path.join osMod.tmpdir(), "oracle_cache_#{process.pid}_#{Date.now()}.safetensors"
+  cacheFile = S.tools.tmp_file.make 'oracle_cache', 'safetensors'
 
   cacheArgs =
     model: modelDir
@@ -167,14 +168,16 @@ runOracleOnce = (S, modelDir, prompt, adapterPath, mlxConfig, debugMlx = false) 
     throw new Error "cache_prompt failed: #{err?.message ? err}"
 
   # Pool the cache into a 1024-dim Float32 embedding (last-layer V mean).
+  # If MLX didn't actually produce the file, the read throws ENOENT and
+  # the catch records embeddingError — the prior existsSync guard was
+  # redundant once we accepted that path.
   embedding = null
   embeddingError = null
-  if fsExt.existsSync cacheFile
-    try
-      embedding = cacheEmbedding.embeddingFromCacheFile cacheFile
-    catch err
-      embeddingError = String(err?.message ? err)
-      console.error "[oracle_ask_sqlite] embedding extract failed: #{embeddingError}"
+  try
+    embedding = S.tools.cache_embedding.embeddingFromCacheFile cacheFile
+  catch err
+    embeddingError = String(err?.message ? err)
+    console.error "[oracle_ask_sqlite] embedding extract failed: #{embeddingError}"
 
   # Generate using the cached prompt — empty --prompt continues from
   # where the cache left off, so the assistant produces its response.
@@ -192,7 +195,7 @@ runOracleOnce = (S, modelDir, prompt, adapterPath, mlxConfig, debugMlx = false) 
 
   # Cleanup the temp cache file. Best-effort — leaving stragglers in
   # /tmp is harmless if the process dies before this runs.
-  try fsExt.unlinkSync cacheFile catch then null
+  S.tools.tmp_file.remove cacheFile
 
   parsed = extractJSON raw
   filtered = filterEmotions parsed
@@ -410,7 +413,7 @@ mergeEmotionLists = (rows) ->
               chunk_index: group.group_index
               dim: attempt1.embedding.length
               source: 'cache_prompt/last_v_meanpool'
-              embedding: cacheEmbedding.floatArrayToBlob attempt1.embedding
+              embedding: S.tools.cache_embedding.floatArrayToBlob attempt1.embedding
           catch err
             console.error "[oracle_ask_sqlite] could not persist embedding for #{storyID}/#{group.group_index}: #{err?.message ? err}"
         else if attempt1.embeddingError?

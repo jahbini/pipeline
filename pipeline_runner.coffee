@@ -151,6 +151,57 @@ resolveStepScript = (runRef) ->
     return candidate
   null
 
+# Tools — shared utilities reached as `S.tools.<name>.<entrypoint>(...)`.
+# Resolved with the same BASE↠CWD↠EXEC shadowing as step scripts, deduped.
+# A per-pipe override at `{CWD}/tools/<name>.coffee` wins over the project
+# root over the runner-bundled default. See GPT/CONVENTIONS.md § "Tools".
+TOOL_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/
+
+toolCandidates = (toolName) ->
+  ref = String(toolName ? '')
+  return [] unless TOOL_NAME_RE.test(ref)
+  fname = "#{ref}.coffee"
+  out = []
+  for root in [CWD, BASE, EXEC]
+    candidate = path.join(root, 'tools', fname)
+    out.push candidate unless candidate in out
+  out
+
+resolveToolScript = (toolName) ->
+  for candidate in toolCandidates(toolName) when fs.existsSync(candidate)
+    return candidate
+  null
+
+# Per-step proxy. Lazy: a tool isn't loaded until the step touches it.
+# Loaded modules are cached within the step's run so repeated access
+# returns the same module. Tools-loading state never leaks between
+# steps — each createStepLedger call gets its own proxy.
+#
+# Returns `{proxy, resolved}` where `resolved` is a plain object mapping
+# `toolName → resolved absolute path`. The ledger drains `resolved` at
+# `L.done()` time and merges it into `params/<stepName>.yaml` as
+# `tools_resolved.<toolName>`, so a human can see after the fact which
+# tier (CWD / BASE / EXEC) won for each tool the step touched. Eager
+# logging at recipe-load time isn't possible because the tool name is
+# only known when the step runs.
+createToolsProxy = (stepName) ->
+  loaded = new Map()
+  resolved = {}
+  proxy = new Proxy {},
+    get: (_target, prop) ->
+      return undefined unless typeof prop is 'string'
+      return loaded.get(prop) if loaded.has(prop)
+      scriptPath = resolveToolScript(prop)
+      unless scriptPath?
+        tried = toolCandidates(prop).join(', ') or '(none)'
+        throw new Error "[#{stepName}] tool '#{prop}' not found (looked: #{tried})"
+      try delete require.cache[require.resolve(scriptPath)] catch then null
+      mod = require(scriptPath)
+      loaded.set prop, mod
+      resolved[prop] = scriptPath
+      mod
+  { proxy, resolved }
+
 ###
 §2 — Python / MLX environment validation
 ==================================================================
@@ -1211,8 +1262,19 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       merged[k] = v
     merged
 
+  # `tools` proxy lives on the ledger as `S.tools`; we hold a reference
+  # to the resolved-paths map up here so `done()` can drain it into
+  # `params/<stepName>.yaml` as `tools_resolved.<name>`. See
+  # createToolsProxy and GPT/CONVENTIONS.md § "Tools".
+  toolsState = createToolsProxy(stepName)
+
   ledger =
     stepName: stepName
+
+    # A step writes:
+    #   S.tools.cache_embedding.embeddingFromCacheFile(path)
+    # and never knows where the tool lives on disk.
+    tools: toolsState.proxy
 
     param: (key, defaultValue) ->
       debug "param request", key
@@ -1336,6 +1398,18 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
     done: ->
       debug "done"
       ui type:'step', phase:'done'
+      # Surface which tools the step actually loaded, with the resolved
+      # absolute path each — so a human comparing two pipes' runs can
+      # see at a glance whether a per-pipe `{CWD}/tools/<name>.coffee`
+      # override won over the shipped tier. Read-merge-write so we
+      # don't clobber run_resolved / needs / makes / params already in
+      # the blob.
+      toolNames = Object.keys(toolsState.resolved)
+      if toolNames.length > 0
+        paramsKey = "params/#{stepName}.yaml"
+        cur = memo.theLowdown(paramsKey)?.value ? {}
+        cur.tools_resolved = toolsState.resolved
+        memo.saveThis paramsKey, cur
       memo.saveThis "done:#{stepName}", true
       true
 
@@ -1671,6 +1745,11 @@ main = ->
   # (agent-callable via `/api/sqlite/runById{id}.json` and `runHistory.jsonl`).
   runId      = require('crypto').randomUUID()
   startedAt  = new Date().toISOString()
+  # Publish the current run's UUID into the memo so steps can read it
+  # via `L.theLowdown('run/current_run_id')?.value`. Used by judge_run_ite
+  # to FK its evaluations row to the runs row, and by any future step
+  # that needs to scope its outputs to "this run."
+  M.saveThis "run/current_run_id", runId
   runPayload =
     id: runId
     pipeline: pipelineName

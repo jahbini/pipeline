@@ -1,4 +1,4 @@
-Helper: `scripts/_helpers/cache_embedding.coffee`
+Tool: `tools/cache_embedding.coffee`  (reached as `S.tools.cache_embedding`)
 Used by: `scripts/kag_oracle_ite/oracle_ask_sqlite.coffee`,
          `scripts/eval_ite/voice_similarity_ite.coffee`
 
@@ -19,12 +19,23 @@ Why it exists:
   the byte-level concerns out of the step scripts
 
 Location and naming:
-- sits at `scripts/_helpers/` with a leading-underscore subdirectory
-  name. The runner's `stepScriptCandidates` only resolves steps
-  referenced from a recipe's `run:` field, so `_helpers/` never
-  collides with the step-discovery glob
-- step scripts require it via relative path:
-  `cacheEmbedding = require '../_helpers/cache_embedding.coffee'`
+- canonical file sits at `tools/cache_embedding.coffee` at the repo
+  root (the `EXEC` tier — `node_modules/@jahbini/pipeline/tools/...`
+  when the runner is installed as a package).
+- step scripts never name the path. They reach the tool through the
+  per-step ledger:
+  `S.tools.cache_embedding.embeddingFromCacheFile(path)` (or
+  `L.tools.cache_embedding.…` if the script binds the ledger as `L`).
+- the runner's `createToolsProxy` resolves the tool name with
+  CWD↠BASE↠EXEC shadowing on first reference, then caches the loaded
+  module within that step. To override the tool for a single pipe,
+  drop `tools/cache_embedding.coffee` into that pipe's CWD; it wins
+  for that pipe alone without forking the runner or the step.
+- migration: was originally at `scripts/_helpers/cache_embedding.coffee`
+  with `require '../_helpers/...'` from each consumer (June 22 2026).
+  Moved to `tools/` + `S.tools` access on June 26 2026 to satisfy the
+  "step scripts are location-anonymous" rule (see
+  `GPT/CONVENTIONS.md` § "Tools").
 
 Surface:
 

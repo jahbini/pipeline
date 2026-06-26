@@ -48,12 +48,18 @@ The substrate (the parts that should *not* change per project):
 - **Transient working directories.** `out/`, `data/`, `params/`, `state/`
   are scratch space for a single run; their contents are not part of the
   long-term contract.
-- **Override hierarchy** (low → high precedence):
-  - recipe YAML (`config/<recipe>.yaml`)
-  - legacy `override.yaml`
-  - per-user `override.<user>.yaml` (publicist uses this; writeStory does not yet)
-  - recipe-scoped `override/<recipe>.yaml`
-  - UI-driven `state/ui-control.json` → materialized to `control_override.yaml` at launch
+- **Override hierarchy** (low → high precedence — this is what
+  `resolveOverrideLayers` + `createExperimentObject` actually do):
+  - recipe YAML (`config/<recipe>.yaml`; resolved CWD↠BASE↠EXEC)
+  - legacy `<CWD>/override.yaml`
+  - recipe-scoped `<CWD>/override/<recipe>.yaml`
+  - UI-driven `state/ui-control.json` → materialized to
+    `<CWD>/control_override.yaml` at launch
+  All four layers are deep-merged. The recipe-scoped layer is the UI's
+  edit surface; status-2 Claude (per `/CLAUDE.md`) also writes there.
+  (Earlier drafts of this doc mentioned a per-user `override.<user>.yaml`
+  layer — that came from the publicist project and was never implemented
+  in this runner. Don't reintroduce it without adding the resolver code.)
 - **Pipe-local UI** (`ui_server.coffee` + `ui/index.html`):
   - left column: Pipeline Death, Outputs, Diary Files, Steps, Latest Err, Latest Log
   - right column: Pipe, Run, Recipe And Overrides controls

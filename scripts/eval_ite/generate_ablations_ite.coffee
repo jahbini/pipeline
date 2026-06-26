@@ -14,8 +14,8 @@
   Output rows shape:
     { prompt_index, prompt, variant: 'base'|'with_adapter', completion }
 ###
-fs   = require 'fs'
-path = require 'path'
+# Adapter presence is sniffed via `L.tools.adapter.exists` (see
+# GPT/CONVENTIONS.md § "Tools"); no direct `fs` use needed here.
 
 # Strip MLX subprocess scaffolding from the raw stdout so the completion
 # is just the model's response. Mirrors the pattern in
@@ -52,7 +52,7 @@ cleanGeneratedText = (prompt, rawOutput) ->
     throw new Error "[#{L.stepName}] adapter_path must be a string"        unless typeof adapterPath is 'string' and adapterPath.length
     throw new Error "[#{L.stepName}] eval_prompts must be a non-empty array" unless Array.isArray(prompts) and prompts.length > 0
 
-    adapterPresent = fs.existsSync adapterPath
+    adapterPresent = L.tools.adapter.exists adapterPath
     console.log "[#{L.stepName}] model      :", quantizedModelDir
     console.log "[#{L.stepName}] adapter    :", adapterPath, (if adapterPresent then "(present)" else "(MISSING — with_adapter variant will fail)")
     console.log "[#{L.stepName}] prompts    :", prompts.length

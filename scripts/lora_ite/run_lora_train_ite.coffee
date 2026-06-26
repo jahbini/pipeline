@@ -4,45 +4,17 @@
   The actual training spawn. Calls `mlx_lm.lora` with
   the dataset shards built by `build_lora_dataset_ite`,
   optionally resuming from a prior adapter checkpoint
-  via `resolveResumeFile`. Capture stdout for the
-  training-run record. Among the longest-running steps
-  in any pipeline; treat it as a black box and let the
-  subprocess do its thing.
+  via `L.tools.adapter.resolveResumeFile`. Capture stdout
+  for the training-run record. Among the longest-running
+  steps in any pipeline; treat it as a black box and let
+  the subprocess do its thing.
+
+  Adapter sniffing (checkpoint discovery, adapter_config
+  presence) lives in `tools/adapter.coffee` and is reached
+  through `L.tools.adapter.*`. See GPT/CONVENTIONS.md
+  § "Tools" for the resolver, and "fs stinginess in step
+  scripts" for why those probes don't belong here.
 ###
-fs = require 'fs'
-path = require 'path'
-
-resolveResumeFile = (adapterPath, configuredResumeFile) ->
-  return configuredResumeFile if configuredResumeFile? and fs.existsSync(configuredResumeFile)
-
-  return null unless adapterPath? and fs.existsSync(adapterPath)
-
-  finalAdapter = path.join(adapterPath, 'adapters.safetensors')
-  return finalAdapter if fs.existsSync(finalAdapter)
-
-  checkpoints = fs.readdirSync(adapterPath)
-    .filter (name) -> /^\d+_adapters\.safetensors$/.test(name)
-    .sort()
-
-  return null unless checkpoints.length
-  path.join adapterPath, checkpoints[checkpoints.length - 1]
-
-detectCheckpointPath = (adapterPath) ->
-  return null unless adapterPath? and fs.existsSync(adapterPath)
-
-  finalAdapter = path.join(adapterPath, 'adapters.safetensors')
-  return finalAdapter if fs.existsSync(finalAdapter)
-
-  checkpoints = fs.readdirSync(adapterPath)
-    .filter (name) -> /^\d+_adapters\.safetensors$/.test(name)
-    .sort()
-
-  return null unless checkpoints.length
-  path.join adapterPath, checkpoints[checkpoints.length - 1]
-
-hasAdapterConfig = (adapterPath) ->
-  return false unless adapterPath?
-  fs.existsSync path.join(adapterPath, 'adapter_config.json')
 
 @step =
   desc: "Run MLX LoRA training using direct Memo access"
@@ -70,8 +42,8 @@ hasAdapterConfig = (adapterPath) ->
     throw new Error "[#{L.stepName}] Missing model directory" unless modelDir?
     throw new Error "[#{L.stepName}] Missing training_dir" unless trainingDir?
 
-    actualResumeFile = if cycleState.reset_this_run is true then null else resolveResumeFile(adapterPath, resumeFile)
-    adapterConfigExists = hasAdapterConfig adapterPath
+    actualResumeFile = if cycleState.reset_this_run is true then null else L.tools.adapter.resolveResumeFile(adapterPath, resumeFile)
+    adapterConfigExists = L.tools.adapter.hasAdapterConfig adapterPath
 
     args =
       model: modelDir
@@ -99,7 +71,7 @@ hasAdapterConfig = (adapterPath) ->
     stdoutText = L.callMLX 'lora', args
 
     finishedAt = new Date().toISOString()
-    checkpointPath = detectCheckpointPath adapterPath
+    checkpointPath = L.tools.adapter.latestCheckpoint adapterPath
 
     runRecord =
       run_id: runID

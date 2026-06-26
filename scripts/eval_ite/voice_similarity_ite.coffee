@@ -24,10 +24,11 @@
       summarized_at: <ISO>
     }
 ###
-fs   = require 'fs'
-os   = require 'os'
-path = require 'path'
-cacheEmbedding = require '../_helpers/cache_embedding.coffee'
+# Temp safetensors files for `cache_prompt` go through
+# `L.tools.tmp_file` (mint a path + best-effort unlink).
+# cache_embedding is reached as `L.tools.cache_embedding.<fn>(...)`.
+# The tool's location on disk is opaque to this step — the runner
+# resolves it BASE↠CWD↠EXEC. See GPT/CONVENTIONS.md § "Tools".
 
 @step =
   desc: "Compute voice-similarity cosine for each completion against the Jim centroid"
@@ -58,14 +59,14 @@ cacheEmbedding = require '../_helpers/cache_embedding.coffee'
     expectedDim = null
     for row in rows
       buf = Buffer.from row.embedding_b64, 'base64'
-      arr = cacheEmbedding.blobToFloatArray buf
+      arr = L.tools.cache_embedding.blobToFloatArray buf
       expectedDim ?= arr.length
       if arr.length isnt expectedDim
         console.error "[#{L.stepName}] embedding dim mismatch for #{row.story_id}/#{row.chunk_index}: got #{arr.length}, expected #{expectedDim} — skipping"
         continue
       floatArrays.push arr
 
-    centroid = cacheEmbedding.meanOfFloatArrays floatArrays
+    centroid = L.tools.cache_embedding.meanOfFloatArrays floatArrays
     unless centroid?
       console.error "[#{L.stepName}] could not build centroid (no valid embeddings) — emitting placeholder"
       L.make 'voice_similarity',
@@ -102,7 +103,7 @@ cacheEmbedding = require '../_helpers/cache_embedding.coffee'
           empty: true
         continue
 
-      cacheFile = path.join os.tmpdir(), "voice_eval_#{process.pid}_#{i}.safetensors"
+      cacheFile = L.tools.tmp_file.make 'voice_eval', 'safetensors'
       try
         cacheArgs =
           model: quantizedModelDir
@@ -110,8 +111,8 @@ cacheEmbedding = require '../_helpers/cache_embedding.coffee'
           'prompt-cache-file': cacheFile
         cacheArgs['adapter-path'] = adapterPath if adapterPath?
         L.callMLX 'cache_prompt', cacheArgs
-        emb = cacheEmbedding.embeddingFromCacheFile cacheFile
-        cos = cacheEmbedding.cosineSimilarity emb, centroid
+        emb = L.tools.cache_embedding.embeddingFromCacheFile cacheFile
+        cos = L.tools.cache_embedding.cosineSimilarity emb, centroid
         byVariant[variant].cosines.push cos
         byVariant[variant].per_completion.push
           prompt_index: row.prompt_index
@@ -125,7 +126,7 @@ cacheEmbedding = require '../_helpers/cache_embedding.coffee'
           cosine: 0
           error: String(err?.message ? err)
       finally
-        try fs.unlinkSync cacheFile catch then null
+        L.tools.tmp_file.remove cacheFile
 
     # 3. Aggregate per-variant statistics.
     median = (xs) ->

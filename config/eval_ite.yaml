@@ -72,3 +72,12 @@ judge_run_ite:
   depends_on: [summarize_ablations_ite, voice_similarity_ite]
   needs: [ablation_summary]
   makes: [eval_score]
+  # Step names whose `params/<name>.yaml` blobs are snapshotted into the
+  # evaluations row's `hyperparams_json` column. Adjust per recipe to add
+  # or remove tunable surfaces; default covers the four steps holding all
+  # knobs the advice loop touches today.
+  hyperparam_steps:
+    - run_lora_train_ite
+    - generate_ablations_ite
+    - oracle_ask_sqlite
+    - collect_diary_kag_ite
