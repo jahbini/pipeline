@@ -7,6 +7,8 @@ override.yaml
 control_override.yaml
 experiment.yaml
 runtime.sqlite
+test.sh
+test/
 tested/
 out/
 env/
