@@ -782,6 +782,11 @@ class Memo
       throw new Error "MLX failed: #{res.stderr ? res.stdout ? "exit #{res.status}"}"
     res.stdout
 
+  callLLM: (params, dbug = false) ->
+    console.error "LLM(in-process) #{params.op}", params if dbug
+    {dispatch} = require './mlx/llm_dispatch'
+    await dispatch(params)
+
 ###
 §8 — Experiment loading and the DAG
 ==================================================================
@@ -1436,6 +1441,9 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       finalPayload = mergeMlxPayload cmdType, payload
       debug "mlx request", cmdType, finalPayload
       memo.callMLX cmdType, finalPayload, mlxDebug
+    callLLM: (params, dbug) ->
+      llmDebug = if arguments.length >= 2 then dbug else @param('debug_llm', false)
+      memo.callLLM params, llmDebug
 
   ledger
 

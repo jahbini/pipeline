@@ -1,0 +1,40 @@
+# =====================================================================
+#   fuse_llm.yaml  —  merge a trained LoRA adapter into base weights
+# =====================================================================
+#   Consumes a LoRA adapter (typically produced by train_llm.yaml at
+#   build/adapter_llm/) and the base quantized model (build/model4/),
+#   writes a fused, self-contained model dir (build/model_fused_llm/)
+#   with no adapter. The fused model can then be loaded by chat_llm
+#   without any adapter-path override.
+#
+#   Backend: L.callLLM({op:'fuse', ...}) → mlx/lora/fuse.coffee::fuseAdapter
+#   (in-process, node-mlx). See GPT/integration3_fuse_llm.md.
+#
+#   No `llm:` block — fuseAdapter has no tunable numeric parameters.
+#   The math is fully determined by adapter_config.json's rank/alpha
+#   and the base model's quantization block. If you want tunables in
+#   the future (e.g. mix ratio, per-layer scale), add them under `llm:`
+#   and thread them through fuseAdapter's `opts` arg.
+#
+#   Memory: fuse loads the full model into RAM to dequant→add→requant
+#   the merged weights. For Qwen3-4B 4-bit that's ~2 GB peak.
+#   Comparable to running inference; far less than training.
+
+run:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  loraLand: build/model
+  debug_s: false
+  debug_llm: false
+
+artifacts:
+  fuse_run_record:
+    target: out/fuse_run_record.json
+
+fuse_llm:
+  run: fuse_llm/fuse_llm.coffee
+  depends_on: []
+  needs: []
+  makes: [fuse_run_record]
+  quantized_model_dir: build/model4         # base (unfused)
+  adapter_dir:         build/adapter_llm    # from train_llm
+  target_model_dir:    build/model_fused_llm

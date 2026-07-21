@@ -1,0 +1,51 @@
+# =====================================================================
+#   train_llm.yaml  —  LoRA training via the LLM (JS/node-mlx) door
+# =====================================================================
+#   Sibling of train_lora.yaml but calls L.callLLM({op:'train', ...})
+#   in-process instead of L.callMLX('lora', ...) which shells to
+#   `python -m mlx_lm lora`. See GPT/integration2_train_llm.md.
+#
+#   ** LAPTOP MEMORY WARNING **
+#   Default llm-block below is INTENTIONALLY tiny (iters=5, seq=64,
+#   batch=1, rank=4) — it's smoke-friendly, ~10s wall time, no swap
+#   pressure. Real training runs need much larger numbers, but this
+#   laptop cannot complete them without swap thrash. If you're on a
+#   bigger machine, override iters/maxSeqLength in
+#   pipes/<pipe>/override/train_llm.yaml, not here.
+#
+#   Data contract: the step expects {train,valid}.jsonl at
+#   `training_dir` (default build/train), each line
+#   `{"text": "..."}`. The smoke stages a tiny fixture if the files
+#   are missing.
+
+run:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  training_dir: build/train
+  loraLand: build/model
+  debug_s: false
+  debug_llm: false
+
+artifacts:
+  lora_stdout:
+    target: out/lora_train.txt
+  lora_run_record:
+    target: out/lora_run_record.json
+
+run_lora_train_llm:
+  run: train_llm/run_lora_train_llm.coffee
+  depends_on: []
+  needs: []
+  makes: [lora_stdout, lora_run_record]
+  quantized_model_dir: build/model4
+  adapter_path: build/adapter_llm
+  test_only: false
+  llm:
+    batchSize: 1
+    iters: 5
+    maxSeqLength: 64
+    learningRate: 5.0e-5
+    loraRank: 4
+    loraAlpha: 8
+    stepsPerReport: 1
+    stepsPerEval: 1000    # effectively disabled for the smoke
+    saveEvery: 5          # writes the final adapter only, at step==iters

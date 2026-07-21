@@ -1,0 +1,47 @@
+# =====================================================================
+#   chat_llm.yaml  —  simple chat generation via the LLM (JS/node-mlx) door
+# =====================================================================
+#   The smallest possible recipe to prove `L.callLLM({op:'generate'})`
+#   works inside the recipe/runner system. Mirror of
+#   @jahbini/pipeline/config/prompt_ite.yaml but uses the LLM door
+#   (in-process node-mlx) instead of the grandfathered MLX door
+#   (`python -m mlx_lm generate`).
+#
+#   Design decision GPT/integration1_chat_llm.md.
+#
+#   To run:
+#     - Ensure pipes/<pipe>/build/model4/ contains a Qwen3-4B mlx-lm model
+#       (the pipe's default; see .model_provenance.json).
+#     - Set `pipeline: chat_llm` in pipes/<pipe>/control_override.yaml
+#       and set chat_llm.prompt_text to a non-empty string.
+#     - `cd pipes/<pipe> && coffee ../../pipeline_runner.coffee`
+
+run:
+  model: Qwen/Qwen3-4B-Instruct-2507
+  output_dir: out
+  data_dir: data
+  loraLand: build/model
+  debug_s: false
+  debug_llm: false
+
+artifacts:
+  chat_raw:
+    target: out/chat_raw.txt
+  chat_meta:
+    target: out/chat_meta.json
+  chat_text:
+    target: out/chat.txt
+
+chat_llm:
+  run: chat_llm/chat_llm.coffee
+  depends_on: []
+  needs: []
+  makes: [chat_raw, chat_meta, chat_text]
+  quantized_model_dir: build/model4
+  # prompt_text is expected to come from override (control_override.yaml
+  # or override/chat_llm.yaml). Empty default; step throws if not set.
+  prompt_text: [ UI_textarea, "" ]
+  llm:
+    maxTokens: 128
+    temperature: 0.7
+    topP: 0.8

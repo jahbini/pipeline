@@ -1,5 +1,22 @@
 This directory is assistant-owned working memory for recipe and step contracts.
 
+## LLM-door integration (2026-07-22, ported from mlxCoffee)
+
+The in-process LLM door (`L.callLLM({op, ...})`) alongside the
+grandfathered `L.callMLX(cmdType, payload)`. See
+[`llm_door_port_plan.md`](llm_door_port_plan.md) for the pending port
+drafts (four commits Mr. Hinds must apply).
+
+- [`stage0_callLLM.md`](stage0_callLLM.md) — two-door API rationale + anti-standards
+- [`stage1_layout.md`](stage1_layout.md) — layout / override / ui-run.json parity (this repo is the exemplar)
+- [`integration1_chat_llm.md`](integration1_chat_llm.md) — `llm:` block convention; `chat_llm` recipe
+- [`integration2_train_llm.md`](integration2_train_llm.md) — `train_llm` recipe; laptop-memory hard rule (`iters ≤ 20` in recipe files)
+- [`integration3_fuse_llm.md`](integration3_fuse_llm.md) — `fuse_llm` recipe; closes the chat→train→fuse loop
+- [`llm_door_port_plan.md`](llm_door_port_plan.md) — five-commit port plan (mlx/ copy, runner two-hunk patch, package.json deps, recipes+scripts, smoke tests)
+
+## Assistant-owned working memory
+
+
 Purpose:
 - keep step-local memory outside the transient conversation
 - record proven contracts and costly failure modes
