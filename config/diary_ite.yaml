@@ -94,9 +94,9 @@ generate_diary_with_adapter_ite:
   makes: [diary_adapted_raw, diary_adapted_meta, diary_adapted_text]
   adapter_path: build/adapter
   quantized_model_dir: build/model4
-  mlx:
-    max-tokens: 2000
-    temp: 0.7
+  llm:
+    maxTokens: 2000
+    temperature: 0.7
 
 generate_diary_without_adapter_ite:
   run: diary_ite/generate_diary_event_ordered_ite.coffee
@@ -104,6 +104,6 @@ generate_diary_without_adapter_ite:
   needs: [story_parts, diary_prompt_text]
   makes: [diary_base_raw, diary_base_meta, diary_base_text]
   quantized_model_dir: build/model4
-  mlx:
-    max-tokens: 2000
-    temp: 0.7
+  llm:
+    maxTokens: 2000
+    temperature: 0.7

@@ -2,28 +2,22 @@
   generate_prompt_ite.coffee  —  PROMPT_ITE pipeline step
   =====================================================
   Generates new story-seed prompts from an instruction
-  template via MLX. The smaller, MLX-only sibling of
-  `generate_prompt_rusty_ite.coffee`. Use this variant
-  unless you specifically need the Rusty native session
-  for sustained inference throughput.
+  template via the in-process LLM door:
+  `L.callLLM({op:'generate', ...})`. No Python, no
+  `mlx_lm generate` subprocess.
+
+  Historical: this was the smaller, MLX-only sibling of
+  `generate_prompt_rusty_ite.coffee`. Now the "MLX" spawn
+  path is gone — everything runs through llm_dispatch.
 ###
 cleanGeneratedText = (prompt, rawOutput) ->
+  # callLLM returns clean structured text; only need to trim the
+  # prompt-echo prefix if the model returned it (raw:true mode).
   text = String(rawOutput ? '').trim()
   return '' unless text.length
-
   if text.indexOf(prompt) is 0
     text = text.slice(prompt.length).trim()
-
-  lines = text.split /\r?\n/
-  lines = lines.filter (line) ->
-    trimmed = line.trim()
-    return false if /^=+$/.test trimmed
-    return false if /^Prompt:\s+\d+\s+tokens/.test trimmed
-    return false if /^Generation:\s+\d+\s+tokens/.test trimmed
-    return false if /^Peak memory:\s+/.test trimmed
-    true
-
-  lines.join("\n").trim()
+  text
 
 resolveRunTag = (L) ->
   raw = process.env.HH_MM ? L.theLowdown('env/HH_MM')?.value ? null
@@ -52,22 +46,36 @@ buildDiaryRecord = (prompt, text) ->
     throw new Error "[#{L.stepName}] prompt_text must be a non-empty string" unless prompt.length
 
     modelDir = L.param 'quantized_model_dir', null
-    mlxConfig = L.param 'mlx', null
+    llmConfig = L.param('llm', null) ? L.param('mlx', null)
     outputPrefix = String(L.param('output_file_prefix', 'prompt_generate') ? 'prompt_generate').trim() or 'prompt_generate'
 
     throw new Error "[#{L.stepName}] Missing quantized_model_dir param" unless modelDir?
-    throw new Error "[#{L.stepName}] mlx must be an object when provided" if mlxConfig? and (typeof mlxConfig isnt 'object' or Array.isArray(mlxConfig))
+    throw new Error "[#{L.stepName}] llm/mlx must be an object when provided" if llmConfig? and (typeof llmConfig isnt 'object' or Array.isArray(llmConfig))
 
-    mlxArgs =
-      model: modelDir
-      prompt: prompt
+    # Map legacy kebab-case keys → camelCase for defense against
+    # unmigrated overrides. `llm:` blocks are already camelCase.
+    MLX_TO_LLM = {
+      'max-tokens':    'maxTokens'
+      'temp':          'temperature'
+      'temperature':   'temperature'
+      'top-p':         'topP'
+      'system-prompt': 'systemPrompt'
+    }
 
-    if mlxConfig? and typeof mlxConfig is 'object'
-      for own key, value of mlxConfig
+    llmArgs =
+      op:       'generate'
+      modelDir: modelDir
+      prompt:   prompt
+      raw:      true
+
+    if llmConfig? and typeof llmConfig is 'object'
+      for own key, value of llmConfig
         continue unless value?
-        mlxArgs[key] = value
+        continue if key is 'op'
+        llmArgs[MLX_TO_LLM[key] ? key] = value
 
-    rawOutput = L.callMLX 'generate', mlxArgs
+    result = await L.callLLM llmArgs
+    rawOutput = String(result?.rawText ? result?.text ? '')
     text = cleanGeneratedText prompt, rawOutput
 
     meta =

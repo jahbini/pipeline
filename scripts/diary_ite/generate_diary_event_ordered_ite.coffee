@@ -247,15 +247,15 @@ resolveMode = (L) ->
 
   throw new Error "[#{L.stepName}] event ordered diary generator expects a with_adapter or without_adapter step name"
 
-callDiaryGenerate = (L, modelDir, prompt, adapterPath, mlxConfig) ->
+callDiaryGenerate = (L, modelDir, prompt, adapterPath, llmConfig) ->
   args =
     op: 'generate'
     modelDir: modelDir
     prompt: prompt
 
   args.adapterPath = adapterPath if adapterPath?
-  if mlxConfig? and typeof mlxConfig is 'object' and not Array.isArray(mlxConfig)
-    for own key, value of mlxConfig
+  if llmConfig? and typeof llmConfig is 'object' and not Array.isArray(llmConfig)
+    for own key, value of llmConfig
       continue unless value?
       camel = switch key
         when 'max-tokens' then 'maxTokens'
@@ -289,10 +289,10 @@ callDiaryGenerate = (L, modelDir, prompt, adapterPath, mlxConfig) ->
 
     modelDir = L.param 'quantized_model_dir', null
     adapterPath = L.param 'adapter_path', null
-    mlxConfig = L.param 'mlx', null
+    llmConfig = L.param('llm', null) ? L.param('mlx', null)
     throw new Error "[#{L.stepName}] Missing quantized_model_dir param" unless modelDir?
     throw new Error "[#{L.stepName}] Missing adapter_path" if modeInfo.mode is 'adapter' and not adapterPath?
-    throw new Error "[#{L.stepName}] mlx must be an object when provided" if mlxConfig? and (typeof mlxConfig isnt 'object' or Array.isArray(mlxConfig))
+    throw new Error "[#{L.stepName}] mlx must be an object when provided" if llmConfig? and (typeof llmConfig isnt 'object' or Array.isArray(llmConfig))
 
     eventOrder = [
       ['scene', storyParts.scene]
@@ -311,7 +311,7 @@ callDiaryGenerate = (L, modelDir, prompt, adapterPath, mlxConfig) ->
       chosenMatches = resolveEventMatches diaryKag, kind
       chosenEntries = if chosenMatches.length > 0 then chosenMatches else pickEventKagEntries diaryKag.entries, kind, event, 4
       prompt = buildEventPrompt kind, event, chosenEntries, priorSections, modeInfo.mode
-      rawOutput = await callDiaryGenerate L, modelDir, prompt, adapterPath, mlxConfig
+      rawOutput = await callDiaryGenerate L, modelDir, prompt, adapterPath, llmConfig
       sectionText = cleanGeneratedText prompt, rawOutput
 
       continue unless sectionText.length

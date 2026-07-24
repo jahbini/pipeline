@@ -104,9 +104,9 @@ resolveRunTag = (L) ->
       modelDir: modelDir
       prompt: prompt
       adapterPath: adapterPath
-    mlxConfig = L.param 'mlx', null
-    if mlxConfig? and typeof mlxConfig is 'object' and not Array.isArray(mlxConfig)
-      for own key, value of mlxConfig
+    llmConfig = L.param('llm', null) ? L.param('mlx', null)
+    if llmConfig? and typeof llmConfig is 'object' and not Array.isArray(llmConfig)
+      for own key, value of llmConfig
         continue unless value?
         camel = switch key
           when 'max-tokens' then 'maxTokens'

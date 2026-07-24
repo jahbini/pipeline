@@ -39,6 +39,6 @@ generate_prompt_ite:
   quantized_model_dir: build/model4
   output_file_prefix: prompt_generate
   prompt_text: [ UI_textarea, "" ]
-  mlx:
-    max-tokens: 1600
-    temp: 0.7
+  llm:
+    maxTokens: 1600
+    temperature: 0.7

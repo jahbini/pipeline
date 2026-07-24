@@ -176,7 +176,7 @@ buildGenerateOpts = (block) ->
     out[mapped] = value
   out
 
-runOracleOnce = (S, modelDir, prompt, adapterPath, mlxConfig, debugLlm = false) ->
+runOracleOnce = (S, modelDir, prompt, adapterPath, llmConfig, debugLlm = false) ->
   # Two calls to the in-process LLM door. Both are cold-KV per call
   # (session_api.embed disposes the cache before and after; generate
   # runs in the same session but with a fresh prefill because the cache
@@ -197,7 +197,7 @@ runOracleOnce = (S, modelDir, prompt, adapterPath, mlxConfig, debugLlm = false) 
     embeddingError = String(err?.message ? err)
     console.error "[oracle_ask_sqlite] embed failed: #{embeddingError}"
 
-  genOpts = buildGenerateOpts mlxConfig
+  genOpts = buildGenerateOpts llmConfig
   genParams =
     op:       'generate'
     modelDir: modelDir
@@ -324,8 +324,12 @@ mergeEmotionLists = (rows) ->
     batchSzRaw = S.param 'batch_size'
     batchSz = Number(batchSzRaw)
     throw new Error "[oracle_ask_sqlite] batch_size must be a positive integer" unless Number.isFinite(batchSz) and batchSz > 0 and Math.floor(batchSz) is batchSz
-    mlxConfig = S.param 'mlx', null
-    throw new Error "[oracle_ask_sqlite] mlx must be an object when provided" if mlxConfig? and (typeof mlxConfig isnt 'object' or Array.isArray(mlxConfig))
+    # Read the `llm:` block (new-door convention). Legacy `mlx:` blocks
+    # from unmigrated overrides are still accepted; the buildGenerateOpts
+    # mapper converts their kebab-case keys to camelCase and drops
+    # session-level keys (max-kv-size) that don't apply here.
+    llmConfig = S.param('llm', null) ? S.param('mlx', null)
+    throw new Error "[oracle_ask_sqlite] llm/mlx block must be an object when provided" if llmConfig? and (typeof llmConfig isnt 'object' or Array.isArray(llmConfig))
     quantizedModelMemoKey = S.param 'quantized_model_memo_key', 'quantizedModelDir'
     adapterPath = S.param 'adapter_path', null
     modelDir = S.theLowdown(quantizedModelMemoKey)?.value ? S.param('model_dir') ? S.theLowdown('modelDir')?.value
@@ -373,7 +377,7 @@ mergeEmotionLists = (rows) ->
 
       for group in storyGroups
         groupPrompt = renderPrompt promptText, group.text
-        attempt1 = await runOracleOnce S, modelDir, groupPrompt, adapterPath, mlxConfig
+        attempt1 = await runOracleOnce S, modelDir, groupPrompt, adapterPath, llmConfig
         finalAttempt = attempt1
         retryAttempts = []
 
@@ -384,7 +388,7 @@ mergeEmotionLists = (rows) ->
 
           for chunk in retryChunks
             chunkPrompt = renderPrompt promptText, chunk.text
-            attempt2 = await runOracleOnce S, modelDir, chunkPrompt, adapterPath, mlxConfig, true
+            attempt2 = await runOracleOnce S, modelDir, chunkPrompt, adapterPath, llmConfig, true
             usable = isUsableEmotionList(attempt2.filtered)
             retryAttempts.push
               group_index: group.group_index

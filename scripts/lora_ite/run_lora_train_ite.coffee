@@ -1,13 +1,13 @@
 ###
   run_lora_train_ite.coffee  —  LORA_ITE pipeline step
   =====================================================
-  The actual training spawn. Calls `mlx_lm.lora` with
-  the dataset shards built by `build_lora_dataset_ite`,
-  optionally resuming from a prior adapter checkpoint
-  via `L.tools.adapter.resolveResumeFile`. Capture stdout
-  for the training-run record. Among the longest-running
-  steps in any pipeline; treat it as a black box and let
-  the subprocess do its thing.
+  The actual training call. Runs LoRA fine-tuning via the
+  in-process LLM door: `L.callLLM({op:'train', ...})`
+  reaches `mlx/lora/train.coffee::trainLoRA`. No Python
+  subprocess, no `mlx_lm.lora`. Optionally resumes from a
+  prior adapter checkpoint via `L.tools.adapter.resolveResumeFile`.
+  Trainer log is captured via an `opts.log` callback and
+  stored as the `lora_stdout` artifact.
 
   Adapter sniffing (checkpoint discovery, adapter_config
   presence) lives in `tools/adapter.coffee` and is reached
@@ -17,7 +17,7 @@
 ###
 
 @step =
-  desc: "Run MLX LoRA training using direct Memo access"
+  desc: "Run LoRA training in-process via L.callLLM(train)"
 
   action: (L) ->
     cycleState = await L.need 'lora_cycle_state'
@@ -32,52 +32,91 @@
     throw new Error "[#{L.stepName}] valid_rows must be an array" unless Array.isArray validRows
     throw new Error "[#{L.stepName}] test_rows must be an array" unless Array.isArray testRows
 
-    testOnly = L.param 'test_only', false
+    testOnly = !!L.param('test_only', false)
     adapterPath = L.param 'adapter_path'
     resumeFile = L.param 'resume_adapter_file'
     loraLand = L.param 'loraLand'
     trainingDir = L.param 'training_dir'
     modelDir = loraLand
+    llmConfig = L.param('llm', null) ? L.param('mlx', null)
 
     throw new Error "[#{L.stepName}] Missing model directory" unless modelDir?
     throw new Error "[#{L.stepName}] Missing training_dir" unless trainingDir?
+    if llmConfig? and (typeof llmConfig isnt 'object' or Array.isArray(llmConfig))
+      throw new Error "[#{L.stepName}] llm/mlx block must be an object when provided"
 
     actualResumeFile = if cycleState.reset_this_run is true then null else L.tools.adapter.resolveResumeFile(adapterPath, resumeFile)
     adapterConfigExists = L.tools.adapter.hasAdapterConfig adapterPath
 
-    args =
-      model: modelDir
-      data: trainingDir
+    # Capture trainer log lines both to console (visible during run) and to
+    # a buffer that becomes the lora_stdout artifact — replaces the old
+    # spawn-stdout capture from L.callMLX.
+    logLines = []
+    captureLog = (msg) ->
+      line = "[lora] #{msg}"
+      console.log line
+      logLines.push line
 
-    if testOnly
-      args.test = null
-      console.log "[run_lora_train_ite] mode: test"
-    else
-      args.train = null
-      console.log "[run_lora_train_ite] mode: train"
+    # Map legacy kebab-case (mlx:) keys → camelCase (llm:) as defense
+    # against unmigrated overrides. Recipe-level `llm:` blocks pass through
+    # unchanged; `mlx:` blocks get translated.
+    MLX_TO_LLM = {
+      'batch-size':      'batchSize'
+      'iters':           'iters'
+      'max-seq-length':  'maxSeqLength'
+      'learning-rate':   'learningRate'
+      'lora-rank':       'loraRank'
+      'lora-alpha':      'loraAlpha'
+      'steps-per-report':'stepsPerReport'
+      'steps-per-eval':  'stepsPerEval'
+      'save-every':      'saveEvery'
+    }
 
-    if testOnly
-      if adapterConfigExists
-        args["adapter-path"] = adapterPath
-      else
-        console.log "[run_lora_train_ite] no adapter_config.json at:", adapterPath
-    else
-      args["adapter-path"] = adapterPath
+    llmArgs =
+      op:          'train'
+      modelDir:    modelDir
+      dataDir:     trainingDir
+      adapterPath: adapterPath
+      train:       not testOnly
+      test:        testOnly
+      log:         captureLog
 
-    args["resume-adapter-file"] = actualResumeFile if actualResumeFile? and not testOnly
+    llmArgs.resumeFile = String(actualResumeFile) if actualResumeFile? and not testOnly
+
+    if llmConfig?
+      for own key, value of llmConfig
+        continue unless value?
+        continue if key is 'op' or key is 'log'      # step owns these
+        camel = MLX_TO_LLM[key] ? key
+        llmArgs[camel] = value
+
+    if testOnly and not adapterConfigExists
+      console.log "[run_lora_train_ite] no adapter_config.json at: #{adapterPath}"
+
+    console.log "[run_lora_train_ite] modelDir:      #{modelDir}"
+    console.log "[run_lora_train_ite] trainingDir:   #{trainingDir}"
+    console.log "[run_lora_train_ite] adapterPath:   #{adapterPath}"
+    console.log "[run_lora_train_ite] mode:          #{if testOnly then 'test' else 'train'}"
+    console.log "[run_lora_train_ite] resume:        #{actualResumeFile ? '(none)'}"
 
     startedAt = new Date().toISOString()
     runID = "lora-#{startedAt.replace(/[:.]/g, '-')}"
-    stdoutText = L.callMLX 'lora', args
+
+    result = await L.callLLM llmArgs
 
     finishedAt = new Date().toISOString()
     checkpointPath = L.tools.adapter.latestCheckpoint adapterPath
+    stdoutText = logLines.join('\n') + (if logLines.length then '\n' else '')
 
     runRecord =
       run_id: runID
       started_at: startedAt
       finished_at: finishedAt
       status: 'done'
+      mode: if testOnly then 'test' else 'train'
+      trained: !!result?.trained
+      tested: !!result?.tested
+      test_loss: result?.testLoss ? null
       model_dir: modelDir
       adapter_path: adapterPath
       resume_adapter_file: actualResumeFile
@@ -89,6 +128,12 @@
       checkpoint_path: checkpointPath
       story_ids: selectedStoryIDs
       reset_this_run: cycleState.reset_this_run is true
+      iters:          llmArgs.iters          ? null
+      batch_size:     llmArgs.batchSize      ? null
+      max_seq_length: llmArgs.maxSeqLength   ? null
+      learning_rate:  llmArgs.learningRate   ? null
+      lora_rank:      llmArgs.loraRank       ? null
+      lora_alpha:     llmArgs.loraAlpha      ? null
 
     console.log "[run_lora_train_ite] train rows:", trainRows.length
     console.log "[run_lora_train_ite] valid rows:", validRows.length

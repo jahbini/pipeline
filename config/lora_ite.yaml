@@ -57,11 +57,11 @@ run_lora_train_ite:
   test_only: false
   adapter_path: build/adapter
   resume_adapter_file: build/adapter/adapters.safetensors
-  mlx:
-    batch-size: 1
+  llm:
+    batchSize: 1
     iters: 20
-    max-seq-length: 2048
-    learning-rate: 0.00005
+    maxSeqLength: 2048
+    learningRate: 0.00005
 
 record_lora_training_ite:
   run: lora_ite/record_lora_training_ite.coffee

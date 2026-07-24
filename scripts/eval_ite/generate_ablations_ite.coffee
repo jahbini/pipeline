@@ -5,9 +5,9 @@
   simplified to two variants per prompt (base / with_adapter) instead
   of the legacy `artifact × prompt_variant × prompt` cube.
 
-  For each `eval_prompts` entry: spawn `mlx_lm generate` twice — once
-  against the base quantized model, once with `--adapter-path` set to
-  the adapter under evaluation. Both completions are recorded for the
+  For each `eval_prompts` entry: run `L.callLLM({op:'generate'})`
+  twice — once against the base quantized model, once with the
+  adapter under evaluation. Both completions are recorded for the
   summarize step to compute distinct2 / mem_sub / sentence-ending /
   word-count / empty-rate metrics.
 
@@ -17,26 +17,16 @@
 # Adapter presence is sniffed via `L.tools.adapter.exists` (see
 # GPT/CONVENTIONS.md § "Tools"); no direct `fs` use needed here.
 
-# Strip MLX subprocess scaffolding from the raw stdout so the completion
-# is just the model's response. Mirrors the pattern in
-# `scripts/diary_ite/generate_diary_without_adapter_ite.coffee`.
+# Trim the echoed prompt prefix if the model returned it (raw:true).
+# The mlx_lm subprocess-scaffolding filters (=====, "Prompt:", etc.)
+# that the old callMLX path needed are gone — L.callLLM returns the
+# structured completion text directly, no stdout noise.
 cleanGeneratedText = (prompt, rawOutput) ->
   text = String(rawOutput ? '').trim()
   return '' unless text.length
-
   if text.indexOf(prompt) is 0
     text = text.slice(prompt.length).trim()
-
-  lines = text.split /\r?\n/
-  lines = lines.filter (line) ->
-    trimmed = line.trim()
-    return false if /^=+$/.test trimmed
-    return false if /^Prompt:\s+\d+\s+tokens/.test trimmed
-    return false if /^Generation:\s+\d+\s+tokens/.test trimmed
-    return false if /^Peak memory:\s+/.test trimmed
-    true
-
-  lines.join("\n").trim()
+  text
 
 @step =
   desc: "Generate ablation completions (base vs with_adapter) for the eval prompt set"
@@ -64,11 +54,14 @@ cleanGeneratedText = (prompt, rawOutput) ->
 
       # Base variant: no adapter.
       console.log "[#{L.stepName}] prompt #{i + 1}/#{prompts.length}  variant=base"
-      baseOut = L.callMLX 'generate',
-        model: quantizedModelDir
+      baseResult = await L.callLLM
+        op: 'generate'
+        modelDir: quantizedModelDir
         prompt: prompt
-        'max-tokens': maxTokens
-        temp: temp
+        raw: true
+        maxTokens: maxTokens
+        temperature: temp
+      baseOut = String(baseResult?.text ? baseResult?.rawText ? '')
       rows.push
         prompt_index: i
         prompt: prompt
@@ -77,12 +70,15 @@ cleanGeneratedText = (prompt, rawOutput) ->
 
       # With-adapter variant.
       console.log "[#{L.stepName}] prompt #{i + 1}/#{prompts.length}  variant=with_adapter"
-      adapterOut = L.callMLX 'generate',
-        model: quantizedModelDir
-        'adapter-path': adapterPath
+      adapterResult = await L.callLLM
+        op: 'generate'
+        modelDir: quantizedModelDir
+        adapterPath: adapterPath
         prompt: prompt
-        'max-tokens': maxTokens
-        temp: temp
+        raw: true
+        maxTokens: maxTokens
+        temperature: temp
+      adapterOut = String(adapterResult?.text ? adapterResult?.rawText ? '')
       rows.push
         prompt_index: i
         prompt: prompt

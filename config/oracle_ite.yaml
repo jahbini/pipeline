@@ -69,6 +69,7 @@ oracle_ask_sqlite:
     5. #keyword --- optional short headline 
 
   batch_size: 4
-  mlx:
-    max-tokens: 80
-    max-kv-size: 1024
+  llm:
+    maxTokens: 80
+    # max-kv-size dropped: the LLM door caps session KV via mx.setCacheLimit
+    # (session_api.coffee, cacheLimitMB default 512 MB) — no per-call knob.

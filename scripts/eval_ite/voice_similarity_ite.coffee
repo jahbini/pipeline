@@ -5,10 +5,10 @@
   voice fidelity: the cosine similarity between each completion's
   embedding and the Jim centroid (mean of all kag_embeddings rows).
 
-  Embeddings are produced by the same `mlx_lm cache_prompt` path the
+  Embeddings are produced by the same `L.callLLM({op:'embed'})` path the
   oracle step uses — for the corpus these are read from SQLite where
-  the oracle step persisted them; for completions we run cache_prompt
-  inline here and pool to a single vector.
+  the oracle step persisted them; for completions we run embed inline
+  here (in-process, no temp file, no Python).
 
   Output `voice_similarity` artifact shape:
     {
@@ -24,11 +24,12 @@
       summarized_at: <ISO>
     }
 ###
-# Temp safetensors files for `cache_prompt` go through
-# `L.tools.tmp_file` (mint a path + best-effort unlink).
 # cache_embedding is reached as `L.tools.cache_embedding.<fn>(...)`.
-# The tool's location on disk is opaque to this step — the runner
-# resolves it BASE↠CWD↠EXEC. See GPT/CONVENTIONS.md § "Tools".
+# Only its cosineSimilarity + blob→Float32 helpers are used here now;
+# the safetensors-reader path is dead in this script (the in-process
+# embed op returns the Float32Array directly). The tool's location on
+# disk is opaque to this step — the runner resolves it BASE↠CWD↠EXEC.
+# See GPT/CONVENTIONS.md § "Tools".
 
 @step =
   desc: "Compute voice-similarity cosine for each completion against the Jim centroid"
@@ -87,7 +88,8 @@
     console.log "[#{L.stepName}] model       : #{quantizedModelDir}"
     console.log "[#{L.stepName}] ablations   : #{ablations.length} rows"
 
-    # 2. For each completion: cache_prompt → extract embedding → cosine.
+    # 2. For each completion: L.callLLM(embed) → cosine vs centroid.
+    #    In-process — no temp safetensors file, no Python spawn.
     byVariant = {}
     for row, i in ablations
       variant = String(row?.variant ? 'unknown')
@@ -103,15 +105,16 @@
           empty: true
         continue
 
-      cacheFile = L.tools.tmp_file.make 'voice_eval', 'safetensors'
       try
-        cacheArgs =
-          model: quantizedModelDir
-          prompt: completion
-          'prompt-cache-file': cacheFile
-        cacheArgs['adapter-path'] = adapterPath if adapterPath?
-        L.callMLX 'cache_prompt', cacheArgs
-        emb = L.tools.cache_embedding.embeddingFromCacheFile cacheFile
+        embedParams =
+          op:       'embed'
+          modelDir: quantizedModelDir
+          prompt:   completion
+          raw:      true
+        embedParams.adapterPath = adapterPath if adapterPath?
+        embedResult = await L.callLLM embedParams
+        emb = embedResult?.embedding
+        throw new Error "embed returned no .embedding" unless emb?
         cos = L.tools.cache_embedding.cosineSimilarity emb, centroid
         byVariant[variant].cosines.push cos
         byVariant[variant].per_completion.push
@@ -125,8 +128,6 @@
           prompt_index: row.prompt_index
           cosine: 0
           error: String(err?.message ? err)
-      finally
-        L.tools.tmp_file.remove cacheFile
 
     # 3. Aggregate per-variant statistics.
     median = (xs) ->

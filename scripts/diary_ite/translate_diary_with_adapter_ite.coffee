@@ -98,12 +98,12 @@ renderPrompt = (template, storyID, diaryText) ->
     storyID = String(storyParts.story_id ? '').trim()
     modelDir = L.param 'quantized_model_dir', null
     adapterPath = L.param 'adapter_path'
-    mlxConfig = L.param 'mlx', null
+    llmConfig = L.param('llm', null) ? L.param('mlx', null)
     promptTemplate = L.param 'translation_prompt_text'
 
     throw new Error "[#{L.stepName}] Missing quantized_model_dir param" unless modelDir?
     throw new Error "[#{L.stepName}] Missing adapter_path" unless adapterPath?
-    throw new Error "[#{L.stepName}] mlx must be an object when provided" if mlxConfig? and (typeof mlxConfig isnt 'object' or Array.isArray(mlxConfig))
+    throw new Error "[#{L.stepName}] mlx must be an object when provided" if llmConfig? and (typeof llmConfig isnt 'object' or Array.isArray(llmConfig))
 
     prompt = renderPrompt promptTemplate, storyID, baseDiaryText
 
@@ -113,8 +113,8 @@ renderPrompt = (template, storyID, diaryText) ->
       prompt: prompt
       adapterPath: adapterPath
 
-    if mlxConfig? and typeof mlxConfig is 'object'
-      for own key, value of mlxConfig
+    if llmConfig? and typeof llmConfig is 'object'
+      for own key, value of llmConfig
         continue unless value?
         camel = switch key
           when 'max-tokens' then 'maxTokens'
