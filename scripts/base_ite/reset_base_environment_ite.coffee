@@ -32,11 +32,19 @@ removePath = (baseDir, relativePath) ->
       mode: 'full'
       reset_at: new Date().toISOString()
 
+    # Do NOT wipe build/model or build/model4. Those are the outputs of
+    # download_model + quantize_model — both are idempotent (download is
+    # git+lfs provenance-checked; quantize skips when target already has
+    # a matching quantization block). Wiping them would force a full
+    # re-download + re-quantize on every base_ite run, which is minutes
+    # to hours of avoidable work.
+    #
+    # The fused-model dir IS wiped because it's derived from an adapter
+    # that reset itself removes — the two must stay consistent.
     cleanupTargets = [
       'build/adapter'
       'build/adapter_llm'
       'build/train'
-      'build/model4'
       'build/model_fused_llm'
       'out/story_seed_ids.json'
       'out/new_story_ids.json'
