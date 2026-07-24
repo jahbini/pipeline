@@ -36,24 +36,23 @@ Outputs:
     summarized_at
     ```
 
-Encoding pattern:
-- `L.tools.tmp_file.make 'voice_eval', 'safetensors'` mints a unique
-  tempdir path, then one `L.callMLX 'cache_prompt'` per completion
-  writes the K/V cache there
-- `L.tools.cache_embedding.embeddingFromCacheFile cacheFile` reads
-  it, extracts the last-layer V tensor, mean-pools across `seq_len` →
-  1024-dim Float32 (for Qwen3-4B's 8 KV-heads × 128 head-dim)
+Encoding pattern (2026-07-24 port):
+- one `L.callLLM({op:'embed', modelDir, prompt: completion, raw:true, adapterPath?})`
+  per completion. Runs prompt through the model in-process, extracts
+  last-layer V from `llm.kvCache`, mean-pools across `seq_len` →
+  1024-dim `Float32Array` (for Qwen3-4B's 8 KV-heads × 128 head-dim).
+- no temp files, no Python spawn — `session_api.embed` disposes the
+  KV cache before and after so each completion is scored in isolation.
 - cosine vs centroid is plain dot/sqrt-norm arithmetic via
-  `L.tools.cache_embedding.cosineSimilarity`
-- `L.tools.tmp_file.remove cacheFile` after encoding — best-effort
-  unlink, strays in `/tmp` are harmless
+  `L.tools.embedding_blob.cosineSimilarity`.
 
 Centroid construction:
 - read every `kagAllEmbeddings` row
-- decode base64 → Buffer → Float32Array via the helper's
-  `blobToFloatArray`
+- decode base64 → Buffer → Float32Array via
+  `L.tools.embedding_blob.blobToFloatArray`
 - skip rows whose dim doesn't match the first row's dim (log + drop)
-- mean across all surviving rows = the Jim centroid
+- mean across all surviving rows via
+  `L.tools.embedding_blob.meanOfFloatArrays` = the Jim centroid
 
 Origins:
 - new step (no legacy ancestor — the legacy `entropy.coffee` measured

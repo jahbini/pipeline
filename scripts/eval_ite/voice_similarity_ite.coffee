@@ -24,10 +24,10 @@
       summarized_at: <ISO>
     }
 ###
-# cache_embedding is reached as `L.tools.cache_embedding.<fn>(...)`.
-# Only its cosineSimilarity + blob→Float32 helpers are used here now;
-# the safetensors-reader path is dead in this script (the in-process
-# embed op returns the Float32Array directly). The tool's location on
+# embedding_blob is reached as `L.tools.embedding_blob.<fn>(...)`.
+# Uses cosineSimilarity, blobToFloatArray, meanOfFloatArrays. The
+# in-process `L.callLLM({op:'embed'})` returns the Float32Array
+# directly — no safetensors file involved. The tool's location on
 # disk is opaque to this step — the runner resolves it BASE↠CWD↠EXEC.
 # See GPT/CONVENTIONS.md § "Tools".
 
@@ -60,14 +60,14 @@
     expectedDim = null
     for row in rows
       buf = Buffer.from row.embedding_b64, 'base64'
-      arr = L.tools.cache_embedding.blobToFloatArray buf
+      arr = L.tools.embedding_blob.blobToFloatArray buf
       expectedDim ?= arr.length
       if arr.length isnt expectedDim
         console.error "[#{L.stepName}] embedding dim mismatch for #{row.story_id}/#{row.chunk_index}: got #{arr.length}, expected #{expectedDim} — skipping"
         continue
       floatArrays.push arr
 
-    centroid = L.tools.cache_embedding.meanOfFloatArrays floatArrays
+    centroid = L.tools.embedding_blob.meanOfFloatArrays floatArrays
     unless centroid?
       console.error "[#{L.stepName}] could not build centroid (no valid embeddings) — emitting placeholder"
       L.make 'voice_similarity',
@@ -115,7 +115,7 @@
         embedResult = await L.callLLM embedParams
         emb = embedResult?.embedding
         throw new Error "embed returned no .embedding" unless emb?
-        cos = L.tools.cache_embedding.cosineSimilarity emb, centroid
+        cos = L.tools.embedding_blob.cosineSimilarity emb, centroid
         byVariant[variant].cosines.push cos
         byVariant[variant].per_completion.push
           prompt_index: row.prompt_index

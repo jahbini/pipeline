@@ -54,8 +54,8 @@ that pipe's working directory.
 ```coffee
 @step =
   action: (S) ->
-    embed = S.tools.cache_embedding
-    vec = embed.embeddingFromCacheFile cacheFilePath
+    embed = S.tools.embedding_blob
+    blob = embed.floatArrayToBlob floatArr
 ```
 
 `S.tools` is a proxy. First reference to a tool name triggers load + cache
@@ -107,9 +107,17 @@ shipped tools for these needs:
 - `S.tools.adapter` — `exists(path)`, `hasAdapterConfig(path)`,
   `latestCheckpoint(path)`, `resolveResumeFile(path, override)`.
   Consolidates the LoRA/eval adapter probes.
-- `S.tools.tmp_file` — `make(prefix, ext)`, `remove(path)`.
-  Mints unique tmpdir paths for `cache_prompt` safetensors and other
-  scratch files; best-effort unlink with no throws on missing files.
+- `S.tools.embedding_blob` — `floatArrayToBlob(arr)`,
+  `blobToFloatArray(buf)`, `meanOfFloatArrays(arrs)`,
+  `cosineSimilarity(a, b)`. SQLite BLOB glue and cosine math for
+  the 1024-dim voice embeddings that `L.callLLM({op:'embed'})`
+  produces.
+
+Retired 2026-07-24: `S.tools.tmp_file` (mint/remove tmp safetensors
+paths) and `S.tools.cache_embedding`'s safetensors-reader helpers.
+Both died when oracle and eval moved to `L.callLLM({op:'embed'})` —
+no temp file to mint, no safetensors file to read. See
+`GPT/eval_ite/embedding_blob.md`.
 
 No remaining step-script fs/sql-direct-access violations. The last one
 (`scripts/diary_ite/collect_diary_kag_ite.coffee` opening
@@ -153,8 +161,12 @@ work around the rule with a private import path.
 
 Established 2026-06-26. Initial migration (cache_embedding into
 `tools/`, accessed via `S.tools.cache_embedding`) completed same day.
-No known location-anonymity violations at this time. The companion
-`fs` stinginess rule still flags violations — see that section.
+The `cache_embedding` tool was later (2026-07-24) trimmed to just
+the SQLite-blob + cosine helpers and renamed `embedding_blob` — the
+safetensors-reader chain it originally carried died with the port to
+in-process `L.callLLM({op:'embed'})`. See `GPT/eval_ite/embedding_blob.md`.
+The companion `fs` stinginess rule still flags violations — see that
+section.
 
 ## Notes and memory
 

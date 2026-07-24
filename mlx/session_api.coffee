@@ -173,7 +173,7 @@ createSession = (opts = {}) ->
     # through the model once, extracts last-layer V from the KV cache,
     # mean-pools across the prompt's seq axis, returns Float32Array
     # of length (kv_heads × head_dim). Same shape and semantics as
-    # `mlx_lm cache_prompt` + tools/cache_embedding.coffee's
+    # `mlx_lm cache_prompt` + tools/embedding_blob.coffee's
     # embeddingFromCacheFile — no disk detour.
     #
     # KV cache is disposed before and after so the fingerprint is a

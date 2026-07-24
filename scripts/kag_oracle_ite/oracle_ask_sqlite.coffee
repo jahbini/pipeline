@@ -14,14 +14,12 @@
   Same last-layer-V mean-pool as before; the K/V cache
   lives in-process now, no safetensors file detour.
   Persisted via kagEmbeddingRegister request key (see
-  GPT/eval_ite/cache_embedding.md for the downstream
+  GPT/eval_ite/embedding_blob.md for the downstream
   voice-similarity scoring consumer).
 ###
-# cache_embedding is still reached as
-# `S.tools.cache_embedding.<fn>(...)` — we only need its
-# floatArrayToBlob helper to serialize the Float32Array
-# into a SQLite BLOB. The safetensors reader path is
-# dead for this script now.
+# embedding_blob is reached as `S.tools.embedding_blob.<fn>(...)` —
+# we only need its floatArrayToBlob helper to serialize the
+# Float32Array into a SQLite BLOB.
 cleanFragment = (value) ->
   text = String(value ? '').trim()
   text = text.replace /^\*+|\*+$/g, ''
@@ -430,7 +428,7 @@ mergeEmotionLists = (rows) ->
               chunk_index: group.group_index
               dim: attempt1.embedding.length
               source: 'cache_prompt/last_v_meanpool'
-              embedding: S.tools.cache_embedding.floatArrayToBlob attempt1.embedding
+              embedding: S.tools.embedding_blob.floatArrayToBlob attempt1.embedding
           catch err
             console.error "[oracle_ask_sqlite] could not persist embedding for #{storyID}/#{group.group_index}: #{err?.message ? err}"
         else if attempt1.embeddingError?

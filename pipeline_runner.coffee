@@ -1277,7 +1277,7 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
     stepName: stepName
 
     # A step writes:
-    #   S.tools.cache_embedding.embeddingFromCacheFile(path)
+    #   S.tools.embedding_blob.floatArrayToBlob(arr)
     # and never knows where the tool lives on disk.
     tools: toolsState.proxy
 
