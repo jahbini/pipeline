@@ -55,13 +55,27 @@ run_lora_train_ite:
   needs: [lora_cycle_state, selected_story_ids, train_rows, valid_rows, test_rows]
   makes: [lora_stdout, lora_run_record]
   test_only: false
+  # Train against the quantized model, not the raw HF download.
+  # trainLoRA handles quantized bases correctly (LoRA layers wrap
+  # the QuantizedLinear modules) and uses ~10× less memory. This
+  # is what train_llm has done since day one.
+  quantized_model_dir: build/model4
   adapter_path: build/adapter
   resume_adapter_file: build/adapter/adapters.safetensors
+  # Training block — same values as config/train_llm.yaml so both
+  # recipes exercise the same trainLoRA path with the same defaults.
+  # Tuning goes in pipes/<pipe>/override/lora_ite.yaml, not here
+  # (HARD RULE: no recipe-file edits for tuning — GPT/README.md).
   llm:
-    batchSize: 1
-    iters: 20
-    maxSeqLength: 2048
-    learningRate: 0.00005
+    batchSize:      1
+    iters:          5
+    maxSeqLength:   64
+    learningRate:   5.0e-5
+    loraRank:       4
+    loraAlpha:      8
+    stepsPerReport: 1
+    stepsPerEval:   1000
+    saveEvery:      5
 
 record_lora_training_ite:
   run: lora_ite/record_lora_training_ite.coffee

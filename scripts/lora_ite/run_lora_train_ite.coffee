@@ -35,12 +35,15 @@
     testOnly = !!L.param('test_only', false)
     adapterPath = L.param 'adapter_path'
     resumeFile = L.param 'resume_adapter_file'
-    loraLand = L.param 'loraLand'
     trainingDir = L.param 'training_dir'
-    modelDir = loraLand
+    # Prefer quantized_model_dir (build/model4) over loraLand
+    # (typically build/model, the raw 16 GB HF download). Training
+    # against the quantized base uses ~10× less memory — the raw
+    # weights are neither required nor useful once quantized.
+    modelDir = L.param('quantized_model_dir', null) ? L.param('loraLand', null)
     llmConfig = L.param('llm', null) ? L.param('mlx', null)
 
-    throw new Error "[#{L.stepName}] Missing model directory" unless modelDir?
+    throw new Error "[#{L.stepName}] Missing model directory (quantized_model_dir or loraLand)" unless modelDir?
     throw new Error "[#{L.stepName}] Missing training_dir" unless trainingDir?
     if llmConfig? and (typeof llmConfig isnt 'object' or Array.isArray(llmConfig))
       throw new Error "[#{L.stepName}] llm/mlx block must be an object when provided"
