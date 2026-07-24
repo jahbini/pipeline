@@ -64,6 +64,19 @@ fuseOp = (params) ->
   throw new Error "callLLM(fuse): 'targetModelDir' required" unless params.targetModelDir?
   fuseAdapter params.baseModelDir, params.adapterDir, params.targetModelDir, (params.opts ? {})
 
+embedOp = (params) ->
+  throw new Error "callLLM(embed): 'modelDir' required" unless params.modelDir?
+  throw new Error "callLLM(embed): 'prompt' required"   unless params.prompt?
+
+  sessionOpts = {}
+  sessionOpts.adapterPath = params.adapterPath if params.adapterPath?
+
+  session = getSession params.modelDir, sessionOpts
+
+  await session.embed params.prompt,
+    systemPrompt: params.systemPrompt ? null
+    raw:          params.raw          ? false
+
 # --- dispatcher ------------------------------------------------------------
 dispatch = (params) ->
   throw new Error "callLLM: params must be an object" unless params? and typeof params is 'object'
@@ -71,6 +84,7 @@ dispatch = (params) ->
     when 'generate' then generateOp params
     when 'train'    then trainOp params
     when 'fuse'     then fuseOp params
-    else throw new Error "callLLM: unknown op '#{params.op}' (expected train|generate|fuse)"
+    when 'embed'    then embedOp params
+    else throw new Error "callLLM: unknown op '#{params.op}' (expected train|generate|fuse|embed)"
 
 module.exports = {dispatch, getSession}

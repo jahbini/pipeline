@@ -97,9 +97,23 @@ resolveRunTag = (L) ->
 
     throw new Error "[#{L.stepName}] Missing quantized_model_dir param" unless modelDir?
 
-    rawOutput = L.callMLX 'generate',
-      model: modelDir
+    llmArgs =
+      op: 'generate'
+      modelDir: modelDir
       prompt: prompt
+    mlxConfig = L.param 'mlx', null
+    if mlxConfig? and typeof mlxConfig is 'object' and not Array.isArray(mlxConfig)
+      for own key, value of mlxConfig
+        continue unless value?
+        camel = switch key
+          when 'max-tokens' then 'maxTokens'
+          when 'temp', 'temperature' then 'temperature'
+          when 'top-p' then 'topP'
+          when 'system-prompt' then 'systemPrompt'
+          else key
+        llmArgs[camel] = value
+    result = await L.callLLM llmArgs
+    rawOutput = String(result.rawText ? result.text ? '')
 
     text = cleanGeneratedText prompt, rawOutput
     meta =

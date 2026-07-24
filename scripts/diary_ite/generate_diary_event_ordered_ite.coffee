@@ -249,16 +249,24 @@ resolveMode = (L) ->
 
 callDiaryGenerate = (L, modelDir, prompt, adapterPath, mlxConfig) ->
   args =
-    model: modelDir
+    op: 'generate'
+    modelDir: modelDir
     prompt: prompt
 
-  args["adapter-path"] = adapterPath if adapterPath?
+  args.adapterPath = adapterPath if adapterPath?
   if mlxConfig? and typeof mlxConfig is 'object' and not Array.isArray(mlxConfig)
     for own key, value of mlxConfig
       continue unless value?
-      args[key] = value
+      camel = switch key
+        when 'max-tokens' then 'maxTokens'
+        when 'temp', 'temperature' then 'temperature'
+        when 'top-p' then 'topP'
+        when 'system-prompt' then 'systemPrompt'
+        else key
+      args[camel] = value
 
-  L.callMLX 'generate', args
+  result = await L.callLLM args
+  String(result.rawText ? result.text ? '')
 
 @step =
   desc: "Generate a diary entry one event at a time in story order"
@@ -303,7 +311,7 @@ callDiaryGenerate = (L, modelDir, prompt, adapterPath, mlxConfig) ->
       chosenMatches = resolveEventMatches diaryKag, kind
       chosenEntries = if chosenMatches.length > 0 then chosenMatches else pickEventKagEntries diaryKag.entries, kind, event, 4
       prompt = buildEventPrompt kind, event, chosenEntries, priorSections, modeInfo.mode
-      rawOutput = callDiaryGenerate L, modelDir, prompt, adapterPath, mlxConfig
+      rawOutput = await callDiaryGenerate L, modelDir, prompt, adapterPath, mlxConfig
       sectionText = cleanGeneratedText prompt, rawOutput
 
       continue unless sectionText.length

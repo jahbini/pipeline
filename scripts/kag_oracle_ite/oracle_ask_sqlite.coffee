@@ -3,24 +3,25 @@
   =====================================================
   The workhorse of the oracle pipeline. For each new
   story without KAG, sends the oracle prompt through
-  MLX, parses the model's `#keyword --- headline` lines
-  into KAG row objects, and writes them back through
-  the `kagFor{...}.json` sqlite request key. Failed
-  parses increment `oracleFailureFor{...}` for backoff.
-  The longest of the kag_oracle_ite scripts.
+  the in-process LLM door (L.callLLM), parses the
+  model's `#keyword --- headline` lines into KAG row
+  objects, and writes them back through the
+  `kagFor{...}.json` sqlite request key. Failed parses
+  increment `oracleFailureFor{...}` for backoff.
 
-  Embedding pipeline (June 2026, agent-surface step 5+):
-  For each chunk, ALSO produce a 1024-dim Float32 embedding via
-  `mlx_lm cache_prompt`. The cache file is the K/V state of the
-  oracle prompt; the embedding is its last-layer V tensor mean-
-  pooled across positions. Two payloads, one model invocation —
-  see GPT/legacy_pipeline.md and tools/cache_embedding.coffee
-  (reached via S.tools.cache_embedding — see GPT/CONVENTIONS.md § "Tools").
+  Embedding pipeline: for each chunk, ALSO produce a
+  1024-dim Float32 embedding via L.callLLM({op:'embed'}).
+  Same last-layer-V mean-pool as before; the K/V cache
+  lives in-process now, no safetensors file detour.
+  Persisted via kagEmbeddingRegister request key (see
+  GPT/eval_ite/cache_embedding.md for the downstream
+  voice-similarity scoring consumer).
 ###
-# Temp safetensors files for `cache_prompt` go through `S.tools.tmp_file`
-# (mint a path + best-effort unlink). cache_embedding is reached as
-# `S.tools.cache_embedding.<fn>(...)`. The runner
-# resolves it BASE↠CWD↠EXEC. See GPT/CONVENTIONS.md § "Tools".
+# cache_embedding is still reached as
+# `S.tools.cache_embedding.<fn>(...)` — we only need its
+# floatArrayToBlob helper to serialize the Float32Array
+# into a SQLite BLOB. The safetensors reader path is
+# dead for this script now.
 cleanFragment = (value) ->
   text = String(value ? '').trim()
   text = text.replace /^\*+|\*+$/g, ''
@@ -150,52 +151,64 @@ isUsableEmotionList = (emotions) ->
   return false unless emotions? and typeof emotions is 'object'
   Object.keys(emotions).length >= 1
 
-runOracleOnce = (S, modelDir, prompt, adapterPath, mlxConfig, debugMlx = false) ->
-  # Two-call dance: cache_prompt builds the K/V state for the full
-  # oracle prompt, then generate continues from that cache. The cache
-  # file itself contains the K/V tensors we'll later pool into an
-  # embedding — return it alongside the parsed result so the caller
-  # can persist the embedding into kag_embeddings.
-  cacheFile = S.tools.tmp_file.make 'oracle_cache', 'safetensors'
+# Map the legacy `mlx:` block's kebab-case CLI flags onto the LLM
+# door's camelCase gopts. Unrecognized keys pass through as-is so a
+# recipe/override that already speaks camelCase (an `llm:` block)
+# also works. Values that mlx_lm CLI needed but callLLM does not
+# (e.g. max-kv-size) are silently dropped.
+MLX_TO_LLM_KEY = {
+  'max-tokens':    'maxTokens'
+  'temp':          'temperature'
+  'temperature':   'temperature'
+  'top-p':         'topP'
+  'topP':          'topP'
+  'seed':          'seed'
+  # dropped (session-level, not per-call): 'max-kv-size'
+}
 
-  cacheArgs =
-    model: modelDir
-    prompt: prompt
-    'prompt-cache-file': cacheFile
-  cacheArgs['adapter-path'] = adapterPath if adapterPath?
-  try S.callMLX 'cache_prompt', cacheArgs, debugMlx
-  catch err
-    throw new Error "cache_prompt failed: #{err?.message ? err}"
+buildGenerateOpts = (block) ->
+  return {} unless block? and typeof block is 'object' and not Array.isArray(block)
+  out = {}
+  for own key, value of block
+    continue unless value?
+    mapped = MLX_TO_LLM_KEY[key] ? key
+    continue if mapped is null                # explicit drop
+    out[mapped] = value
+  out
 
-  # Pool the cache into a 1024-dim Float32 embedding (last-layer V mean).
-  # If MLX didn't actually produce the file, the read throws ENOENT and
-  # the catch records embeddingError — the prior existsSync guard was
-  # redundant once we accepted that path.
+runOracleOnce = (S, modelDir, prompt, adapterPath, mlxConfig, debugLlm = false) ->
+  # Two calls to the in-process LLM door. Both are cold-KV per call
+  # (session_api.embed disposes the cache before and after; generate
+  # runs in the same session but with a fresh prefill because the cache
+  # was cleared). This matches the human-directed rule: the oracle sees
+  # no cross-story context, only the one chunk it's classifying.
   embedding = null
   embeddingError = null
+  embedParams =
+    op:       'embed'
+    modelDir: modelDir
+    prompt:   prompt
+  embedParams.adapterPath = adapterPath if adapterPath?
   try
-    embedding = S.tools.cache_embedding.embeddingFromCacheFile cacheFile
+    embedResult = await S.callLLM embedParams, debugLlm
+    embedding = embedResult?.embedding ? null
+    embeddingError = "embed returned no .embedding" unless embedding?
   catch err
     embeddingError = String(err?.message ? err)
-    console.error "[oracle_ask_sqlite] embedding extract failed: #{embeddingError}"
+    console.error "[oracle_ask_sqlite] embed failed: #{embeddingError}"
 
-  # Generate using the cached prompt — empty --prompt continues from
-  # where the cache left off, so the assistant produces its response.
-  genArgs =
-    model: modelDir
-    prompt: ' '   # mlx_lm needs a non-empty string; one space is benign continuation
-    'prompt-cache-file': cacheFile
-  genArgs['adapter-path'] = adapterPath if adapterPath?
-  if mlxConfig? and typeof mlxConfig is 'object' and not Array.isArray(mlxConfig)
-    for own key, value of mlxConfig
-      continue unless value?
-      genArgs[key] = value
+  genOpts = buildGenerateOpts mlxConfig
+  genParams =
+    op:       'generate'
+    modelDir: modelDir
+    prompt:   prompt
+    raw:      true                             # oracle prompt is already fully rendered
+  genParams.adapterPath = adapterPath if adapterPath?
+  for own k, v of genOpts
+    genParams[k] = v
 
-  raw = S.callMLX 'generate', genArgs, debugMlx
-
-  # Cleanup the temp cache file. Best-effort — leaving stragglers in
-  # /tmp is harmless if the process dies before this runs.
-  S.tools.tmp_file.remove cacheFile
+  genResult = await S.callLLM genParams, debugLlm
+  raw = String(genResult?.rawText ? genResult?.text ? '')
 
   parsed = extractJSON raw
   filtered = filterEmotions parsed
@@ -360,7 +373,7 @@ mergeEmotionLists = (rows) ->
 
       for group in storyGroups
         groupPrompt = renderPrompt promptText, group.text
-        attempt1 = runOracleOnce S, modelDir, groupPrompt, adapterPath, mlxConfig
+        attempt1 = await runOracleOnce S, modelDir, groupPrompt, adapterPath, mlxConfig
         finalAttempt = attempt1
         retryAttempts = []
 
@@ -371,7 +384,7 @@ mergeEmotionLists = (rows) ->
 
           for chunk in retryChunks
             chunkPrompt = renderPrompt promptText, chunk.text
-            attempt2 = runOracleOnce S, modelDir, chunkPrompt, adapterPath, mlxConfig, true
+            attempt2 = await runOracleOnce S, modelDir, chunkPrompt, adapterPath, mlxConfig, true
             usable = isUsableEmotionList(attempt2.filtered)
             retryAttempts.push
               group_index: group.group_index

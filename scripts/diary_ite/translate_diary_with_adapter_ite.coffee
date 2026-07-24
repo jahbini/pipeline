@@ -107,17 +107,25 @@ renderPrompt = (template, storyID, diaryText) ->
 
     prompt = renderPrompt promptTemplate, storyID, baseDiaryText
 
-    mlxArgs =
-      model: modelDir
+    llmArgs =
+      op: 'generate'
+      modelDir: modelDir
       prompt: prompt
-      "adapter-path": adapterPath
+      adapterPath: adapterPath
 
     if mlxConfig? and typeof mlxConfig is 'object'
       for own key, value of mlxConfig
         continue unless value?
-        mlxArgs[key] = value
+        camel = switch key
+          when 'max-tokens' then 'maxTokens'
+          when 'temp', 'temperature' then 'temperature'
+          when 'top-p' then 'topP'
+          when 'system-prompt' then 'systemPrompt'
+          else key
+        llmArgs[camel] = value
 
-    rawOutput = L.callMLX 'generate', mlxArgs
+    result = await L.callLLM llmArgs
+    rawOutput = String(result.rawText ? result.text ? '')
     text = cleanGeneratedText prompt, rawOutput
 
     meta =

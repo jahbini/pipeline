@@ -1,43 +1,35 @@
 # =====================================================================
-#                     base_ite.yaml  —  the include base for _ite recipes
+#   base_ite.yaml  —  the canonical bootstrap recipe
 # =====================================================================
 #
-#   Every `_ite.yaml` recipe in this directory starts with `include:
-#   [base_ite.yaml]`. This file is therefore the canonical shape of an
-#   _ite pipeline's *common defaults* — shared `run:` block and shared
-#   artifact wiring. Steps live in the recipes themselves.
+#   The authoritative base/bootstrap chain for @jahbini/pipeline. Four
+#   steps, run inside a pipe's CWD (pipes/<pipe>/):
 #
-#   `run:` block — pipeline-global params
-#   ----------------------------------------------------------------
-#   Anything under `run:` is written to the Memo key
-#   `params/_global.yaml` and is visible to every step via
-#   `L.param(key)` (with step-local params taking precedence). Use
-#   `run:` for things every step shares: the base model, the output
-#   directory, the debug toggles.
+#     1. reset_base_environment_ite — wipe stale training/out artifacts
+#        and fire the sqliteResetAll request key so runtime.sqlite is
+#        truncated on the next meta touch.
+#     2. download_model — canonical git+git-lfs HuggingFace downloader
+#        (scripts/model/download_model.coffee, 188-line hardened path).
+#        NEVER the HF CLI, NEVER Python.
+#     3. quantize_model — MLX 4-bit convert. Idempotent on re-run.
+#     4. seed_story_sqlite — ingest markdown stories from data/*.md into
+#        the sqlite stories table.
 #
-#   `debug_s` / `debug_mlx` / `debug_sql` are the three debug knobs
-#   built into the runner:
-#     - debug_s   → per-step ledger trace (need/make/param/peek lines)
-#     - debug_mlx → log full MLX subprocess args before each callMLX
-#     - debug_sql → log every sqlite request key and projection
+#   After a green run, the pipe has:
+#     - build/model/          (raw HF download; can be rm -rf'd)
+#     - build/model4/         (self-contained quantized MLX; downstream
+#                              recipes reference this)
+#     - runtime.sqlite:stories populated + zero KAG rows (oracle will
+#                              start over on next oracle_ite run)
 #
-#   `artifacts:` block — the wiring table
-#   ----------------------------------------------------------------
-#   Each artifact has either a `source:` (file the artifact is read
-#   from), a `target:` (file the artifact is written to), or a
-#   `value:` (literal). Steps only see artifact *names* in their
-#   `needs:`/`makes:`; the runner translates name → file via this
-#   table. Add a new artifact here once, reference it from any step.
+#   Project overrides:
+#     - Change `stories_md.source` if your markdown lives elsewhere.
+#     - Change `run.model` if you're bootstrapping a different HF repo.
+#     - Set `download_model.download_dir` / `quantize_model.src_dir` /
+#       `quantized_dir` to move the on-disk layout.
 #
-#   **Project bootstrap is intentionally absent.** Earlier revisions
-#   shipped four bootstrap steps (reset_base_environment_ite,
-#   download_model, quantize_model, seed_story_sqlite) that referenced
-#   scripts in `scripts/story/*` and `scripts/kag_oracle/*` —
-#   writeStory-specific code not bundled with the package. A project
-#   that needs that bootstrap chain should add its own steps in its
-#   own `config/base_ite.yaml` (project `config/` wins on conflict),
-#   or copy the upstream writeStory versions into `scripts/story/`
-#   and `scripts/kag_oracle/` and re-add the step blocks below.
+#   No other recipe `include:`s base_ite, so these steps don't bleed
+#   into diary_ite / oracle_ite / lora_ite / eval_ite runs.
 #
 run:
   model: Qwen/Qwen3-4B-Instruct-2507
@@ -50,5 +42,35 @@ run:
   debug_sql: false
 
 artifacts:
+  stories_md:
+    source: data/stories.md
   story_seed_ids:
     target: out/story_seed_ids.json
+
+reset_base_environment_ite:
+  run: base_ite/reset_base_environment_ite.coffee
+  depends_on: []
+  needs: []
+  makes: []
+
+download_model:
+  run: model/download_model.coffee
+  depends_on: [reset_base_environment_ite]
+  needs: []
+  makes: []
+  download_dir: build/model
+
+quantize_model:
+  run: model/quantize_model.coffee
+  depends_on: [download_model]
+  needs: []
+  makes: []
+  src_dir: build/model
+  quantized_dir: build/model4
+  q_bits: 4
+
+seed_story_sqlite:
+  run: kag_oracle_ite/seed_story_sqlite.coffee
+  depends_on: [quantize_model]
+  needs: [stories_md]
+  makes: [story_seed_ids]

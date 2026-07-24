@@ -169,6 +169,63 @@ createSession = (opts = {}) ->
       peakMemGB:       (mx.getPeakMemory?() ? 0) / (1024*1024*1024)
       activeMemGB:     (mx.getActiveMemory?() ? 0) / (1024*1024*1024)
 
+    # Embed a prompt into a fixed-dim voice fingerprint. Runs the prompt
+    # through the model once, extracts last-layer V from the KV cache,
+    # mean-pools across the prompt's seq axis, returns Float32Array
+    # of length (kv_heads × head_dim). Same shape and semantics as
+    # `mlx_lm cache_prompt` + tools/cache_embedding.coffee's
+    # embeddingFromCacheFile — no disk detour.
+    #
+    # KV cache is disposed before and after so the fingerprint is a
+    # pure prompt signal (no cross-call contamination).
+    embed: (userText, gopts = {}) ->
+      systemPrompt = gopts.systemPrompt ? null
+      prompt = if gopts.raw then userText else formatChatML(userText, systemPrompt)
+
+      mx.dispose?(llm.kvCache) if llm.kvCache
+      llm.kvCache = null
+
+      promptEmbeds = await llm.encode(prompt)
+      mx.eval promptEmbeds
+      promptTokens = promptEmbeds.shape[1]
+
+      # Consume exactly one iteration so prefill happens and llm.kvCache
+      # gets populated via the library's normal path. The sampled token
+      # itself is discarded; we only care about the KV state it produced.
+      for await pieces from llm.generate(promptEmbeds, {maxTokens: 1, topP: 1.0, temperature: 0.0})
+        break
+
+      cache = llm.kvCache
+      throw new Error "embed: kvCache empty after prefill" unless cache?.length > 0
+      layer = cache[cache.length - 1]
+      valuesTensor = layer.values                            # [B, kv_heads, capacity, head_dim]
+      offset = layer.offset ? valuesTensor.shape[2]
+
+      # Slice to just the prompt positions (drop the +1 sampled token so
+      # the fingerprint exactly matches the cache_prompt file version).
+      keep = Math.min(promptTokens, offset)
+      keep = 1 if keep < 1
+      promptV = mx.slice(valuesTensor, [0], [2], [keep])     # [B, kv_heads, keep, head_dim]
+      pooled = promptV.mean(2)                               # [B, kv_heads, head_dim]
+      flat = pooled.astype(mx.float32).flatten()             # [B * kv_heads * head_dim]
+      mx.eval flat
+      typed = flat.toTypedArray()                            # Float32Array (view into mlx buffer)
+
+      # Copy so the returned Float32Array owns its memory (safe after
+      # we dispose the tensors and clear the mlx cache below).
+      out = new Float32Array(typed.length)
+      out.set(typed)
+
+      mx.dispose?(llm.kvCache) if llm.kvCache
+      llm.kvCache = null
+      mx.clearCache?()
+
+      embedding: out
+      promptTokens: promptTokens
+      dim: out.length
+      peakMemGB:   (mx.getPeakMemory?() ? 0) / (1024*1024*1024)
+      activeMemGB: (mx.getActiveMemory?() ? 0) / (1024*1024*1024)
+
     dispose: ->
       # Release the persistent KV cache the LLM instance may hold.
       mx.dispose?(llm.kvCache) if llm.kvCache
