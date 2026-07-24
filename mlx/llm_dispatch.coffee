@@ -14,9 +14,10 @@
 #   in-process only; the grandfathered Python spawn is L.callMLX.
 
 path = require 'path'
-{createSession} = require './session_api'
-{trainLoRA}     = require './lora/train'
-{fuseAdapter}   = require './lora/fuse'
+{createSession}     = require './session_api'
+{trainLoRA}         = require './lora/train'
+{fuseAdapter}       = require './lora/fuse'
+{quantizeModelDir}  = require './quantize'
 
 # --- session cache (per-modelDir::adapterPath) -----------------------------
 sessions = new Map()
@@ -77,6 +78,21 @@ embedOp = (params) ->
     systemPrompt: params.systemPrompt ? null
     raw:          params.raw          ? false
 
+quantizeOp = (params) ->
+  throw new Error "callLLM(quantize): 'sourceDir' required" unless params.sourceDir?
+  throw new Error "callLLM(quantize): 'targetDir' required" unless params.targetDir?
+
+  opts = {}
+  opts.bits      = params.bits      if params.bits?
+  opts.groupSize = params.groupSize if params.groupSize?
+  opts.mode      = params.mode      if params.mode?
+  opts.log       = params.log       if typeof params.log is 'function'
+
+  # quantizeModelDir is synchronous (pure MLX tensor ops + fs). No await
+  # needed, but wrap in Promise.resolve so the dispatcher's caller can
+  # `await` uniformly with the other ops.
+  Promise.resolve quantizeModelDir(params.sourceDir, params.targetDir, opts)
+
 # --- dispatcher ------------------------------------------------------------
 dispatch = (params) ->
   throw new Error "callLLM: params must be an object" unless params? and typeof params is 'object'
@@ -85,6 +101,7 @@ dispatch = (params) ->
     when 'train'    then trainOp params
     when 'fuse'     then fuseOp params
     when 'embed'    then embedOp params
-    else throw new Error "callLLM: unknown op '#{params.op}' (expected train|generate|fuse|embed)"
+    when 'quantize' then quantizeOp params
+    else throw new Error "callLLM: unknown op '#{params.op}' (expected train|generate|fuse|embed|quantize)"
 
 module.exports = {dispatch, getSession}

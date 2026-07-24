@@ -100,6 +100,15 @@ quantizeModelDir = (sourceDir, targetDir, opts = {}) ->
   out = {}
   nQuant = 0
   nCopy = 0
+  pending = []
+  EVAL_BATCH = 32     # tensors per Metal command buffer — small enough
+                      # to avoid kIOGPUCommandBufferCallbackErrorTimeout
+                      # on a 4B-param model, large enough to amortize
+                      # per-buffer overhead.
+  flushPending = ->
+    return unless pending.length
+    mx.eval pending
+    pending.length = 0
   for name, arr of weights
     if isQuantizeCandidate(name, arr)
       [wq, scales, biases] = mx.quantize arr, groupSize, bits
@@ -107,12 +116,15 @@ quantizeModelDir = (sourceDir, targetDir, opts = {}) ->
       out["#{base}.weight"] = wq
       out["#{base}.scales"] = scales
       out["#{base}.biases"] = biases
+      pending.push wq, scales, biases
       nQuant += 1
     else
       out[name] = arr
+      pending.push arr
       nCopy += 1
-  # Force realization before saving (arrays are lazy).
-  mx.eval Object.values(out)
+    if pending.length >= EVAL_BATCH
+      flushPending()
+  flushPending()
   logger "  quantized #{nQuant} tensors, copied #{nCopy} verbatim (#{Date.now()-t1}ms)"
 
   # ---- 3. Write model.safetensors --------------------------------------
