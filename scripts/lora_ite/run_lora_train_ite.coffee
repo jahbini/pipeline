@@ -70,6 +70,8 @@
       'learning-rate':   'learningRate'
       'lora-rank':       'loraRank'
       'lora-alpha':      'loraAlpha'
+      'num-layers':      'loraLayers'
+      'lora-layers':     'loraLayers'
       'steps-per-report':'stepsPerReport'
       'steps-per-eval':  'stepsPerEval'
       'save-every':      'saveEvery'
@@ -137,6 +139,7 @@
       learning_rate:  llmArgs.learningRate   ? null
       lora_rank:      llmArgs.loraRank       ? null
       lora_alpha:     llmArgs.loraAlpha      ? null
+      lora_layers:    llmArgs.loraLayers     ? null
 
     console.log "[run_lora_train_ite] train rows:", trainRows.length
     console.log "[run_lora_train_ite] valid rows:", validRows.length

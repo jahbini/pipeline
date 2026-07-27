@@ -345,7 +345,9 @@
       cursor: wait;
     }
     .danger-button {
-      background: var(--bad) !important;
+      background: #fdecef !important;
+      color: #9c2733 !important;
+      border-color: #d5a1a8 !important;
     }
     .hint {
       font-size: 13px;
@@ -451,6 +453,9 @@
 
         <section class="panel">
           <h2>Outputs</h2>
+          <div class="button-row">
+            <button id="clear-output-button" class="danger-button" type="button">Delete Output Files</button>
+          </div>
           <div id="out-files" class="files"></div>
         </section>
 
@@ -461,6 +466,9 @@
 
         <section class="panel" data-default-collapsed="1">
           <h2>Logs</h2>
+          <div class="button-row">
+            <button id="clear-logs-button" class="danger-button" type="button">Delete Log Files</button>
+          </div>
           <div id="log-files" class="files"></div>
         </section>
 
@@ -894,7 +902,7 @@
       if (elapsedMs == null || Number.isNaN(elapsedMs) || elapsedMs < 0) return '';
       const seconds = Math.floor(elapsedMs / 1000);
       const millis  = Math.floor(elapsedMs % 1000);
-      return `${seconds}s ${String(millis).padStart(3, '0')}ms`;
+      return `${String(seconds).padStart(3, '0')}.${String(millis).padStart(3, '0')}S`;
     }
 
     function formatElapsedSecMs(row) {
@@ -1443,6 +1451,42 @@
           throw new Error(data.error || 'clear pipeline state failed');
         }
         result.textContent = data.removed ? 'pipeline.json erased' : 'no pipeline.json present';
+        await refresh();
+      } catch (err) {
+        result.textContent = String(err.message || err);
+      }
+    }
+
+    async function clearLogs() {
+      const result = byId('launch-result');
+      try {
+        const res = await fetch('/api/clear_logs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'clear logs failed');
+        }
+        result.textContent = `deleted ${data.removed} log file(s)`;
+        await refresh();
+      } catch (err) {
+        result.textContent = String(err.message || err);
+      }
+    }
+
+    async function clearOutput() {
+      const result = byId('launch-result');
+      try {
+        const res = await fetch('/api/clear_output', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'clear output failed');
+        }
+        result.textContent = `deleted ${data.removed} output entr${data.removed === 1 ? 'y' : 'ies'}`;
         await refresh();
       } catch (err) {
         result.textContent = String(err.message || err);

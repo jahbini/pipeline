@@ -587,19 +587,33 @@ class StepStateStore
       done: false
       started_at: new Date().toISOString()
 
+  # Preserve started_at from the running state and record duration_ms so the UI
+  # keeps the elapsed time after a step finishes/fails (write() replaces the
+  # whole file, so without this started_at would be dropped and the UI blanks).
+  _finishFields: (n, finishedAt) ->
+    prev = @read(n) ? {}
+    startedAt = prev.started_at ? null
+    durationMs =
+      if startedAt?
+        ms = new Date(finishedAt).getTime() - new Date(startedAt).getTime()
+        if Number.isFinite(ms) and ms >= 0 then ms else (prev.duration_ms ? null)
+      else
+        prev.duration_ms ? null
+    { started_at: startedAt, finished_at: finishedAt, duration_ms: durationMs }
+
   markDone: (n, extra={}) ->
-    @write n, Object.assign {}, extra,
+    finishedAt = new Date().toISOString()
+    @write n, Object.assign {}, extra, @_finishFields(n, finishedAt),
       status: 'done'
       done: true
       dirty: false
-      finished_at: new Date().toISOString()
 
   markFailed: (n, errMsg, extra={}) ->
-    @write n, Object.assign {}, extra,
+    finishedAt = new Date().toISOString()
+    @write n, Object.assign {}, extra, @_finishFields(n, finishedAt),
       status: 'failed'
       done: false
       error: String(errMsg ? 'unknown error')
-      finished_at: new Date().toISOString()
 
   clearRestartHere: (n) ->
     st = @read(n)

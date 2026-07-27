@@ -53,12 +53,31 @@ makeMatcher = (targetSuffixes = DEFAULT_TARGETS) ->
 # LoRA A/B parameters of each wrapped layer.
 # Returns array of {path, wrapper} for downstream saving.
 applyLoRA = (model, opts = {}) ->
-  rank    = opts.rank    ? 8
-  alpha   = opts.alpha   ? 16
-  dropout = opts.dropout ? 0.0
-  targets = opts.targets ? DEFAULT_TARGETS
+  rank      = opts.rank    ? 8
+  alpha     = opts.alpha   ? 16
+  dropout   = opts.dropout ? 0.0
+  targets   = opts.targets ? DEFAULT_TARGETS
+  numLayers = opts.numLayers ? opts.loraLayers ? null
 
-  matcher = makeMatcher(targets)
+  baseMatcher = makeMatcher(targets)
+
+  # numLayers restricts LoRA to the TOP N transformer blocks (highest indices,
+  # nearest the output) — mlx-lm's `--num-layers` semantics. Fewer wrapped
+  # blocks = less optimizer/grad memory and less capacity to collapse. NO
+  # fallback: if a count is requested but the block array can't be located,
+  # fail loudly rather than silently wrapping every block (the pre-wiring bug
+  # this closes — num_layers used to be accepted and ignored).
+  totalBlocks = model.model?.layers?.length ? null
+  matcher = baseMatcher
+  if numLayers? and numLayers > 0
+    throw new Error "applyLoRA: numLayers=#{numLayers} requested but block count is unknown (model.model.layers missing)" unless totalBlocks? and totalBlocks > 0
+    threshold = Math.max(0, totalBlocks - numLayers)
+    matcher = (fullKey, child) ->
+      return false unless baseMatcher(fullKey, child)
+      m = fullKey.match /(?:^|\.)layers\.(\d+)(?:\.|$)/
+      return false unless m?
+      Number(m[1]) >= threshold
+
   wrapper = (linear, fullKey) -> LoRALinear.wrap linear, {rank, alpha, dropout}
 
   wrapped = walkAndWrap(model, '', matcher, wrapper)
@@ -68,7 +87,7 @@ applyLoRA = (model, opts = {}) ->
   for {wrapper: lora} in wrapped
     lora.unfreeze false, ['loraA', 'loraB'], false
 
-  {rank, alpha, dropout, targets, wrapped, count: wrapped.length}
+  {rank, alpha, dropout, targets, wrapped, count: wrapped.length, num_layers: (numLayers ? null), total_blocks: totalBlocks}
 
 # --- adapter save/load -----------------------------------------------------
 # On-disk layout (mlx-lm compatible naming; extension safetensors instead of npz):
@@ -101,6 +120,7 @@ saveAdapter = (adapterDir, wrappedInfo) ->
     alpha:         wrappedInfo.alpha
     dropout:       wrappedInfo.dropout
     targets:       wrappedInfo.targets
+    num_layers:    wrappedInfo.num_layers ? null
     wrapped_paths: paths
   fs.writeFileSync path.join(adapterDir, 'adapter_config.json'), JSON.stringify(config, null, 2) + '\n'
   {tensorCount: Object.keys(tensors).length, adapterDir}
@@ -108,11 +128,14 @@ saveAdapter = (adapterDir, wrappedInfo) ->
 # Load adapter into an already-wrapped model. Skips paths not present in the
 # adapter (allows loading partial or in-progress adapters). Throws if the
 # adapter has paths that don't exist in the model.
-loadAdapter = (adapterDir, wrappedInfo) ->
+# weightsPath overrides the default adapters.safetensors so a specific saved
+# checkpoint (e.g. build/adapter/0000100_adapters.safetensors) can be loaded
+# against the dir's shared adapter_config.json.
+loadAdapter = (adapterDir, wrappedInfo, weightsPath = null) ->
   configPath = path.join adapterDir, 'adapter_config.json'
-  weightsPath = path.join adapterDir, 'adapters.safetensors'
+  weightsPath ?= path.join adapterDir, 'adapters.safetensors'
   throw new Error "missing adapter_config.json in #{adapterDir}" unless fs.existsSync configPath
-  throw new Error "missing adapters.safetensors in #{adapterDir}" unless fs.existsSync weightsPath
+  throw new Error "missing adapter weights #{weightsPath}" unless fs.existsSync weightsPath
 
   weights = mx.load weightsPath
   loaded = 0

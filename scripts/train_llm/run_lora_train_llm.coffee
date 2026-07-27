@@ -94,6 +94,7 @@
       learning_rate:   llmArgs.learningRate ? null
       lora_rank:       llmArgs.loraRank ? null
       lora_alpha:      llmArgs.loraAlpha ? null
+      lora_layers:     llmArgs.loraLayers ? null
       resume_file:     llmArgs.resumeFile ? null
 
     L.make 'lora_stdout',     stdout

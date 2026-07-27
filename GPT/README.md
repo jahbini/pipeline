@@ -48,14 +48,16 @@ Rules:
   `max_tokens=2000`, and MLX/OMP/VECLIB/RAYON thread-count runs at 8 and 12;
   normal tests should exercise the active current path.
 - repository-level runtime verification is coordinated through root
-  `test.sh`. The script is committed and stable — it rebuilds the native
-  addon (`npx node-gyp rebuild`) and runs the 64-token gypsy generation
-  probe at `test/helpers/native_64_mlx_lazy_generation_probe.coffee`. Treat
-  it as the canonical "did the build work" command. Task-specific or
-  exploratory test helpers go under `test/` (which is gitignored). When a
-  test step is added to `test.sh`, record every step's `.log` and `.err`
-  output under `test/logs/<run_id>/` so the result is auditable. If Python
-  is ever needed, the script must activate `.venv` first with
+  `test.sh`. The script is local-only and gitignored — never committed —
+  but treated as stable: it rebuilds the native addon (`npx node-gyp
+  rebuild`) and runs the 64-token gypsy generation probe at
+  `test/helpers/native_64_mlx_lazy_generation_probe.coffee`. Treat it as
+  the canonical "did the build work" command. Both `test.sh` and the
+  whole `test/` tree (task-specific and exploratory helpers) are
+  gitignored — the verification harness lives only in the working tree.
+  When a test step is added to `test.sh`, record every step's `.log` and
+  `.err` output under `test/logs/<run_id>/` so the result is auditable. If
+  Python is ever needed, the script must activate `.venv` first with
   `source .venv/bin/activate`.
 
 Current repository assumptions worth preserving:

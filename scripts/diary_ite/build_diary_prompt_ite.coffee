@@ -50,6 +50,28 @@ renderEventSupport = (kind, payload) ->
       lines.push "  - support cue"
   lines.join "\n"
 
+# Render the actual story CHUNKS (Jim's own words) collected per diary event,
+# capped to keep the prompt bounded. These are the passages collect_diary_kag_ite
+# matched for each event — reference voice/detail, NOT plot to copy.
+excerpt = (text, cap) ->
+  s = String(text ? '').replace(/\s+/g, ' ').trim()
+  return s if not (cap > 0) or s.length <= cap
+  cut = s.slice(0, cap)
+  lastSpace = cut.lastIndexOf ' '
+  cut = cut.slice(0, lastSpace) if lastSpace > cap * 0.6
+  "#{cut}…"
+
+renderEventPassages = (kind, payload, cap) ->
+  return null unless payload? and typeof payload is 'object'
+  passages = []
+  for match in (payload.matches ? [])
+    txt = excerpt match?.chunk_text, cap
+    passages.push txt if txt.length
+  return null unless passages.length
+  lines = ["#{kind}:"]
+  lines.push "  “#{p}”" for p in passages
+  lines.join "\n"
+
 coerceJSON = (value) ->
   return value unless typeof value is 'string'
   try
@@ -120,6 +142,17 @@ readArtifactTarget = (L, artifactKey) ->
       row = renderEventSupport kind, diaryKag?.events?[kind]
       supportLines.push row if row?
 
+    # Fold the actual matched CHUNKS (Jim's own words) in per event. Toggle with
+    # include_chunk_passages (default on); chunk_excerpt_chars caps each passage
+    # (0 = full text) so 5 events × per_event_match_limit chunks stay bounded.
+    includePassages = L.param('include_chunk_passages', true) isnt false
+    excerptCap = Number(L.param('chunk_excerpt_chars', 700)) or 0
+    passageLines = []
+    if includePassages
+      for kind in ['scene', 'arrival', 'disturbance', 'reflection', 'realization']
+        row = renderEventPassages kind, diaryKag?.events?[kind], excerptCap
+        passageLines.push row if row?
+
     prompt = [
       "You are writing in the narrative voice of Jim from St. John's."
       ""
@@ -131,6 +164,7 @@ readArtifactTarget = (L, artifactKey) ->
       "- Do not introduce plot contradictions"
       "- Add sensory detail and reflective narration"
       "- Keep the voice observational, slightly humorous, and reflective"
+      "- Echo the cadence and texture of the reference passages below; borrow phrasing sparingly, never whole sentences, and never their plots"
       "- Return only the finished diary entry"
       ""
       "Diary events:"
@@ -139,12 +173,16 @@ readArtifactTarget = (L, artifactKey) ->
       "Event support cues:"
       if supportLines.length then supportLines.join("\n\n") else "- none"
       ""
+      "Reference passages from Jim's own writing (voice + concrete detail; do NOT copy their plots), by event:"
+      if passageLines.length then passageLines.join("\n\n") else "- none"
+      ""
       "KAG cues:"
       if kagLines.length then kagLines.join("\n") else "- none"
       "Write the events in the following order: scene, arrival, disturbance, reflection, realization. make each one a separate paragraph in your writing."
     ].join "\n"
 
-    console.log "[build_diary_prompt_ite] prompt chars:", prompt.length
+    console.log "[build_diary_prompt_ite] prompt chars:", prompt.length,
+      "| chunk passages:", (if includePassages then passageLines.length else "off")
 
     L.make 'diary_prompt_text', prompt
     L.done()

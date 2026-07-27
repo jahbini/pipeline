@@ -354,6 +354,8 @@ KNOWN_ENDPOINTS = [
   { method: 'POST', path: '/api/control',                          summary: 'write UI-control values (recipe selector, continuous flag, …)' }
   { method: 'POST', path: '/api/human_override',                   summary: 'write the human override YAML for the active recipe' }
   { method: 'POST', path: '/api/clear_pipeline_state',             summary: 'erase pipeline.json (death record)' }
+  { method: 'POST', path: '/api/clear_logs',                       summary: 'delete pipe logs/ pipe_HH_MM.(log|err) files' }
+  { method: 'POST', path: '/api/clear_output',                     summary: 'delete contents of the pipe out/ dir' }
   { method: 'POST', path: '/api/switch_pipe',                      summary: 'switch the UI to a different pipe (or restart in place)' }
   { method: 'POST', path: '/api/merge_pipe',                       summary: 'merge sqlite + adapter from another machine (project-specific)' }
   { method: 'POST', path: '/api/shutdown_ui',                      summary: 'stop the UI server process' }
@@ -616,6 +618,26 @@ deleteByPath = (root, dottedPath) ->
 
 loadDropdownOptions = (specPath) ->
   return [] unless typeof specPath is 'string' and specPath.length
+  # `adapters` — list the LoRA adapters available in this pipe's build/ dir
+  # (any `adapter` / `adapter_*` subdir holding an adapter_config.json), plus
+  # a base (no-adapter) option. Powers the adapter-picker dropdown; the chosen
+  # value is written to the step's `adapter_path` override.
+  if specPath is 'adapters'
+    buildDir = path.join CWD, 'build'
+    rows = [{ key: '', label: '(base — no adapter)' }]
+    if fs.existsSync buildDir
+      for name in fs.readdirSync(buildDir).sort() when /^adapter($|_)/.test(name)
+        full = path.join buildDir, name
+        continue unless fs.statSync(full).isDirectory() and fs.existsSync(path.join(full, 'adapter_config.json'))
+        dirLabel = if name is 'adapter' then 'adapter (current)' else name
+        rows.push { key: "build/#{name}", label: dirLabel }
+        # Also surface each saved checkpoint (NNNNNNN_adapters.safetensors) as a
+        # selectable option so a specific training step can be compared. The
+        # loader (session_api) loads the file against the dir's adapter_config.
+        base = if name is 'adapter' then 'adapter' else name
+        for ckpt in fs.readdirSync(full).sort() when /^\d+_adapters\.safetensors$/.test(ckpt)
+          rows.push { key: "build/#{name}/#{ckpt}", label: "#{base} @#{parseInt(ckpt, 10)}" }
+    return rows
   if specPath is 'db/kag_keywords'
     dbPath = path.join CWD, 'runtime.sqlite'
     fallbackRows = ({ key, label: key } for key in DEFAULT_KAG_KEYWORDS)
@@ -1842,6 +1864,37 @@ handlePutScript = (req, res, query) ->
     resolved: runnerExports.resolveStepScript(rel)
     candidates: runnerExports.stepScriptCandidates(rel)
 
+handleClearLogs = (req, res) ->
+  logDir = path.join(CWD, 'logs')
+  removed = 0
+  if fs.existsSync(logDir)
+    for name in fs.readdirSync(logDir) when /^pipe_\d{2}_\d{2}\.(log|err)$/.test(name)
+      try
+        fs.unlinkSync path.join(logDir, name)
+        removed += 1
+      catch
+        null
+  sendJson res, 200,
+    ok: true
+    removed: removed
+
+# Delete the contents of the pipe's out/ dir (top-level files and subdirs like
+# out/eval/). out/ is transient single-run scratch — the next run regenerates
+# what it needs — so this just clears the Outputs panel's accumulated files.
+handleClearOutput = (req, res) ->
+  outDir = path.join(CWD, 'out')
+  removed = 0
+  if fs.existsSync(outDir)
+    for name in fs.readdirSync(outDir)
+      try
+        fs.rmSync path.join(outDir, name), { recursive: true, force: true }
+        removed += 1
+      catch
+        null
+  sendJson res, 200,
+    ok: true
+    removed: removed
+
 handleClearPipelineState = (req, res) ->
   pipelinePath = path.join(CWD, 'pipeline.json')
   removed = false
@@ -2042,6 +2095,16 @@ server = http.createServer (req, res) ->
         error: String(err?.message ? err)
   if url is '/api/clear_pipeline_state' and req.method is 'POST'
     return Promise.resolve(handleClearPipelineState(req, res)).catch (err) ->
+      sendJson res, 500,
+        ok: false
+        error: String(err?.message ? err)
+  if url is '/api/clear_logs' and req.method is 'POST'
+    return Promise.resolve(handleClearLogs(req, res)).catch (err) ->
+      sendJson res, 500,
+        ok: false
+        error: String(err?.message ? err)
+  if url is '/api/clear_output' and req.method is 'POST'
+    return Promise.resolve(handleClearOutput(req, res)).catch (err) ->
       sendJson res, 500,
         ok: false
         error: String(err?.message ? err)

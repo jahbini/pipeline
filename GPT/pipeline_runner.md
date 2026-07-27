@@ -270,6 +270,13 @@ The full agent contract built atop this is in
 - `state/step-<name>.json` records what happened; `params/<step>.yaml` records
   the step's resolved inputs (incl. `run_resolved`). A human diagnoses by
   reading both.
+- Timing fields: `markRunning` writes `started_at`; `markDone`/`markFailed`
+  preserve it and record `duration_ms` (via `_finishFields`, which reads the
+  prior state — `write()` replaces the whole file, so without this `started_at`
+  would be lost). This is what lets the UI KEEP a step's elapsed time after it
+  finishes/fails (the client prefers `duration_ms`, else `finished_at −
+  started_at`). Before 2026-07-27 the finished file had only `finished_at`, so
+  the UI blanked the elapsed column on done/fail.
 - Crash-resume is intact and is NOT a precheck: a step restored as `done` is
   skipped (keyed by step name, consulted only at startup). Changing a step's
   `run:` does not auto-invalidate its state — by design. The clue lives in
@@ -308,5 +315,6 @@ The full agent contract built atop this is in
 `main()` runs only under `require.main is module`; the merge/resolution
 internals are exported, so a harness can `require` the runner and exercise
 `resolveOverrideLayers` / `createExperimentObject` / `resolveStepScript` /
-`stepScriptCandidates` without tripping the Python gate. See `test/test.sh`
-+ `test/merge_probe.coffee` (gitignored scratch).
+`stepScriptCandidates` without tripping the Python gate. Driven from the
+repo-root `./test.sh`, which invokes `test/merge_probe.coffee` (both
+gitignored scratch — the harness lives only in the working tree).

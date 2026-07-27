@@ -8,6 +8,25 @@
   `splitParagraphs` heuristic is what keeps a single
   long story from blowing the model's context window.
 ###
+fs = require 'fs'
+path = require 'path'
+
+# Resolve the model's end-of-turn token STRING from its tokenizer config, so
+# every emitted training row can be terminated with it — this is what teaches
+# the adapter to STOP. Read from tokenizer_config.json (the model's own
+# `eos_token`) rather than hardcoding '<|im_end|>' so a different base model's
+# EOT travels correctly. `eos_token` may be a bare string or an AddedToken
+# object ({content: "..."}); handle both. No fallback: if it can't be resolved,
+# fail loudly rather than silently emit rows with no stop signal.
+resolveEotToken = (modelDir) ->
+  cfgPath = path.join modelDir, 'tokenizer_config.json'
+  throw new Error "[build_lora_dataset_ite] tokenizer_config.json not found at #{cfgPath}" unless fs.existsSync cfgPath
+  cfg = JSON.parse fs.readFileSync(cfgPath, 'utf8')
+  eot = cfg.eos_token
+  eot = eot.content if eot? and typeof eot is 'object'
+  throw new Error "[build_lora_dataset_ite] no usable eos_token in #{cfgPath}" unless eot? and typeof eot is 'string' and eot.length > 0
+  eot
+
 estimateTokens = (text) ->
   return 0 unless text?
   cleaned = String(text).trim()
@@ -115,7 +134,10 @@ splitSingleParagraphTrainingText = (paragraph) ->
     fallbackRowsWritten = 0
     storiesProcessed = 0
 
-    MAX_TOTAL_TOKENS = 1024
+    # Row token budget (estimateTokens = chars/4). Lower it to build shorter
+    # rows that fit under the trainer's maxSeqLength WITHOUT truncation — so the
+    # appended EOT lands only at a natural completion end, never mid-word.
+    MAX_TOTAL_TOKENS = Number(L.param('max_total_tokens', 1024))
     SAFETY_TOKENS = 64
 
     for storyID in selectedStoryIDs
@@ -164,7 +186,12 @@ splitSingleParagraphTrainingText = (paragraph) ->
           continue
 
         maxCompletionTokens = MAX_TOTAL_TOKENS - promptTokens - SAFETY_TOKENS
-        throw new Error "[#{L.stepName}] prompt too large for token budget on story #{storyID}" if maxCompletionTokens < 80
+        # Graceful skip (was a hard throw): a small max_total_tokens can make a
+        # long fragment prompt exceed the budget. Skip that group rather than
+        # crash the whole build.
+        if maxCompletionTokens < 80
+          console.log "[#{L.stepName}] skip group in #{storyID}: prompt too large (#{promptTokens} tok) for budget #{MAX_TOTAL_TOKENS}"
+          continue
 
         chunkParagraphs = []
         chunkTokens = 0
@@ -245,6 +272,20 @@ splitSingleParagraphTrainingText = (paragraph) ->
       L.make 'test_rows', []
       L.done()
       return
+
+    # --- EOS supervision -----------------------------------------------------
+    # Append the model's end-of-turn token to every emitted row's completion.
+    # Each row is `prompt + completion`, so the end of `text` IS the end of the
+    # completion — appending here terminates the completion for all row shapes
+    # (chunked, sentence-split, and single-paragraph fallback) in one place,
+    # without touching the chunking logic above. train.coffee's raw
+    # tokenizer.encode maps this string to the single EOT id and it lands inside
+    # the loss mask (it is the last real target, and pad_token != eos_token).
+    modelDir = L.param('quantized_model_dir', null) ? L.param('loraLand', null)
+    throw new Error "[#{L.stepName}] Missing model directory (quantized_model_dir or loraLand) — needed to read the end-of-turn token" unless modelDir?
+    eotToken = resolveEotToken modelDir
+    rows = rows.map (row) -> text: "#{row.text}#{eotToken}"
+    console.log "[build_lora_dataset_ite] appended EOT #{JSON.stringify eotToken} to #{rows.length} rows"
 
     L.make 'train_rows', rows
     L.make 'valid_rows', rows

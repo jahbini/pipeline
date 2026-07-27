@@ -33,6 +33,9 @@ mx.metal.clearCache      ?= mx.clearCache
 mx.metal.getPeakMemory   ?= mx.getPeakMemory
 mx.metal.getActiveMemory ?= mx.getActiveMemory
 
+# Active (live) GB, for locating where memory lands.
+activeMemGB = -> ((mx.metal.getActiveMemory?() ? 0) / (1024 * 1024 * 1024)).toFixed(2)
+
 # --- model dispatch (mirrors session_api; kept local to avoid coupling) ----
 LOCAL_MODELS =
   qwen3: -> require '../models/qwen3'
@@ -61,11 +64,18 @@ loadJsonl = (file) ->
   rows
 
 # Tokenize once, cache — avoids re-tokenizing the same corpus every iter.
-tokenizeCorpus = (rows, tokenizer, maxSeqLen) ->
+tokenizeCorpus = (rows, tokenizer, maxSeqLen, eosId) ->
   out = []
   for text in rows
     ids = tokenizer.encode text
-    ids = ids[...maxSeqLen] if ids.length > maxSeqLen
+    if ids.length > maxSeqLen
+      ids = ids[...maxSeqLen]
+      # The builder terminates every row with the EOT token; head-truncation
+      # would drop it. Force the last kept token to be EOT so a truncated row
+      # still teaches the model to STOP — preserves EOS supervision even when
+      # maxSeqLen is small enough to cut the row (which is how we bound the
+      # per-step forward/logits memory).
+      ids[ids.length - 1] = eosId if eosId?
     # Need at least 2 tokens to form one input/target pair.
     out.push ids if ids.length >= 2
   out
@@ -124,12 +134,17 @@ evaluate = (model, tokenized, {batchSize, batches, rng, padId}) ->
   totalTokens = 0
   for i in [0...batches]
     b = buildBatch tokenized, batchSize, rng, padId
-    loss = lossFn b.inputs, b.targets, b.mask
-    mx.eval loss
-    lVal = loss.item()
+    # Same tidy scoping as the training loop — the eval forward creates the
+    # same big per-batch intermediates (logits, activations). Without this the
+    # 25-batch eval at stepsPerEval leaked ~1.3GB/batch and spiked memory hard.
+    lVal = mx.tidy =>
+      loss = lossFn b.inputs, b.targets, b.mask
+      mx.eval loss
+      loss.item()
     totalLoss   += lVal * b.tokens
     totalTokens += b.tokens
-    mx.dispose? [b.inputs, b.targets, b.mask, loss]
+    mx.dispose? [b.inputs, b.targets, b.mask]
+    mx.metal.clearCache?()
   if totalTokens > 0 then totalLoss / totalTokens else 0
 
 # --- deterministic-ish RNG (mlx-lm uses numpy default; we use a seeded LCG) -
@@ -213,13 +228,16 @@ trainLoRA = (opts) ->
     nn.quantize model, group_size, bits, predicate
   model.loadWeights Object.entries(weights)
   mx.eval model.parameters()
-  log "loaded base model #{modelType} from #{modelDir}"
+  log "loaded base model #{modelType} from #{modelDir} (active #{activeMemGB()}GB)"
 
   # --- wrap with LoRA ------------------------------------------------------
   wrapOpts = {rank: loraRank, alpha: loraAlpha, dropout: loraDropout}
   wrapOpts.targets = opts.loraTargets if opts.loraTargets?
+  wrapOpts.numLayers = opts.loraLayers if opts.loraLayers?
   wrappedInfo = applyLoRA model, wrapOpts
-  log "wrapped #{wrappedInfo.count} layers (rank=#{loraRank} alpha=#{loraAlpha})"
+  layerNote = if wrappedInfo.num_layers? then " numLayers=#{wrappedInfo.num_layers}/#{wrappedInfo.total_blocks}" else ""
+  mx.eval model.parameters()
+  log "wrapped #{wrappedInfo.count} modules (rank=#{loraRank} alpha=#{loraAlpha}#{layerNote}) (active #{activeMemGB()}GB)"
 
   # --- optional resume -----------------------------------------------------
   if opts.resumeFile?
@@ -229,22 +247,23 @@ trainLoRA = (opts) ->
   # --- tokenizer + data ----------------------------------------------------
   tokenizer = new Tokenizer modelDir
   padId = tokenizer.tokenizer?.pad_token_id ? tokenizer.tokenizer?.eos_token_id ? 0
+  eosId = tokenizer.eosToken ? tokenizer.tokenizer?.eos_token_id ? padId
 
   trainTokenized = null
   validTokenized = null
   testTokenized  = null
   if wantTrain
     log "tokenizing train.jsonl…"
-    trainTokenized = tokenizeCorpus loadJsonl(path.join(dataDir, 'train.jsonl')), tokenizer, maxSeqLength
+    trainTokenized = tokenizeCorpus loadJsonl(path.join(dataDir, 'train.jsonl')), tokenizer, maxSeqLength, eosId
     log "  #{trainTokenized.length} train sequences"
     validFile = path.join(dataDir, 'valid.jsonl')
     if fs.existsSync validFile
       log "tokenizing valid.jsonl…"
-      validTokenized = tokenizeCorpus loadJsonl(validFile), tokenizer, maxSeqLength
+      validTokenized = tokenizeCorpus loadJsonl(validFile), tokenizer, maxSeqLength, eosId
       log "  #{validTokenized.length} valid sequences"
   if wantTest
     log "tokenizing test.jsonl…"
-    testTokenized = tokenizeCorpus loadJsonl(path.join(dataDir, 'test.jsonl')), tokenizer, maxSeqLength
+    testTokenized = tokenizeCorpus loadJsonl(path.join(dataDir, 'test.jsonl')), tokenizer, maxSeqLength, eosId
     log "  #{testTokenized.length} test sequences"
 
   rng = makeRng seed
@@ -255,7 +274,14 @@ trainLoRA = (opts) ->
     lossAndGrad = nn.valueAndGrad model, lossFn
     optimizer = new optimizers.AdamW learningRate
 
-    log "training #{iters} iters, batchSize=#{batchSize}, maxSeqLen=#{maxSeqLength}, lr=#{learningRate}"
+    # Cap MLX's buffer cache so freed tensors return to the OS instead of the
+    # cache growing unbounded across steps. session_api sets this for inference;
+    # training omitted it, which let memory climb → swap → OOM (the step-20
+    # death with a sliding it/s). Tunable via the llm block's cacheLimitMB.
+    cacheLimitMB = opts.cacheLimitMB ? 512
+    mx.setCacheLimit? cacheLimitMB * 1024 * 1024
+
+    log "training #{iters} iters, batchSize=#{batchSize}, maxSeqLen=#{maxSeqLength}, lr=#{learningRate} (cacheLimit=#{cacheLimitMB}MB)"
     fs.mkdirSync adapterPath, recursive: true
 
     accumLoss = 0.0
@@ -264,20 +290,35 @@ trainLoRA = (opts) ->
 
     for step in [1..iters]
       b = buildBatch trainTokenized, batchSize, rng, padId
-      [loss, grads] = lossAndGrad b.inputs, b.targets, b.mask
-      optimizer.update model, grads
-      mx.eval model.parameters(), optimizer.state, loss
+      # Scope the whole forward+backward+update in mx.tidy so every intermediate
+      # it creates — logits, activations, dequantized frozen weights, the grad
+      # graph — is freed at step end. WITHOUT this those per-step native tensors
+      # leaked (~1.3 GB/step) and OOM'd within ~20 steps (the sweep could only
+      # ever do ~10-iter batches for this reason). tidy disposes everything
+      # created inside EXCEPT what's returned, so we return the arrays that must
+      # survive the step: the loss (for reporting) and the freshly-updated model
+      # params + optimizer state.
+      [loss] = mx.tidy =>
+        [l, grads] = lossAndGrad b.inputs, b.targets, b.mask
+        optimizer.update model, grads
+        mx.eval model.parameters(), optimizer.state, l
+        [l, model.parameters(), optimizer.state]
 
       lVal = loss.item()
       accumLoss   += lVal * b.tokens
       accumTokens += b.tokens
       mx.dispose? [b.inputs, b.targets, b.mask, loss]
+      # Return this step's freed buffers to the OS so peak memory stays flat
+      # across steps rather than accumulating into swap.
+      mx.metal.clearCache?()
 
-      if step % stepsPerReport is 0 or step is iters
+      if step <= 3 or step % stepsPerReport is 0 or step is iters
         avg = if accumTokens > 0 then accumLoss / accumTokens else lVal
         elapsed = (Date.now() - tStart) / 1000
         rate = step / elapsed
-        log "step #{step}/#{iters}  train_loss=#{avg.toFixed 4}  (#{rate.toFixed 2} it/s)"
+        activeGB = (mx.metal.getActiveMemory?() ? 0) / (1024 * 1024 * 1024)
+        peakGB   = (mx.metal.getPeakMemory?() ? 0) / (1024 * 1024 * 1024)
+        log "step #{step}/#{iters}  train_loss=#{avg.toFixed 4}  (#{rate.toFixed 2} it/s)  mem active=#{activeGB.toFixed 2}GB peak=#{peakGB.toFixed 2}GB"
         accumLoss = 0.0
         accumTokens = 0
 

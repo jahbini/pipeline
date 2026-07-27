@@ -24,7 +24,7 @@ sessions = new Map()
 
 getSession = (modelDir, opts = {}) ->
   resolved   = path.resolve modelDir
-  adapterKey = if opts.adapterPath? then path.resolve(opts.adapterPath) else ''
+  adapterKey = if opts.adapterPath? and String(opts.adapterPath).trim().length then path.resolve(opts.adapterPath) else ''
   key = "#{resolved}::#{adapterKey}"
   cached = sessions.get key
   return cached if cached?

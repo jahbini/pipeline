@@ -1,5 +1,5 @@
 # =====================================================================
-#   base_ite.yaml  —  the canonical bootstrap recipe
+#   reset.yaml  —  the canonical bootstrap / reset recipe (was base_ite)
 # =====================================================================
 #
 #   The authoritative base/bootstrap chain for @jahbini/pipeline. Four

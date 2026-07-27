@@ -109,19 +109,33 @@ createSession = (opts = {}) ->
   mx.eval model.parameters()
 
   # Optional LoRA adapter: wrap targeted layers and load trained A/B tensors.
-  if opts.adapterPath?
+  # An empty/whitespace adapterPath means "base, no adapter" (the UI adapter
+  # dropdown's base option sends '').
+  if opts.adapterPath? and String(opts.adapterPath).trim().length > 0
     adapterPath = path.resolve opts.adapterPath
-    configFile = path.join adapterPath, 'adapter_config.json'
-    throw new Error "adapter_config.json missing in #{adapterPath}" unless fs.existsSync configFile
+    # adapterPath may be an adapter DIR (loads its adapters.safetensors) or a
+    # specific checkpoint FILE (e.g. .../0000100_adapters.safetensors); a file
+    # reads the shared adapter_config.json from its parent dir.
+    isCheckpointFile = /\.safetensors$/.test(adapterPath) and fs.existsSync(adapterPath) and fs.statSync(adapterPath).isFile()
+    configDir   = if isCheckpointFile then path.dirname(adapterPath) else adapterPath
+    weightsPath = if isCheckpointFile then adapterPath else null
+    configFile = path.join configDir, 'adapter_config.json'
+    throw new Error "adapter_config.json missing in #{configDir}" unless fs.existsSync configFile
     aConfig = JSON.parse fs.readFileSync(configFile, 'utf8')
     wrapOpts = {}
-    wrapOpts.rank    = aConfig.rank    if aConfig.rank?
-    wrapOpts.alpha   = aConfig.alpha   if aConfig.alpha?
-    wrapOpts.dropout = aConfig.dropout if aConfig.dropout?
-    wrapOpts.targets = aConfig.targets if aConfig.targets?
+    wrapOpts.rank      = aConfig.rank       if aConfig.rank?
+    wrapOpts.alpha     = aConfig.alpha      if aConfig.alpha?
+    wrapOpts.dropout   = aConfig.dropout    if aConfig.dropout?
+    wrapOpts.targets   = aConfig.targets    if aConfig.targets?
+    wrapOpts.numLayers = aConfig.num_layers if aConfig.num_layers?
     wrappedInfo = applyLoRA model, wrapOpts
-    loadAdapter adapterPath, wrappedInfo
+    loadResult = loadAdapter configDir, wrappedInfo, weightsPath
     mx.eval model.parameters()
+    # Make adapter loading VISIBLE (it was silent — you couldn't tell whether
+    # an adapter was actually applied). loaded=0 means the safetensors keys
+    # didn't match the wrapped layers (adapter has no effect); loaded should
+    # equal the wrapped count.
+    console.log "[session_api] adapter #{adapterPath}: wrapped #{wrappedInfo.count} modules (rank=#{wrapOpts.rank ? '?'} numLayers=#{wrapOpts.numLayers ? 'all'}), loaded #{loadResult?.loaded ? '?'}/#{loadResult?.expected ? '?'} tensors"
 
   tokenizer = new Tokenizer(modelDir)
   llm = new LLM(model, tokenizer)
@@ -205,7 +219,13 @@ createSession = (opts = {}) ->
       # the fingerprint exactly matches the cache_prompt file version).
       keep = Math.min(promptTokens, offset)
       keep = 1 if keep < 1
-      promptV = mx.slice(valuesTensor, [0], [2], [keep])     # [B, kv_heads, keep, head_dim]
+      # node-mlx 0.4.0 defaults JS int arrays to float32 and changed the
+      # mx.slice(start, axes, sizes) signature, so the old
+      # `mx.slice(valuesTensor, [0], [2], [keep])` throws "Start indices must
+      # be integers, got type float32". Take the first `keep` positions along
+      # the capacity axis (2) with an explicit int32 index vector instead.
+      keepIdx = mx.arange(keep).astype(mx.int32)
+      promptV = mx.take(valuesTensor, keepIdx, 2)            # [B, kv_heads, keep, head_dim]
       pooled = promptV.mean(2)                               # [B, kv_heads, head_dim]
       flat = pooled.astype(mx.float32).flatten()             # [B * kv_heads * head_dim]
       mx.eval flat

@@ -152,6 +152,20 @@ renderKagLines = (entries) ->
       lines.push "- #{keyword}"
   lines
 
+# Render the matched CHUNKS (Jim's own passages) for this event as reference
+# text — the "chunk tactic". Deduped + clipped so the per-event prompt stays
+# bounded. Uses clipText (normalizeSpacing + cap). cap = 0 → full chunk.
+renderPassages = (entries, cap) ->
+  lines = []
+  seen = new Set()
+  for entry in (entries ? [])
+    txt = clipText(entry?.chunk_text, if cap > 0 then cap else Infinity)
+    continue unless txt.length
+    continue if seen.has txt
+    seen.add txt
+    lines.push txt
+  lines
+
 normalizeSpacing = (text) ->
   String(text ? '').replace(/\s+/g, ' ').trim()
 
@@ -182,13 +196,22 @@ renderSceneHints = (kind, event) ->
   lines.push "theme: #{theme}" if theme.length
   if lines.length then lines.join("\n") else "- none"
 
-buildEventPrompt = (kind, event, chosenEntries, priorSections, mode) ->
+buildEventPrompt = (kind, event, chosenEntries, priorSections, mode, passageOpts = {}) ->
   historyText = renderPriorHistory priorSections, 3, true
   eventText = String(event?.text ? '').trim()
   kagLines = renderKagLines chosenEntries
   previousEnding = if priorSections.length > 0 then lastLineOf(priorSections[priorSections.length - 1].text) else "- none"
   sceneHints = renderSceneHints kind, event
   emotionNotes = if kagLines.length then kagLines.join("\n") else "- none"
+
+  # The chunk tactic: fold this event's matched passages in as voice reference.
+  passages = if passageOpts?.include is false then [] else renderPassages(chosenEntries, passageOpts?.cap ? 700)
+  referenceLine =
+    if passages.length
+      block = ("  “#{p}”" for p in passages).join "\n"
+      "reference (Jim's own words — echo the texture, do not copy):\n#{block}"
+    else
+      "reference: - none"
 
   [
     "You are writing in the narrative voice of Jim from St. John's."
@@ -202,12 +225,14 @@ buildEventPrompt = (kind, event, chosenEntries, priorSections, mode) ->
     "emotion: #{emotionNotes}"
     "hints: #{sceneHints}"
     "event: #{if eventText.length then eventText else '- none'}"
+    referenceLine
     ""
     "The reader loves:"
     "- continuing with the event from the prior moment without restarting the scene"
     "- an old man remembering imperfectly, with some drift and circling"
     "- the event staying at the center, even when the thought wanders"
     "- concrete things: body, place, sound, light, objects, gestures, speech"
+    "- borrowing the cadence and concrete texture of the reference passages, never whole sentences or their plots"
     "- using emotion as feeling"
     "- mild uncertainty: \"possible\", \"maybe\", \"could be wrong\""
     ""
@@ -302,6 +327,12 @@ callDiaryGenerate = (L, modelDir, prompt, adapterPath, llmConfig) ->
       ['realization', storyParts.realization]
     ]
 
+    # Chunk tactic knobs (per-event story passages folded into each event prompt).
+    includePassages = L.param('include_chunk_passages', true) isnt false
+    excerptCap = Number(L.param('chunk_excerpt_chars', 700)) or 0
+    passageOpts = { include: includePassages, cap: excerptCap }
+    console.log "[#{L.stepName}] chunk passages:", (if includePassages then "on (cap #{excerptCap or 'full'})" else "off")
+
     priorSections = []
     rawSections = []
 
@@ -310,7 +341,7 @@ callDiaryGenerate = (L, modelDir, prompt, adapterPath, llmConfig) ->
 
       chosenMatches = resolveEventMatches diaryKag, kind
       chosenEntries = if chosenMatches.length > 0 then chosenMatches else pickEventKagEntries diaryKag.entries, kind, event, 4
-      prompt = buildEventPrompt kind, event, chosenEntries, priorSections, modeInfo.mode
+      prompt = buildEventPrompt kind, event, chosenEntries, priorSections, modeInfo.mode, passageOpts
       rawOutput = await callDiaryGenerate L, modelDir, prompt, adapterPath, llmConfig
       sectionText = cleanGeneratedText prompt, rawOutput
 
