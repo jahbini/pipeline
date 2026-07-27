@@ -1712,6 +1712,12 @@
     byId('clear-pipeline-state-button').addEventListener('click', () => {
       clearPipelineState().catch(console.error);
     });
+    byId('clear-logs-button').addEventListener('click', () => {
+      clearLogs().catch(console.error);
+    });
+    byId('clear-output-button').addEventListener('click', () => {
+      clearOutput().catch(console.error);
+    });
 	    byId('switch-pipe-button').addEventListener('click', () => {
 	      switchPipe().catch(console.error);
 	    });
