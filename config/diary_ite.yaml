@@ -86,38 +86,32 @@ build_diary_prompt_ite:
   depends_on: [collect_diary_kag_ite]
   needs: [story_parts, diary_kag]
   makes: [diary_prompt_text]
-  # NOTE: the production generators (generate_diary_event_ordered_ite) build
-  # their own per-event prompts and do NOT consume diary_prompt_text. The chunk
-  # tactic + its knobs therefore live on the generate steps below, not here.
+  # Chunk tactic lives HERE now: build_diary_prompt_ite folds each event's
+  # matched story passages (Jim's own words) into diary_prompt_text, which both
+  # generators consume. include_chunk_passages = UI toggle (checked = chunks on,
+  # unchecked = cues only); chunk_excerpt_chars caps each passage (0 = full).
+  include_chunk_passages: [ UI_checkbox, true ]
+  chunk_excerpt_chars: 700
 
 generate_diary_with_adapter_ite:
-  run: diary_ite/generate_diary_event_ordered_ite.coffee
+  run: diary_ite/generate_diary_with_adapter_ite.coffee
   depends_on: [never]
   needs: [story_parts, diary_prompt_text]
   makes: [diary_adapted_raw, diary_adapted_meta, diary_adapted_text]
-  # Adapter picker (UI dropdown). Lists build/adapter* dirs + a base option;
-  # defaults to build/adapter. Pick i100 / i200 / a fused adapter / base in the
-  # UI without editing yaml. Empty value ('(base)') = generate with no adapter.
+  # Adapter picker (UI dropdown). Lists build/adapter* dirs + checkpoints + a
+  # base option; defaults to build/adapter. Empty value ('(base)') = no adapter.
   adapter_path: [ UI_dropdown, adapters, build/adapter ]
   quantized_model_dir: build/model4
-  # Chunk tactic: fold each event's matched story passages (Jim's own words)
-  # into that event's prompt as voice reference. false = cues only (pre-tactic
-  # behaviour) — flip to A/B whether the chunks help. chunk_excerpt_chars caps
-  # each passage (0 = full).
-  include_chunk_passages: [ UI_checkbox, true ]   # UI toggle: chunk passages on (checked) / cues-only (unchecked)
-  chunk_excerpt_chars: 700
   llm:
     maxTokens: 2000
     temperature: 0.7
 
 generate_diary_without_adapter_ite:
-  run: diary_ite/generate_diary_event_ordered_ite.coffee
+  run: diary_ite/generate_diary_without_adapter_ite.coffee
   depends_on: [build_diary_prompt_ite]
   needs: [story_parts, diary_prompt_text]
   makes: [diary_base_raw, diary_base_meta, diary_base_text]
   quantized_model_dir: build/model4
-  include_chunk_passages: [ UI_checkbox, true ]   # UI toggle: chunk passages on (checked) / cues-only (unchecked)
-  chunk_excerpt_chars: 700
   llm:
     maxTokens: 2000
     temperature: 0.7
