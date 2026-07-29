@@ -652,6 +652,9 @@
     let humanSaveTimer = null;
     let currentPipeName = '';
     let selectedPipeName = '';
+    // The recipe currently loaded into the controls. Tracked so that when the
+    // user picks a different recipe we know which one's human override to save.
+    let loadedPipeline = '';
     let refreshTimer = null;
 
     function startRefreshLoop() {
@@ -780,6 +783,9 @@
       setupPaneExpanders();
 
       controlsInitialized = true;
+      // Remember which recipe is now loaded, so a subsequent recipe change
+      // can persist THIS recipe's human override before switching away.
+      loadedPipeline = selectedPipeline;
     }
 
 	    function renderPipeControls(pipe) {
@@ -1666,11 +1672,40 @@
     setupPaneExpanders();
 
     refresh().catch(console.error);
-    byId('pipeline-select').addEventListener('change', () => {
-      controlsDirty = true;
-      saveControlState().catch((err) => {
+    byId('pipeline-select').addEventListener('change', async () => {
+      const newPipeline = byId('pipeline-select').value;
+      const oldPipeline = loadedPipeline;
+      try {
+        // 1. Persist the OLD recipe's override into override/<old>.yaml before
+        //    switching away — pass its pipeline explicitly so it lands in the
+        //    right file regardless of what control_override currently says.
+        if (oldPipeline && oldPipeline !== newPipeline) {
+          byId('human-override-status').textContent = `saving override/${oldPipeline}.yaml...`;
+          await fetch('/api/human_override', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              pipeline: oldPipeline,
+              human_override_text: byId('human-override-editor').value
+            })
+          });
+        }
+        humanOverrideDirty = false;
+
+        // 2. Switch the selected recipe (updates pending.pipeline + control_override).
+        controlsDirty = true;
+        await saveControlState();
+
+        // 3. Force the new recipe to (re)render: its human override into the
+        //    Human Override window, and its UI fields/dropdowns into the form.
+        controlsInitialized = false;
+        humanOverrideInitialized = false;
+        controlOverrideInitialized = false;
+        loadedPipeline = newPipeline;
+        await refresh();
+      } catch (err) {
         byId('control-override-status').textContent = String(err.message || err);
-      });
+      }
     });
     byId('continuous-checkbox').addEventListener('change', () => {
       controlsDirty = true;

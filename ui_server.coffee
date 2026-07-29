@@ -184,7 +184,12 @@ runSqliteRequestStrict = (requestKey) ->
   entry = M.theLowdown(requestKey)
   entry?.value
 
-PIPE_ROOT = path.join(BASE_ROOT, 'pipe')
+## The consuming project's pipe workspaces live at `<BASE>/pipes` (plural,
+## matching what pipeline_runner.coffee creates on disk). The former singular
+## `<BASE>/pipe` never existed on any real project — it silently disabled all
+## pipe awareness (listPipeDirectories returned [], workspacePipeName returned
+## null). See writediary/ui_server.coffee for the canonical name.
+PIPES_ROOT = path.join(BASE_ROOT, 'pipes')
 DEFAULT_KAG_KEYWORDS = [
   'joy'
   'contentment'
@@ -248,7 +253,7 @@ resolveCoffeeBin = ->
   'coffee'
 
 workspacePipeName = (workspacePath = CWD) ->
-  rel = path.relative(PIPE_ROOT, workspacePath)
+  rel = path.relative(PIPES_ROOT, workspacePath)
   return null if not rel? or rel.startsWith('..') or path.isAbsolute(rel) or rel is ''
   rel.split(path.sep)[0] ? null
 
@@ -263,9 +268,9 @@ inferModelIdFromPipeName = (pipeName) ->
   "#{organization}/#{modelName}"
 
 listPipeDirectories = ->
-  return [] unless fs.existsSync(PIPE_ROOT)
-  names = fs.readdirSync(PIPE_ROOT).filter (name) ->
-    full = path.join(PIPE_ROOT, name)
+  return [] unless fs.existsSync(PIPES_ROOT)
+  names = fs.readdirSync(PIPES_ROOT).filter (name) ->
+    full = path.join(PIPES_ROOT, name)
     try
       fs.statSync(full).isDirectory()
     catch
@@ -276,7 +281,7 @@ buildPipeSummary = ->
   current = workspacePipeName(CWD)
   pipes = (name: name, is_active: name is current for name in listPipeDirectories())
   {
-    root: PIPE_ROOT
+    root: PIPES_ROOT
     current: current
     workspace: CWD
     pipes: pipes
@@ -375,7 +380,7 @@ buildManifest = ->
     base:         BASE_ROOT
     exec:         EXEC_ROOT
     cwd:          CWD
-    pipe_root:    PIPE_ROOT
+    pipe_root:    PIPES_ROOT
     active_pipe:  activePipe
     pipes:        pipes
     recipes:
@@ -1917,7 +1922,7 @@ handleSwitchPipe = (req, res) ->
   pipeName = String(payload.pipe ? '').trim()
   if pipeName.length
     return sendJson(res, 400, { ok: false, error: 'invalid pipe name' }) if pipeName.includes('/') or pipeName.includes(path.sep) or pipeName is '.' or pipeName is '..'
-    targetCwd = path.join(PIPE_ROOT, pipeName)
+    targetCwd = path.join(PIPES_ROOT, pipeName)
     return sendJson(res, 404, { ok: false, error: 'pipe directory not found' }) unless fs.existsSync(targetCwd) and fs.statSync(targetCwd).isDirectory()
   else
     targetCwd = CWD          # empty pipe => restart current workspace in place
