@@ -17,7 +17,9 @@
 #     - `cd pipes/<pipe> && coffee ../../pipeline_runner.coffee`
 
 run:
-  model: Qwen/Qwen3-4B-Instruct-2507
+  # `run.model` intentionally not set here — the model identity is a
+  # pipe fact, not a recipe fact. Each pipe's override.yaml must set
+  # it. See GPT/model_identity.md.
   output_dir: out
   data_dir: data
   loraLand: build/model

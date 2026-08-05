@@ -21,7 +21,9 @@
 #   Comparable to running inference; far less than training.
 
 run:
-  model: Qwen/Qwen3-4B-Instruct-2507
+  # `run.model` intentionally not set here — the model identity is a
+  # pipe fact, not a recipe fact. Each pipe's override.yaml must set
+  # it. See GPT/model_identity.md.
   loraLand: build/model
   debug_s: false
   debug_llm: false

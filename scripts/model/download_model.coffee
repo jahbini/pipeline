@@ -45,7 +45,12 @@ runSh = (cmd, cwd = null, extraEnv = {}) ->
     env: env
 
 provenancePathFor = (targetDir) ->
-  path.join targetDir, '.model_provenance.json'
+  # Visible (no leading dot) so `ls` shows it and humans can spot it
+  # without `ls -la`. Written read-only (0o444) after each successful
+  # download, matching the "read-only like the model itself" rule —
+  # see writeProvenance below. Renamed from `.model_provenance.json`
+  # 2026-08-05; see GPT/model_identity.md.
+  path.join targetDir, 'model_provenance.json'
 
 readProvenance = (targetDir) ->
   provPath = provenancePathFor targetDir
@@ -64,11 +69,21 @@ writeProvenance = (targetDir, modelId, repoUrl) ->
     repo_url: repoUrl
     recorded_at: new Date().toISOString()
 
+  # Ensure write succeeds even if a prior run left a read-only file
+  # in place (chmod first, then write, then re-chmod).
+  if fs.existsSync provPath
+    try fs.chmodSync provPath, 0o644 catch then null
+
   fs.writeFileSync(
     provPath
     JSON.stringify(payload, null, 2)
     'utf8'
   )
+
+  # Lock read-only so a stray `cat > model_provenance.json` cannot
+  # corrupt the provenance without an explicit chmod. Matches the
+  # "read-only like the model after it is loaded" rule.
+  try fs.chmodSync provPath, 0o444 catch then null
 
 stripGitDirectory = (targetDir) ->
   gitDir = path.join targetDir, '.git'
@@ -209,6 +224,49 @@ gitPublicArgs = [
       console.log "[init] Weight file:", weightFile
       console.log "[init] Skipping download."
       return
+
+    # ─────────────────────────────────────────────────────────────
+    # GUARD (2026-08-05)
+    # ─────────────────────────────────────────────────────────────
+    # If we reach this point the target dir was NOT usable-as-is:
+    # either empty (fine — download proceeds), or PARTIALLY populated
+    # (present, no weight file, or present-with-weights whose
+    # provenance branch above did not return — meaning the provenance
+    # guard did not throw either, and we're in a state the retry loop
+    # auto-wipes via removeTargetDirectory.
+    #
+    # Auto-wiping without asking is what surprises the human after a
+    # killed download: the retry step nukes a directory whose true
+    # contents nobody has verified. Require an explicit opt-in.
+    #
+    # Escape hatch: `allow_overwrite: true` in the step's params
+    # (drop it in override.yaml when you actually want the wipe).
+    allowOverwrite = M.getStepParam(stepName, 'allow_overwrite') is true
+
+    if present and not allowOverwrite
+      state = if hasWeights
+        "has weights (but did not match the provenance path above)"
+      else
+        "is partially populated (no recognizable weight file)"
+      entries = try (fs.readdirSync targetDir).slice(0, 8).join(', ') catch then '?'
+      throw new Error """
+      [init] Refusing to overwrite existing model directory:
+      #{targetDir}
+
+      The directory #{state}. That state can be the debris of a
+      killed download OR a real model whose provenance was not
+      recorded — the runner cannot tell which by inspection, and
+      auto-wiping would risk destroying a good model.
+
+      Contents (first entries): #{entries}
+
+      To proceed, either:
+        1. Remove the directory manually:
+             rm -rf "#{targetDir}"
+           then re-run this step, OR
+        2. Set `allow_overwrite: true` in the download_model step's
+           override to authorize the wipe explicitly.
+      """
 
     unless hfModelId.includes '/'
       throw new Error """
