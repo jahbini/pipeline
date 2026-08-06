@@ -30,6 +30,7 @@ cleanFragment = (value) ->
   text.trim()
 
 ALLOWED_EMOTION_KEYWORDS = new Set [
+  # Ekman-adjacent core (original 12)
   'joy'
   'contentment'
   'sadness'
@@ -42,6 +43,13 @@ ALLOWED_EMOTION_KEYWORDS = new Set [
   'shame'
   'surprise'
   'neutral'
+  # Register additions (2026-08-06) — fit Jim's dominant tones that
+  # the Ekman set collapses awkwardly. See GPT/story/kag_vocabulary.md.
+  'absurd'
+  'wry'
+  'playful'
+  'melancholy'
+  'mysterious'
 ]
 
 normalizeAllowedEmotionKeyword = (value) ->
@@ -51,7 +59,7 @@ normalizeAllowedEmotionKeyword = (value) ->
   text = text.replace /^_+|_+$/g, ''
   return null unless text.length
   return text if ALLOWED_EMOTION_KEYWORDS.has(text)
-  match = text.match /^(joy|contentment|sadness|grief|fear|anxiety|anger|frustration|disgust|shame|surprise|neutral)(?:_|$)/
+  match = text.match /^(joy|contentment|sadness|grief|fear|anxiety|anger|frustration|disgust|shame|surprise|neutral|absurd|wry|playful|melancholy|mysterious)(?:_|$)/
   return match[1] if match?
   null
 
@@ -64,6 +72,27 @@ toEmotionKey = (value, fallbackIndex) ->
   text = "emotion_#{fallbackIndex}" unless text.length
   text
 
+# Some models emit the whole numbered list on ONE line — e.g.
+# `1. #Joy --- ...  2. #Contentment --- ...  3. #Disgust --- ...`
+# — and continue past the answer with `<|endoftext|>` followed by a
+# hallucinated re-echo of the prompt. Normalize both before the
+# per-line loop so a glued single-line response still produces N
+# separate parsed items.
+#
+# Steps:
+#   1. Truncate at any end-of-text-ish marker (`<|endoftext|>`,
+#      `<|im_end|>`, `</s>`) — everything after is hallucinated echo.
+#   2. Split BEFORE any inline ` N. #Word` / ` N. Word ---` boundary
+#      by inserting a newline. Anchor: whitespace, one-or-more digits,
+#      dot, whitespace, optional hash, then a letter. Applied only
+#      when there IS whitespace preceding — so a legitimate
+#      line-leading `1.` at position 0 is untouched.
+normalizeRaw = (raw) ->
+  s = String(raw ? '')
+  s = s.split(/<\|endoftext\|>|<\|im_end\|>|<\/s>/)[0]
+  s = s.replace /[ \t]+(\d+)\.\s+(#?[A-Za-z])/g, '\n$1. $2'
+  s
+
 extractJSON = (raw) ->
   return {} unless raw?
   block = raw.match(/\{[\s\S]*\}/)?[0]
@@ -73,61 +102,101 @@ extractJSON = (raw) ->
     catch
       null
 
-  emotions = {}
-  lines = String(raw).split /\r?\n/
+  { headlined, bare } = extractTiers raw
+  # Precedence: any headlined entry wins over a bare one for the same
+  # key. If ANY headlined entries exist, bare entries are dropped in
+  # full (they're almost always warm-up / tail echo of the allowed
+  # keyword list). This matches the observed model behavior where the
+  # real answer is a middle block of `Keyword -- text` lines surrounded
+  # by list-repetition noise. The two tiers are exported separately
+  # via extractTiers so probes can see what was dropped.
+  if Object.keys(headlined).length > 0
+    headlined
+  else
+    bare
+
+# Two-tier parse. Exposed so probes can see EVERYTHING the parser
+# extracted — both winners and losers under the precedence rule —
+# rather than only the survivors.
+#   headlined — line had a separator + real text (`#Joy --- <text>`
+#               or `Joy -- <text>`).
+#   bare      — line was just a keyword (e.g. the prompt-echo warm-up
+#               `Joy\nContentment\n...`).
+extractTiers = (raw) ->
+  return {headlined: {}, bare: {}} unless raw?
+  headlined = {}
+  bare      = {}
+  lines     = normalizeRaw(raw).split /\r?\n/
+
+  # Separators the LLM uses between key and headline. Accept 2+ hyphens
+  # (`--`, `---`, `----`), em-dash, en-dash, or 1+ equals signs (the
+  # storacle-authored prompt uses `#keyword = headline`).
+  SEP = /(?:-{2,}|—|–|=+)/
 
   for line, idx in lines
     cleanedLine = String(line ? '').trim()
     continue unless cleanedLine.length
     continue if /^=+$/.test(cleanedLine)
 
+    # Optionally strip a leading ordinal (`1.`, `2)`, `3 -`, …). The
+    # ordinal is a courtesy; the emotion keyword itself is the anchor,
+    # so lines without a number are accepted too.
+    ordinal = idx + 1
+    body = cleanedLine
     numbered = cleanedLine.match /^\s*(\d+)(?!\d)[^A-Za-z\s]*\s*(.+?)\s*$/
-    continue unless numbered?
+    if numbered?
+      ordinal = Number numbered[1]
+      body = cleanFragment numbered[2]
 
-    ordinal = Number numbered[1]
-    body = cleanFragment numbered[2]
+    body = cleanFragment body
     continue unless body.length
 
-    strictHash = body.match /^#([A-Za-z0-9_-]+)\s*(?:---|—|–)\s*(.+?)\s*$/
+    # `#Keyword --- headline` (any 2+-hyphen or dash separator).
+    strictHash = body.match new RegExp "^#([A-Za-z0-9_-]+)\\s*" + SEP.source + "\\s*(.+?)\\s*$"
     if strictHash?
       emotionKey = toEmotionKey strictHash[1], ordinal
       emotionText = cleanFragment strictHash[2]
       continue unless emotionText.length
-      emotions[emotionKey] = emotionText
+      headlined[emotionKey] = emotionText
       continue
 
-    looseStructured = body.match /^(.+?)\s*(?:---|—|–)\s*(.+?)\s*$/
+    # `Keyword --- headline` (no hash prefix, any 2+-hyphen or dash).
+    looseStructured = body.match new RegExp "^(.+?)\\s*" + SEP.source + "\\s*(.+?)\\s*$"
     if looseStructured?
       emotionKey = toEmotionKey looseStructured[1], ordinal
       emotionText = cleanFragment looseStructured[2]
       continue unless emotionText.length
-      emotions[emotionKey] = emotionText
+      headlined[emotionKey] = emotionText
       continue
 
     emotionKey = toEmotionKey body, ordinal
-    emotions[emotionKey] = cleanFragment body
+    bare[emotionKey] = cleanFragment body
 
-  emotions
+  {headlined, bare}
+
+# Hoisted to module scope so probes can inspect exactly which
+# patterns caught a rejected entry (see writer/test/oracle_probe.coffee).
+# Order matters for per-rule attribution — the probe reports the FIRST
+# matching rule per rejected key.
+REJECT_PATTERNS = [
+  { name: 'short_headline',        re: /\bshort headline\b/i }
+  { name: 'final_answer',          re: /\bfinal answer\b/i }
+  { name: 'note',                  re: /\bnote\b/i }
+  { name: 'prompt',                re: /\bprompt\b/i }
+  { name: 'generation',            re: /\bgeneration\b/i }
+  { name: 'peak_memory',           re: /\bpeak memory\b/i }
+  { name: 'tokens_per_sec',        re: /\btokens-per-sec\b/i }
+  { name: 'no_response',           re: /\bno response\b/i }
+  { name: 'refusal_sorry',         re: /\bi(?:'| a)?m sorry\b/i }
+  { name: 'refusal_cannot',        re: /\bcan(?:not|'t)\b/i }
+  { name: 'misunderstanding',      re: /\bmisunderstanding\b/i }
+  { name: 'clarify',               re: /\bclarify\b/i }
+  { name: 'boilerplate_requested', re: /\brequested content formatted\b/i }
+  { name: 'placeholder',           re: /\bplaceholder\b/i }
+]
 
 filterEmotions = (emotions) ->
   return {} unless emotions? and typeof emotions is 'object'
-
-  rejectPatterns = [
-    /\bshort headline\b/i
-    /\bfinal answer\b/i
-    /\bnote\b/i
-    /\bprompt\b/i
-    /\bgeneration\b/i
-    /\bpeak memory\b/i
-    /\btokens-per-sec\b/i
-    /\bno response\b/i
-    /\bi(?:'| a)?m sorry\b/i
-    /\bcan(?:not|'t)\b/i
-    /\bmisunderstanding\b/i
-    /\bclarify\b/i
-    /\brequested content formatted\b/i
-    /\bplaceholder\b/i
-  ]
 
   filtered = {}
   seenValues = new Set()
@@ -137,7 +206,7 @@ filterEmotions = (emotions) ->
     continue unless emotionKey?
     emotionText = cleanFragment value
     continue unless emotionText.length
-    continue if rejectPatterns.some (pattern) -> pattern.test(emotionKey) or pattern.test(emotionText)
+    continue if REJECT_PATTERNS.some (p) -> p.re.test(emotionKey) or p.re.test(emotionText)
     dedupeKey = "#{emotionKey}|#{emotionText.toLowerCase()}"
     continue if seenValues.has dedupeKey
     seenValues.add dedupeKey
@@ -212,10 +281,14 @@ runOracleOnce = (S, modelDir, prompt, adapterPath, llmConfig, debugLlm = false) 
   filtered = filterEmotions parsed
   { raw, parsed, filtered, embedding, embeddingError }
 
+STORY_PLACEHOLDER = '{{{STORY}}}'
+
 renderPrompt = (template, text) ->
   throw new Error "oracle prompt_text must be a string" unless typeof template is 'string'
-  throw new Error "oracle prompt_text must contain a {...} insertion marker" unless /\{[^}]*\}/.test(template)
-  template.replace /\{[^}]*\}/, String(text ? '')
+  unless template.indexOf(STORY_PLACEHOLDER) >= 0
+    throw new Error "oracle prompt_text must contain the placeholder #{STORY_PLACEHOLDER} — that's where the story text gets substituted"
+  # split-and-join replaces ALL occurrences (matches storacle's behavior).
+  template.split(STORY_PLACEHOLDER).join(String(text ? ''))
 
 splitParagraphs = (text) ->
   rawParts = String(text ? '').split /\n\s*\n/
@@ -313,6 +386,20 @@ mergeEmotionLists = (rows) ->
       merged[emotionKey] = emotionText
 
   filterEmotions merged
+
+# ── Exports for probes (writer/test/oracle_probe.coffee) ─────────
+# All read-only helpers, no behavior change.
+@normalizeRaw                  = normalizeRaw
+@REJECT_PATTERNS               = REJECT_PATTERNS
+@ALLOWED_EMOTION_KEYWORDS      = ALLOWED_EMOTION_KEYWORDS
+@cleanFragment                 = cleanFragment
+@normalizeAllowedEmotionKeyword = normalizeAllowedEmotionKeyword
+@extractJSON                   = extractJSON
+@extractTiers                  = extractTiers
+@filterEmotions                = filterEmotions
+@renderPrompt                  = renderPrompt
+@buildStoryGroups              = buildStoryGroups
+@buildRetryChunks              = buildRetryChunks
 
 @step =
   desc: "Classify sqlite-backed stories with the emotion oracle"

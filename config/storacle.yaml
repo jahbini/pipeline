@@ -1,0 +1,57 @@
+# =====================================================================
+#   storacle.yaml  —  prompt-exploration harness for the KAG oracle
+# =====================================================================
+#   Sibling of chat_llm: one LLM call, one story, one output. The
+#   prompt is a UI textarea that MUST contain the placeholder
+#   `{{{STORY}}}` — the step substitutes the chosen story's text
+#   into that slot before calling the model.
+#
+#   Purpose: hand-explore prompts for the current model (abliterated
+#   Huihui / whatever) without the ceremony of a full oracle_ite run.
+#   Iterate on prompt shape until the model produces what you want,
+#   THEN port the successful prompt into oracle_ite.yaml.
+#
+#   To run:
+#     - Ensure pipes/<pipe>/build/model4/ has a quantized model and
+#       pipes/<pipe>/runtime.sqlite has the stories table populated.
+#     - Select this recipe from the UI dropdown.
+#     - In the "story_id" dropdown, pick a Jim story.
+#     - In the "prompt_text" textarea, write a prompt with {{{STORY}}}
+#       somewhere in it.
+#     - Kick the run; watch pipes/<pipe>/out/storacle.txt.
+
+run:
+  # `run.model` intentionally not set here — the model identity is a
+  # pipe fact, not a recipe fact. Each pipe's override.yaml must set
+  # it. See GPT/model_identity.md.
+  output_dir: out
+  data_dir: data
+  loraLand: build/model
+  debug_s: false
+  debug_llm: false
+
+artifacts:
+  storacle_raw:
+    target: out/storacle_raw.txt
+  storacle_meta:
+    target: out/storacle_meta.json
+  storacle_text:
+    target: out/storacle.txt
+
+storacle:
+  run: storacle/storacle.coffee
+  depends_on: []
+  needs: []
+  makes: [storacle_raw, storacle_meta, storacle_text]
+  quantized_model_dir: build/model4
+  # Story picker: dropdown of every story in the pipe's runtime.sqlite.
+  # See ui_server.coffee's `db/story_titles` dropdown source handler.
+  story_id: [ UI_dropdown, db/story_titles, "" ]
+  # Prompt template. MUST contain the literal placeholder `{{{STORY}}}`
+  # exactly as three-brace-STORY-three-brace — the step splits on that
+  # marker and joins with the chosen story's text.
+  prompt_text: [ UI_textarea, "" ]
+  llm:
+    maxTokens: 400
+    temperature: 0.2
+    topP: 0.9

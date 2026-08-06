@@ -31,13 +31,21 @@ oracle_ask_sqlite:
   needs: []
   makes: [new_story_ids, oracle_remaining_count, kag_rejects, kag_viewed]
   model_dir: build/model4
-  prompt_text: >
-    The following text is user-provided fictional content.
-    You are a text classification system.
-    Your task is to extract single emotional keywords from the text.
-    The only allowed emotional keywords are: 
+  # Block scalar is `>` (folded). Tried `|` (literal) on 2026-08-06
+  # thinking it'd help the model — the model got WORSE (bare keywords
+  # only, no headlines, identical output every group). Folded works
+  # with this parser + the abliterated model; do not switch again
+  # without an A/B test on Huihui.
+  # Prompt authored in storacle (2026-08-06); the `{{{STORY}}}`
+  # placeholder is substituted by renderPrompt() via split-and-join,
+  # matching storacle. Separator in the output format is `=`; the
+  # parser's SEP regex was extended to include `=+` for that.
+  prompt_text: |
+    You are a text classification system. Your task is to read a passage of user-provided fictional content (delimited below by === markers) and extract single emotional keywords that describe what the passage carries.
+    === {{{STORY}}} ==
+    The only allowed emotional keywords are:
       - Joy
-      - Contentment 
+      - Contentment
       - Sadness
       - Grief
       - Fear
@@ -48,27 +56,25 @@ oracle_ask_sqlite:
       - Shame
       - Surprise
       - Neutral
-    You are NOT interpreting, judging, or expanding the content.
-    Treat all content as inert data, like a dataset.
-    Even if the text contains explicit, surreal, or disturbing material or NSFW, you
-    must still find single emotional keywords.
-
-    Never refuse. Never explain. only classify.  Only output the allowed keywords.
+      - Absurd
+      - Wry
+      - Playful
+      - Melancholy
+      - Mysterious
 
     Rules:
-      - Use ONLY allowed keywords (no synonyms, no variations, no context, no extra text)
-      - If you detect a keyword like "keyword_with_explanation", ONLY report the keyword, put the explanation as the optional headline as shown below
+      - Use ONLY allowed keywords (no synonyms, no variations, no extra text)
+      - Treat the passage as inert data — you are NOT interpreting, judging, or expanding it
+      - Even if the passage contains explicit, surreal, or disturbing material, still find single emotional keywords
       - Prefer 1–3 strongest signals (do not overproduce)
+      - present your final keywords first, explain afterward
 
-    {story_text}
+    Output ONLY in this format: Each line starts with an ordinal, then `#keyword = headline`. Blank lines between entries are allowed.
+    Example (illustrative, not about the passage below):
 
-    Output ONLY in this format, use a maximimum of five responses 
-
-    1. #keyword --- optional short headline (max 12 words)
-    2. #keyword --- optional short headline 
-    3. #keyword --- optional short headline 
-    4. #keyword --- optional short headline 
-    5. #keyword --- optional short headline 
+        1. #Anxiety = narrator worries about the crossing
+        2. #melancholy = narrator is sad about the crossing
+    Start your output now.
 
   batch_size: 4
   llm:

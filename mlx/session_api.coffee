@@ -151,19 +151,47 @@ createSession = (opts = {}) ->
       temperature = gopts.temperature ? 1.0
       systemPrompt = gopts.systemPrompt ? null
 
+      # Dispose any KV cache left over from a prior call so each
+      # generate() is truly independent. `embed()` already does this
+      # (see below); `generate()` did not, which meant that calling
+      # `dispatch({op:'generate'})` back-to-back inherited stale
+      # attention state from the previous prompt. Symptom: later
+      # groups' outputs referenced content from earlier groups even
+      # though prompts were rendered per-group.
+      mx.dispose?(llm.kvCache) if llm.kvCache
+      llm.kvCache = null
+
       prompt = if gopts.raw then userText else formatChatML(userText, systemPrompt)
       promptEmbeds = await llm.encode(prompt)
       mx.eval promptEmbeds
       promptTokens = promptEmbeds.shape[1]
 
+      # Stop the generation loop early if the model emits any of these
+      # end-of-text markers. Otherwise it burns the rest of maxTokens
+      # producing hallucinated echoes of the prompt after `<|endoftext|>`,
+      # which is (a) wasted compute and (b) noise in the raw text the
+      # downstream parser has to normalize back out. TAIL_WIN just has
+      # to exceed the longest marker (`<|endoftext|>` = 13 chars).
+      STOP_MARKERS = ['<|endoftext|>', '<|im_end|>', '</s>']
+      TAIL_WIN     = 32
+
       tStart = Date.now()
       firstTokenAt = null
       chunks = []
       count = 0
+      stopMarkerHit = null
+      runningTail = ''
       for await pieces from llm.generate(promptEmbeds, {maxTokens, topP, temperature})
         firstTokenAt ?= Date.now()
-        chunks.push pieces[0]
+        piece = pieces[0]
+        chunks.push piece
         count += 1
+        runningTail = (runningTail + piece).slice(-TAIL_WIN)
+        for marker in STOP_MARKERS
+          if runningTail.indexOf(marker) >= 0
+            stopMarkerHit = marker
+            break
+        break if stopMarkerHit?
       tEnd = Date.now()
 
       elapsed = (tEnd - tStart) / 1000
@@ -172,6 +200,10 @@ createSession = (opts = {}) ->
       tokPerSec = if decodeSec > 0 then (count - 1) / decodeSec else 0
 
       rawText = chunks.join ''
+      # Truncate at the marker so downstream never sees the noise.
+      if stopMarkerHit?
+        idx = rawText.indexOf stopMarkerHit
+        rawText = rawText.slice(0, idx) if idx >= 0
 
       text:            cleanGeneratedText(rawText)
       rawText:         rawText
@@ -180,6 +212,7 @@ createSession = (opts = {}) ->
       elapsedSec:      elapsed
       ttftSec:         ttftSec
       tokPerSec:       tokPerSec
+      stopMarker:      stopMarkerHit   # null if maxTokens capped the run
       peakMemGB:       (mx.getPeakMemory?() ? 0) / (1024*1024*1024)
       activeMemGB:     (mx.getActiveMemory?() ? 0) / (1024*1024*1024)
 
