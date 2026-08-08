@@ -172,8 +172,25 @@ createSession = (opts = {}) ->
       # which is (a) wasted compute and (b) noise in the raw text the
       # downstream parser has to normalize back out. TAIL_WIN just has
       # to exceed the longest marker (`<|endoftext|>` = 13 chars).
-      STOP_MARKERS = ['<|endoftext|>', '<|im_end|>', '</s>']
-      TAIL_WIN     = 32
+      #
+      # `<|endoftext|>` and `</s>` are true end-of-generation markers
+      # (the model is signalling "I'm out of content"). Honor them.
+      #
+      # `<|im_end|>` is DIFFERENT — it's a Qwen chat-template turn
+      # delimiter. A model trained/adapted on chat-format data emits
+      # it at natural paragraph breaks even in raw-mode generation.
+      # If we treat it as a stop marker, an adapter that emits it
+      # after the first paragraph truncates the letter to that one
+      # paragraph. So `<|im_end|>` is NOT in this list. Callers who
+      # want chat-turn stopping can post-process the raw text.
+      #
+      # MIN_CONTENT_BEFORE_STOP: even the "true" markers can fire
+      # early with a fresh adapter. Ignore any marker until at least
+      # this many non-whitespace chars have been generated, so we
+      # never truncate to empty.
+      STOP_MARKERS            = ['<|endoftext|>', '</s>']
+      TAIL_WIN                = 32
+      MIN_CONTENT_BEFORE_STOP = 16
 
       tStart = Date.now()
       firstTokenAt = null
@@ -181,17 +198,32 @@ createSession = (opts = {}) ->
       count = 0
       stopMarkerHit = null
       runningTail = ''
+      contentSoFarChars = 0     # non-whitespace chars accumulated
+      ignoredEarlyStops = []    # markers seen too early — logged for diagnosis
       for await pieces from llm.generate(promptEmbeds, {maxTokens, topP, temperature})
         firstTokenAt ?= Date.now()
         piece = pieces[0]
         chunks.push piece
         count += 1
+        # Track "real content" — non-whitespace chars only.
+        for ch in piece
+          contentSoFarChars += 1 if /\S/.test(ch)
         runningTail = (runningTail + piece).slice(-TAIL_WIN)
+        hit = null
         for marker in STOP_MARKERS
           if runningTail.indexOf(marker) >= 0
-            stopMarkerHit = marker
+            hit = marker
             break
-        break if stopMarkerHit?
+        continue unless hit?
+        if contentSoFarChars < MIN_CONTENT_BEFORE_STOP
+          # Marker fired before real content — likely adapter noise.
+          # Blank the tail so the same marker doesn't retrigger every
+          # iteration, then keep generating.
+          ignoredEarlyStops.push {marker: hit, atToken: count, contentSoFar: contentSoFarChars}
+          runningTail = ''
+          continue
+        stopMarkerHit = hit
+        break
       tEnd = Date.now()
 
       elapsed = (tEnd - tStart) / 1000
@@ -200,10 +232,14 @@ createSession = (opts = {}) ->
       tokPerSec = if decodeSec > 0 then (count - 1) / decodeSec else 0
 
       rawText = chunks.join ''
-      # Truncate at the marker so downstream never sees the noise.
+      # Truncate at the honored marker (position guaranteed > 0 by the
+      # MIN_CONTENT_BEFORE_STOP check above — we won't truncate to empty).
       if stopMarkerHit?
         idx = rawText.indexOf stopMarkerHit
         rawText = rawText.slice(0, idx) if idx >= 0
+
+      if ignoredEarlyStops.length
+        console.error "[session.generate] ignored #{ignoredEarlyStops.length} early stop-marker(s) (adapter-quirk?): #{JSON.stringify ignoredEarlyStops}"
 
       text:            cleanGeneratedText(rawText)
       rawText:         rawText

@@ -401,6 +401,60 @@ mergeEmotionLists = (rows) ->
 @buildStoryGroups              = buildStoryGroups
 @buildRetryChunks              = buildRetryChunks
 
+# Explain why a single (key, value) pair either passes or fails the
+# emotion filter. Mirrors the probe's explainRejection — used inline
+# by the action so live runs surface WHY the filter dropped anything.
+explainKeyVerdict = (key, value) ->
+  emotionKey = normalizeAllowedEmotionKeyword(key) ? normalizeAllowedEmotionKeyword(value)
+  unless emotionKey?
+    return {status: 'rejected', rule: 'not_in_allowed_keywords'}
+  emotionText = cleanFragment value
+  unless emotionText.length
+    return {status: 'rejected', rule: 'empty_after_clean'}
+  for p in REJECT_PATTERNS
+    if p.re.test(emotionKey) or p.re.test(emotionText)
+      return {status: 'rejected', rule: p.name, matched_on: (if p.re.test(emotionKey) then 'key' else 'value')}
+  {status: 'accepted', emotion: emotionKey, headline: emotionText}
+
+# Dump raw + parse tiers + precedence + per-key filter verdicts +
+# final filtered to STDERR. One block per LLM call. This is what makes
+# it possible to see WHY the filter freaks out on a given chunk.
+LOG_RAW_CAP = 800
+logGroupOutcome = (label, raw, filtered) ->
+  console.error ""
+  console.error "── #{label} ──────────────────────────────────────────"
+  rawSnippet = if raw.length > LOG_RAW_CAP then raw.slice(0, LOG_RAW_CAP) + " …[+#{raw.length - LOG_RAW_CAP} chars]" else raw
+  console.error "raw reply (#{raw.length} chars):"
+  for line in rawSnippet.split '\n'
+    console.error "  | #{line}"
+  tiers = extractTiers raw
+  hKeys = Object.keys tiers.headlined
+  bKeys = Object.keys tiers.bare
+  console.error "parse tiers: headlined=#{hKeys.length}  bare=#{bKeys.length}"
+  if hKeys.length
+    console.error "  headlined:"
+    for own k, v of tiers.headlined
+      console.error "    - #{k}: '#{String(v).slice(0, 100)}#{if String(v).length > 100 then '…' else ''}'"
+  if bKeys.length
+    console.error "  bare (dropped if any headlined survive):"
+    for own k, v of tiers.bare
+      console.error "    - #{k}: '#{String(v).slice(0, 100)}#{if String(v).length > 100 then '…' else ''}'"
+  parsed = if hKeys.length > 0 then tiers.headlined else tiers.bare
+  precedence = if hKeys.length > 0 then 'headlined' else 'bare'
+  console.error "precedence: winner=#{precedence}, kept=#{Object.keys(parsed).length}"
+  for own k, v of parsed
+    verdict = explainKeyVerdict k, v
+    status = verdict.status.toUpperCase()
+    rule = if verdict.rule then " (#{verdict.rule})" else ''
+    console.error "  #{status}#{rule}: #{k} → '#{String(v).slice(0, 100)}#{if String(v).length > 100 then '…' else ''}'"
+  filteredCount = Object.keys(filtered ? {}).length
+  console.error "filtered: #{filteredCount} usable"
+  for own k, v of (filtered ? {})
+    console.error "  ✓ #{k}: #{String(v).slice(0, 100)}#{if String(v).length > 100 then '…' else ''}"
+
+@explainKeyVerdict = explainKeyVerdict
+@logGroupOutcome   = logGroupOutcome
+
 @step =
   desc: "Classify sqlite-backed stories with the emotion oracle"
 
@@ -463,17 +517,19 @@ mergeEmotionLists = (rows) ->
       for group in storyGroups
         groupPrompt = renderPrompt promptText, group.text
         attempt1 = await runOracleOnce S, modelDir, groupPrompt, adapterPath, llmConfig
+        logGroupOutcome "#{storyID} · group #{group.group_index} (paras #{group.start_paragraph}-#{group.end_paragraph})", attempt1.raw, attempt1.filtered
         finalAttempt = attempt1
         retryAttempts = []
 
         unless isUsableEmotionList(attempt1.filtered)
-          console.log "[oracle_ask_sqlite] retrying #{storyID} group #{group.group_index} after filter rejection"
+          console.error "[oracle_ask_sqlite] retrying #{storyID} group #{group.group_index} after filter rejection"
           retryChunks = buildRetryChunks group.text, 1024
           successfulChunkFilters = []
 
-          for chunk in retryChunks
+          for chunk, cIdx in retryChunks
             chunkPrompt = renderPrompt promptText, chunk.text
             attempt2 = await runOracleOnce S, modelDir, chunkPrompt, adapterPath, llmConfig, true
+            logGroupOutcome "#{storyID} · group #{group.group_index} · retry chunk #{cIdx+1}/#{retryChunks.length}", attempt2.raw, attempt2.filtered
             usable = isUsableEmotionList(attempt2.filtered)
             retryAttempts.push
               group_index: group.group_index

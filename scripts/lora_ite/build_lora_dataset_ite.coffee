@@ -4,20 +4,16 @@
   Shapes the selected training stories into the JSONL
   shards (`train.jsonl`, `valid.jsonl`, `test.jsonl`)
   that `mlx_lm.lora` expects. Owns token-budget
-  estimation and paragraph splitting; the
-  `splitParagraphs` heuristic is what keeps a single
-  long story from blowing the model's context window.
+  estimation, paragraph splitting, and the story-level
+  train/valid/test partition. `splitParagraphs` is what
+  keeps a single long story from blowing the model's
+  context window; the deterministic per-story bucketing
+  at the tail is what keeps validation honest — chunks
+  from one story never appear in more than one split.
 ###
 fs = require 'fs'
 path = require 'path'
 
-# Resolve the model's end-of-turn token STRING from its tokenizer config, so
-# every emitted training row can be terminated with it — this is what teaches
-# the adapter to STOP. Read from tokenizer_config.json (the model's own
-# `eos_token`) rather than hardcoding '<|im_end|>' so a different base model's
-# EOT travels correctly. `eos_token` may be a bare string or an AddedToken
-# object ({content: "..."}); handle both. No fallback: if it can't be resolved,
-# fail loudly rather than silently emit rows with no stop signal.
 resolveEotToken = (modelDir) ->
   cfgPath = path.join modelDir, 'tokenizer_config.json'
   throw new Error "[build_lora_dataset_ite] tokenizer_config.json not found at #{cfgPath}" unless fs.existsSync cfgPath
@@ -45,52 +41,42 @@ splitParagraphs = (text) ->
 buildStoryGroups = (paragraphs) ->
   return [] unless Array.isArray(paragraphs)
   return [] unless paragraphs.length
-
   if paragraphs.length < 5
     return [paragraphs.slice()]
-
   groups = []
   total = paragraphs.length
   baseSize = Math.floor(total / 5)
   remainder = total % 5
   startIndex = 0
-
   for groupIndex in [0...5]
     groupSize = baseSize
     groupSize += 1 if groupIndex < remainder
     selected = paragraphs.slice startIndex, startIndex + groupSize
     groups.push selected
     startIndex += groupSize
-
   groups
 
 buildFragmentParagraphs = (paragraphs) ->
   rval = []
   return rval unless Array.isArray(paragraphs)
   return rval if paragraphs.length is 0
-
   firstPara = paragraphs[0] ? ''
   if firstPara.trim().length > 0
     rval.push firstPara.trim()
-
   currentText = rval.join "\n\n"
   currentLen = currentText.length
-
   if currentLen < 300 and paragraphs.length > 2
     secondPara = paragraphs[1] ? ''
     if secondPara.trim().length > 0
       rval.push secondPara.trim()
-
   rval
 
 splitSingleParagraphTrainingText = (paragraph) ->
   text = String(paragraph ? '').trim()
   return null unless text.length >= 120
-
   sentences = text.split /(?<=[.!?])\s+/
     .map (sentence) -> String(sentence ? '').trim()
     .filter (sentence) -> sentence.length > 0
-
   if sentences.length >= 2
     promptSentences = 1
     if sentences.length >= 4
@@ -99,19 +85,40 @@ splitSingleParagraphTrainingText = (paragraph) ->
     completion = sentences.slice(promptSentences).join " "
     if prompt.length > 0 and completion.length > 0
       return prompt: prompt + "\n\n", completion: completion
-
   words = text.split /\s+/
     .map (word) -> String(word ? '').trim()
     .filter (word) -> word.length > 0
   return null unless words.length >= 24
-
   splitAt = Math.max 8, Math.floor(words.length * 0.35)
   return null if splitAt >= words.length
-
   prompt = words.slice(0, splitAt).join " "
   completion = words.slice(splitAt).join " "
   return null unless prompt.length > 0 and completion.length > 0
   prompt: prompt + "\n\n", completion: completion
+
+# Deterministic per-story split. Sort story ids, then bucket by index:
+# 0..7 → train, 8 → valid, 9 → test. No RNG state; identical stories in
+# identical order always land in identical splits. Bucketing by story
+# rather than by row matters because the chunker above emits multiple
+# rows per story sharing the same prompt prefix — a row-level split
+# would put near-duplicates in train AND valid, and valid loss would
+# collapse into a memorization score.
+splitStoryIds = (storyIds, trainOut = 8, validOut = 1, testOut = 1) ->
+  total = trainOut + validOut + testOut
+  sorted = storyIds.slice().sort()
+  buckets =
+    train: []
+    valid: []
+    test:  []
+  for id, i in sorted
+    bucket = i % total
+    if bucket < trainOut
+      buckets.train.push id
+    else if bucket < trainOut + validOut
+      buckets.valid.push id
+    else
+      buckets.test.push id
+  buckets
 
 @step =
   desc: "Build LoRA train/valid/test rows from SQLite-backed stories"
@@ -129,14 +136,21 @@ splitSingleParagraphTrainingText = (paragraph) ->
       L.done()
       return
 
-    rows = []
+    # Rows tagged with their origin story so we can bucket by story
+    # after every row is emitted. The chunker is unchanged; it just
+    # calls emit(storyID, rowText) instead of pushing to a flat array.
+    rowsByStory = {}
+    processedStoryIds = []
     rowsWritten = 0
     fallbackRowsWritten = 0
     storiesProcessed = 0
 
-    # Row token budget (estimateTokens = chars/4). Lower it to build shorter
-    # rows that fit under the trainer's maxSeqLength WITHOUT truncation — so the
-    # appended EOT lands only at a natural completion end, never mid-word.
+    emit = (storyID, textOut) ->
+      rowsByStory[storyID] ?= []
+      rowsByStory[storyID].push text: textOut
+      rowsWritten += 1
+      return
+
     MAX_TOTAL_TOKENS = Number(L.param('max_total_tokens', 1024))
     SAFETY_TOKENS = 64
 
@@ -157,7 +171,6 @@ splitSingleParagraphTrainingText = (paragraph) ->
       continue unless fullStoryText.length > 0
 
       paragraphs = splitParagraphs fullStoryText
-
       continue unless paragraphs.length > 0
 
       storyGroups = buildStoryGroups paragraphs
@@ -180,15 +193,11 @@ splitSingleParagraphTrainingText = (paragraph) ->
           if groupParagraphs.length is 1
             fallback = splitSingleParagraphTrainingText groupParagraphs[0]
             if fallback?
-              rows.push text: fallback.prompt + fallback.completion
-              rowsWritten += 1
+              emit storyID, fallback.prompt + fallback.completion
               fallbackRowsWritten += 1
           continue
 
         maxCompletionTokens = MAX_TOTAL_TOKENS - promptTokens - SAFETY_TOKENS
-        # Graceful skip (was a hard throw): a small max_total_tokens can make a
-        # long fragment prompt exceed the budget. Skip that group rather than
-        # crash the whole build.
         if maxCompletionTokens < 80
           console.log "[#{L.stepName}] skip group in #{storyID}: prompt too large (#{promptTokens} tok) for budget #{MAX_TOTAL_TOKENS}"
           continue
@@ -196,15 +205,10 @@ splitSingleParagraphTrainingText = (paragraph) ->
         chunkParagraphs = []
         chunkTokens = 0
 
-        flushChunk = (isLastChunk) ->
+        flushChunk = ->
           return unless chunkParagraphs.length > 0
-
           completionText = chunkParagraphs.join "\n\n"
-
-          textOut = prompt + completionText
-
-          rows.push text: textOut
-          rowsWritten += 1
+          emit storyID, prompt + completionText
           chunkParagraphs = []
           chunkTokens = 0
           return
@@ -214,7 +218,7 @@ splitSingleParagraphTrainingText = (paragraph) ->
           proposedTokens = chunkTokens + paraTokens
 
           if chunkParagraphs.length > 0 and proposedTokens > maxCompletionTokens
-            flushChunk false
+            flushChunk()
 
           if paraTokens > maxCompletionTokens
             sentences = para.split /(?<=[.!?])\s+/
@@ -229,10 +233,7 @@ splitSingleParagraphTrainingText = (paragraph) ->
               proposedSentenceTokens = sentenceTokens + sentTokens
 
               if sentenceChunk.length > 0 and proposedSentenceTokens > maxCompletionTokens
-                completionText = sentenceChunk.join " "
-                textOut = prompt + completionText
-                rows.push text: textOut
-                rowsWritten += 1
+                emit storyID, prompt + sentenceChunk.join(" ")
                 sentenceChunk = []
                 sentenceTokens = 0
 
@@ -240,27 +241,23 @@ splitSingleParagraphTrainingText = (paragraph) ->
               sentenceTokens += sentTokens
 
             if sentenceChunk.length > 0
-              isLastSentenceChunk = idx is completionParagraphs.length - 1
-              completionText = sentenceChunk.join " "
-              textOut = prompt + completionText
-              rows.push text: textOut
-              rowsWritten += 1
+              emit storyID, prompt + sentenceChunk.join(" ")
 
             continue
 
           chunkParagraphs.push para
           chunkTokens += paraTokens
 
-        if chunkParagraphs.length > 0
-          flushChunk true
+        flushChunk() if chunkParagraphs.length > 0
 
       storiesProcessed += 1
+      processedStoryIds.push storyID if rowsByStory[storyID]?
 
     console.log "[build_lora_dataset_ite] stories processed:", storiesProcessed
     console.log "[build_lora_dataset_ite] rows written:", rowsWritten
     console.log "[build_lora_dataset_ite] single-paragraph fallback rows:", fallbackRowsWritten
 
-    if rows.length is 0
+    if rowsWritten is 0
       shutdownAt = new Date().toISOString()
       console.log "[build_lora_dataset_ite] selected stories produced no trainable rows; shutting down pipeline cleanly"
       L.saveThis 'pipeline:shutdown',
@@ -273,22 +270,40 @@ splitSingleParagraphTrainingText = (paragraph) ->
       L.done()
       return
 
-    # --- EOS supervision -----------------------------------------------------
-    # Append the model's end-of-turn token to every emitted row's completion.
-    # Each row is `prompt + completion`, so the end of `text` IS the end of the
-    # completion — appending here terminates the completion for all row shapes
-    # (chunked, sentence-split, and single-paragraph fallback) in one place,
-    # without touching the chunking logic above. train.coffee's raw
-    # tokenizer.encode maps this string to the single EOT id and it lands inside
-    # the loss mask (it is the last real target, and pad_token != eos_token).
+    # --- EOS supervision ---------------------------------------------------
     modelDir = L.param('quantized_model_dir', null) ? L.param('loraLand', null)
     throw new Error "[#{L.stepName}] Missing model directory (quantized_model_dir or loraLand) — needed to read the end-of-turn token" unless modelDir?
     eotToken = resolveEotToken modelDir
-    rows = rows.map (row) -> text: "#{row.text}#{eotToken}"
-    console.log "[build_lora_dataset_ite] appended EOT #{JSON.stringify eotToken} to #{rows.length} rows"
 
-    L.make 'train_rows', rows
-    L.make 'valid_rows', rows
-    L.make 'test_rows', rows
+    # --- Deterministic per-story split (80/10/10) --------------------------
+    # Under 10 stories, plain modulo can leave valid/test empty; guard by
+    # moving one story from train into each empty non-train bucket when we
+    # have at least 3 stories to distribute.
+    buckets = splitStoryIds processedStoryIds
+    if processedStoryIds.length >= 3
+      if buckets.valid.length is 0
+        buckets.valid.push buckets.train.pop()
+      if buckets.test.length is 0
+        buckets.test.push buckets.train.pop()
+
+    collect = (ids) ->
+      out = []
+      for id in ids
+        continue unless rowsByStory[id]?
+        for row in rowsByStory[id]
+          out.push text: "#{row.text}#{eotToken}"
+      out
+
+    trainRows = collect buckets.train
+    validRows = collect buckets.valid
+    testRows  = collect buckets.test
+
+    console.log "[build_lora_dataset_ite] split: #{buckets.train.length} train / #{buckets.valid.length} valid / #{buckets.test.length} test stories"
+    console.log "[build_lora_dataset_ite] rows:  #{trainRows.length} train / #{validRows.length} valid / #{testRows.length} test"
+    console.log "[build_lora_dataset_ite] appended EOT #{JSON.stringify eotToken}"
+
+    L.make 'train_rows', trainRows
+    L.make 'valid_rows', validRows
+    L.make 'test_rows',  testRows
     L.done()
     return

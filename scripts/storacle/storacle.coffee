@@ -25,22 +25,15 @@
   Story text lookup: CWD/runtime.sqlite → stories.text WHERE story_id = ?.
 ###
 
-fs = require 'fs'
-path = require 'path'
-{ DatabaseSync } = require 'node:sqlite'
-
 PLACEHOLDER = '{{{STORY}}}'
 
-readStoryText = (storyId) ->
-  dbPath = path.join process.cwd(), 'runtime.sqlite'
-  unless fs.existsSync dbPath
-    throw new Error "[storacle] runtime.sqlite not found at #{dbPath}"
-  db = new DatabaseSync dbPath, {readOnly: true}
-  try
-    row = db.prepare("SELECT text FROM stories WHERE story_id = ?").get(storyId)
-    return row?.text
-  finally
-    try db.close() catch then null
+# Use the sqlite meta device's `storyByID` request (see
+# meta/sqlite.coffee) rather than opening runtime.sqlite directly —
+# per the "meta methods for file system access" convention. Returns
+# undefined when the story_id isn't in the stories table.
+readStoryText = (L, storyId) ->
+  row = L.theLowdown("storyByID{#{storyId}}.json")?.value
+  row?.text
 
 @step =
   desc: "Substitute {{{STORY}}} in prompt_text with a chosen story's text and call callLLM(generate)"
@@ -57,7 +50,7 @@ readStoryText = (storyId) ->
     unless template.indexOf(PLACEHOLDER) >= 0
       throw new Error "[#{L.stepName}] prompt_text must contain the placeholder #{PLACEHOLDER} — that's where the story text will be substituted"
 
-    storyText = readStoryText storyId
+    storyText = readStoryText L, storyId
     throw new Error "[#{L.stepName}] no story with story_id='#{storyId}' in CWD/runtime.sqlite" unless storyText?
 
     # Single-occurrence substitution — replace ALL occurrences so a
