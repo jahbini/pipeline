@@ -138,6 +138,21 @@ createSession = (opts = {}) ->
     console.log "[session_api] adapter #{adapterPath}: wrapped #{wrappedInfo.count} modules (rank=#{wrapOpts.rank ? '?'} numLayers=#{wrapOpts.numLayers ? 'all'}), loaded #{loadResult?.loaded ? '?'}/#{loadResult?.expected ? '?'} tensors"
 
   tokenizer = new Tokenizer(modelDir)
+  # If an adapter is loaded, neutralize the library-layer EOS shortcut.
+  # @frost-beta/llm/base.js:248 breaks its generator loop the instant the
+  # sampled token id equals tokenizer.eosToken WITHOUT yielding the token,
+  # so our text-layer STOP_MARKERS scan never sees it. For Qwen3 the eos
+  # is <|im_end|> — which the adapter was TRAINED to emit as its EOT (see
+  # build_lora_dataset_ite: rows end with tokenizer_config.eos_token). The
+  # adapter honestly signals "done" after very short completions; without
+  # this override the library truncates every generation at the first EOT
+  # the adapter emits, regardless of MIN_CONTENT_BEFORE_STOP. Setting to
+  # -1 (an impossible token id) forces the library to keep yielding; the
+  # loop below then handles stopping via STOP_MARKERS + the content guard.
+  if opts.adapterPath? and String(opts.adapterPath).trim().length > 0
+    originalEos = tokenizer.eosToken
+    tokenizer.eosToken = -1
+    console.log "[session_api] eos shortcut neutralized (was #{originalEos}); text-layer STOP_MARKERS now authoritative"
   llm = new LLM(model, tokenizer)
 
   api =
@@ -188,7 +203,11 @@ createSession = (opts = {}) ->
       # early with a fresh adapter. Ignore any marker until at least
       # this many non-whitespace chars have been generated, so we
       # never truncate to empty.
-      STOP_MARKERS            = ['<|endoftext|>', '</s>']
+      # `<|im_end|>` is included so adapter runs (where we neutralized the
+      # library-layer EOS shortcut above) still stop eventually — but the
+      # MIN_CONTENT_BEFORE_STOP guard below ignores it until real content
+      # accumulates, so early adapter emissions don't truncate to a greeting.
+      STOP_MARKERS            = ['<|endoftext|>', '</s>', '<|im_end|>']
       TAIL_WIN                = 32
       MIN_CONTENT_BEFORE_STOP = 16
 
@@ -198,16 +217,21 @@ createSession = (opts = {}) ->
       count = 0
       stopMarkerHit = null
       runningTail = ''
-      contentSoFarChars = 0     # non-whitespace chars accumulated
       ignoredEarlyStops = []    # markers seen too early — logged for diagnosis
+      # Real-content check must EXCLUDE the stop marker's own chars — an
+      # `<|endoftext|>` piece is 13 non-ws chars and would otherwise vault
+      # contentSoFar over the threshold on its own, defeating the guard.
+      realContentChars = ->
+        joined = chunks.join ''
+        joined = joined.split(m).join('') for m in STOP_MARKERS
+        n = 0
+        n += 1 for ch in joined when /\S/.test(ch)
+        n
       for await pieces from llm.generate(promptEmbeds, {maxTokens, topP, temperature})
         firstTokenAt ?= Date.now()
         piece = pieces[0]
         chunks.push piece
         count += 1
-        # Track "real content" — non-whitespace chars only.
-        for ch in piece
-          contentSoFarChars += 1 if /\S/.test(ch)
         runningTail = (runningTail + piece).slice(-TAIL_WIN)
         hit = null
         for marker in STOP_MARKERS
@@ -215,11 +239,16 @@ createSession = (opts = {}) ->
             hit = marker
             break
         continue unless hit?
-        if contentSoFarChars < MIN_CONTENT_BEFORE_STOP
+        contentSoFar = realContentChars()
+        if contentSoFar < MIN_CONTENT_BEFORE_STOP
           # Marker fired before real content — likely adapter noise.
-          # Blank the tail so the same marker doesn't retrigger every
-          # iteration, then keep generating.
-          ignoredEarlyStops.push {marker: hit, atToken: count, contentSoFar: contentSoFarChars}
+          # Drop the marker from chunks (so it can't re-trigger next iter)
+          # and blank the tail, then keep generating.
+          ignoredEarlyStops.push {marker: hit, atToken: count, contentSoFar}
+          joined = chunks.join ''
+          idx = joined.indexOf hit
+          joined = joined.slice(0, idx) + joined.slice(idx + hit.length) if idx >= 0
+          chunks = [joined]
           runningTail = ''
           continue
         stopMarkerHit = hit
