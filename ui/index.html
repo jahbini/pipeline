@@ -35,6 +35,35 @@
     h1, h2 { margin: 0 0 12px; }
     h1 { font-size: 34px; letter-spacing: 0.02em; }
     h2 { font-size: 16px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    /* Pipeline Graph panel: full-width above the two-column grid.
+       Larger font than the SVG's built-in 12px baseline. */
+    .pipeline-graph-panel {
+      margin-bottom: 16px;
+    }
+    .pipeline-graph-panel #pipeline-graph {
+      width: 100%;
+      overflow-x: auto;
+    }
+    /* SVG has viewBox="0 0 W H" width="100%", so browser scales internal
+       units by (container_px / W). A wide multi-script viewBox (e.g. 2160×820)
+       gives ~0.65 scale on a 1400px container — internal font-size 24 renders
+       as ~15.6 visual px.
+       max-height caps the tall+narrow case (one-script recipe with several
+       stacked artifacts, viewBox e.g. 300×800). Without a cap, width:100%
+       + preserveAspectRatio scales height to 100%×(H/W), blowing circles up
+       3–5×. With the cap, tall graphs letterbox to natural aspect at a
+       humane size; wide graphs are unaffected (they never hit the cap). */
+    .pipeline-graph-panel .pipeline-svg {
+      font-size: 24px;
+      width: 100%;
+      height: auto;
+      min-height: 320px;
+      max-height: min(65vh, 560px);
+    }
+    .pipeline-graph-panel .pipeline-svg .node-label {
+      font-size: 26px;
+      font-weight: 500;
+    }
     .grid {
       display: grid;
       grid-template-columns: 1.2fr 1fr;
@@ -438,6 +467,12 @@
       <div id="run-status" class="status">unknown</div>
     </div>
 
+    <section class="panel pipeline-graph-panel">
+      <h2>Pipeline Graph</h2>
+      <div id="pipeline-graph-status" class="hint mono"></div>
+      <div id="pipeline-graph"></div>
+    </section>
+
     <div class="grid">
       <div class="column">
         <section class="panel">
@@ -639,6 +674,32 @@
 	      </div>
 	    </div>
 	  </div>
+
+  <div id="step-modal-shell" class="modal-shell">
+    <div class="modal">
+      <div class="modal-top">
+        <div>
+          <strong id="step-modal-title" class="mono"></strong>
+          <div id="step-modal-meta" class="mono hint"></div>
+        </div>
+        <button id="step-modal-close" class="modal-close" type="button">X</button>
+        <button id="step-modal-restart" class="modal-close" type="button" style="background:#c46a20; color:#fff; font-weight:600;">Restart This Step</button>
+      </div>
+      <div class="modal-body">
+        <div id="step-modal-status" class="hint mono" style="margin-bottom:8px;"></div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+          <div>
+            <div class="hint mono" style="margin-bottom:4px;">state/step-<span id="step-modal-name-a"></span>.json</div>
+            <pre id="step-modal-state" style="max-height:60vh; overflow:auto;"></pre>
+          </div>
+          <div>
+            <div class="hint mono" style="margin-bottom:4px;">params/<span id="step-modal-name-b"></span>.yaml</div>
+            <pre id="step-modal-params" style="max-height:60vh; overflow:auto;"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script>
     const byId = (id) => document.getElementById(id);
@@ -1155,6 +1216,15 @@
     }
 
     async function refresh() {
+      // While any full-screen modal is open, freeze the UI. Applies to
+      // both the file-viewer modal and the step-detail modal.
+      const modalOpen =
+        byId('file-modal-shell')?.classList.contains('open') ||
+        byId('step-modal-shell')?.classList.contains('open');
+      if (modalOpen) {
+        console.debug('[ui] refresh:skipped (modal open)');
+        return;
+      }
       console.debug('[ui] refresh:start');
       const res = await fetch('/api/status', { cache: 'no-store' });
       const data = await res.json();
@@ -1225,15 +1295,225 @@
       renderSteps(data.steps);
       byId('latest-log').textContent = data.latest_log || '';
       byId('latest-err').textContent = data.latest_err || '';
+      refreshPipelineGraph(data.steps, data.out_files).catch(console.error);
       // SQLite panels fire once per refresh tick. They're independent of the
       // /api/status payload — each issues its own request-keyed query.
       refreshSqlitePanels().catch((err) => console.error('[sqlite-panels]', err));
     }
 
+    // Pipeline Graph — fetch the current pipe's experiment.yaml as an
+    // SVG DAG (rendered by /api/pipeline_svg, backed by pipeline_svg.coffee).
+    // Mirrors #steps-body status classes onto the corresponding
+    // <g data-step="..."> nodes so a running step glows in the diagram
+    // the same way it does in the steps table. Also mirrors the
+    // out_files existence + freshness onto <g data-artifact="..."
+    // data-target="..."> so artifacts show empty vs full vs stale.
+    let lastGraphSig = '';
+    async function refreshPipelineGraph(steps, outFiles) {
+      const container = byId('pipeline-graph');
+      const statusEl = byId('pipeline-graph-status');
+      if (!container) return;
+      // Signal: (currentPipe, runPipeline). Same pair → don't re-fetch.
+      const sig = `${currentPipeName || ''}::${byId('subtitle')?.textContent || ''}`;
+      let svgEl = container.querySelector('svg');
+      if (sig !== lastGraphSig || !svgEl) {
+        try {
+          const res = await fetch('/api/pipeline_svg', { cache: 'no-store' });
+          if (res.ok) {
+            const svgText = await res.text();
+            container.innerHTML = svgText;
+            svgEl = container.querySelector('svg');
+            lastGraphSig = sig;
+            statusEl.textContent = '';
+            // Wire click-to-view on each artifact circle. Reuses the
+            // existing openFileModal() (full-page text + copy-to-
+            // clipboard). Attach ONCE per fetch — the SVG is rebuilt
+            // on pipe/recipe change, so listeners rebind automatically
+            // and we don't need to un-bind stale ones.
+            svgEl.querySelectorAll('.node.artifact[data-target]').forEach((n) => {
+              n.style.cursor = 'pointer';
+              n.addEventListener('click', async (ev) => {
+                ev.stopPropagation();
+                const target = n.getAttribute('data-target');
+                if (!target) return;
+                // Absent files: openFileModal throws with server's
+                // 404 message. Show it inline in the panel status
+                // area instead of a browser dialog.
+                try {
+                  await openFileModal(target);
+                } catch (err) {
+                  const msg = String(err?.message || err);
+                  statusEl.textContent = `${target}: ${msg}`;
+                  console.debug('[pipeline-graph] artifact open failed', target, err);
+                }
+              });
+            });
+            // Script circles → step-detail modal with a Restart button.
+            svgEl.querySelectorAll('.node.script[data-step]').forEach((n) => {
+              n.style.cursor = 'pointer';
+              n.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                const step = n.getAttribute('data-step');
+                if (step) openStepModal(step).catch(console.error);
+              });
+            });
+          } else {
+            const msg = await res.text();
+            statusEl.textContent = msg || `graph unavailable (${res.status})`;
+            container.innerHTML = '';
+            lastGraphSig = '';
+            return;
+          }
+        } catch (err) {
+          statusEl.textContent = String(err?.message || err);
+          return;
+        }
+      }
+      if (!svgEl) return;
+
+      // ── Step status: mirror data.steps onto script circles ──
+      // NOTE: /api/status ships each step row with its NAME under
+      // `.step` (see #steps-body's renderSteps → row.step). Earlier
+      // code read `.name` which is undefined for these rows — that's
+      // why script circles stayed hollow. Accept either shape now.
+      if (Array.isArray(steps)) {
+        const wanted = new Map();
+        for (const s of steps) {
+          const name = s?.step ?? s?.name;
+          const status = String(s?.status || '').toLowerCase();
+          if (name && status) wanted.set(name, status);
+        }
+        svgEl.querySelectorAll('.node.script').forEach((n) => {
+          const name = n.getAttribute('data-step');
+          n.classList.remove('pending', 'running', 'done', 'failed');
+          const st = wanted.get(name);
+          if (st && ['pending', 'running', 'done', 'failed'].includes(st)) {
+            n.classList.add(st);
+          }
+        });
+      }
+
+      // ── Artifact status: mirror data.out_files onto artifact circles ──
+      // Lookup by relative target path (matches pipeline_svg.coffee's
+      // data-target attribute, e.g. "out/story_beats.json"). Source
+      // artifacts (data files that no step produces) keep their
+      // existing .source styling and don't get produced/absent
+      // recoloured — the file's always there by definition.
+      if (Array.isArray(outFiles)) {
+        const byPath = new Map();
+        for (const f of outFiles) {
+          if (f?.path) byPath.set(f.path, f);
+        }
+        svgEl.querySelectorAll('.node.artifact').forEach((n) => {
+          n.classList.remove('produced', 'stale', 'absent');
+          if (n.classList.contains('source')) return;
+          const target = n.getAttribute('data-target');
+          if (!target) return;
+          const info = byPath.get(target);
+          if (!info) {
+            n.classList.add('absent');
+          } else if (info.exists === true) {
+            n.classList.add(info.is_fresh ? 'produced' : 'stale');
+          } else {
+            n.classList.add('absent');
+          }
+        });
+      }
+    }
+
 	    function closeFileModal() {
 	      byId('file-modal-copy-status').textContent = '';
 	      byId('file-modal-shell').classList.remove('open');
+	      // Catch up on state the frozen heartbeat missed while the
+	      // reader had the modal open.
+	      refresh().catch(console.error);
 	    }
+
+    // ── Step-detail modal — opens when a script circle in the SVG
+    //    is clicked. Shows the step's state file + params file, and
+    //    exposes a Restart button that deletes ONLY this step's state
+    //    (leaving control_override and params untouched) and
+    //    relaunches the runner in keep_params mode.
+    let currentStepModalName = null;
+
+    function closeStepModal() {
+      byId('step-modal-shell').classList.remove('open');
+      currentStepModalName = null;
+      refresh().catch(console.error);
+    }
+
+    async function openStepModal(stepName) {
+      currentStepModalName = stepName;
+      byId('step-modal-title').textContent = `Step: ${stepName}`;
+      byId('step-modal-name-a').textContent = stepName;
+      byId('step-modal-name-b').textContent = stepName;
+      byId('step-modal-status').textContent = 'loading…';
+      byId('step-modal-state').textContent = '';
+      byId('step-modal-params').textContent = '';
+      byId('step-modal-shell').classList.add('open');
+      try {
+        const res = await fetch(`/api/step_detail?name=${encodeURIComponent(stepName)}`, { cache: 'no-store' });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        // State pane
+        if (data.state_error) {
+          byId('step-modal-state').textContent = `(read error: ${data.state_error})`;
+        } else if (data.state) {
+          byId('step-modal-state').textContent = JSON.stringify(data.state, null, 2);
+        } else {
+          byId('step-modal-state').textContent = '(no state file yet — step has not been run)';
+        }
+        // Params pane
+        if (data.params_error) {
+          byId('step-modal-params').textContent = `(read error: ${data.params_error})`;
+        } else if (typeof data.params_text === 'string') {
+          byId('step-modal-params').textContent = data.params_text;
+        } else {
+          byId('step-modal-params').textContent = '(no params file yet — pipeline has not materialized params for this step)';
+        }
+        const st = data.state?.status || 'unknown';
+        byId('step-modal-status').textContent = `status: ${st}`;
+      } catch (err) {
+        byId('step-modal-status').textContent = `error: ${String(err?.message || err)}`;
+      }
+    }
+
+    async function restartStep() {
+      if (!currentStepModalName) return;
+      const name = currentStepModalName;
+      const statusEl = byId('step-modal-status');
+      statusEl.textContent = `restarting ${name}…`;
+      try {
+        const res = await fetch('/api/step_restart', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        if (data.attached) {
+          statusEl.textContent = data.note || 'a runner is already alive — kill it first, then retry';
+          return;
+        }
+        // Success. The response tells us the full restart footprint:
+        //   restart_here_marked: state files that got restart_here=true
+        //   already_unmarked:    steps with no state file (will run anyway)
+        //   cascaded_upstream:   ancestors added because their outputs
+        //   already_unmarked:    step had no state file yet; will run on
+        //                        launch without needing a flag
+        const marked = (data.restart_here_marked || []).join(', ') || '(none)';
+        statusEl.innerHTML =
+          `restarted ${name} — runner pid ${data.pid}<br>` +
+          `restart_here set on: ${marked}` +
+          (data.removed_pipeline_json ? '<br>removed pipeline.json' : '');
+        // Close so the graph can pick up the transitions. The
+        // modal-close fires refresh(), and the runner will flip
+        // each restarted step from done → pending → running.
+        setTimeout(closeStepModal, 1400);
+      } catch (err) {
+        statusEl.textContent = `restart failed: ${String(err?.message || err)}`;
+      }
+    }
 
 	    async function openFileModal(filePath) {
 	      const res = await fetch(`/api/file?path=${encodeURIComponent(filePath)}`, { cache: 'no-store' });
@@ -1772,6 +2052,13 @@
 		    byId('file-modal-close').addEventListener('click', closeFileModal);
     byId('file-modal-shell').addEventListener('click', (event) => {
       if (event.target === byId('file-modal-shell')) closeFileModal();
+    });
+    byId('step-modal-close').addEventListener('click', closeStepModal);
+    byId('step-modal-restart').addEventListener('click', () => {
+      restartStep().catch(console.error);
+    });
+    byId('step-modal-shell').addEventListener('click', (event) => {
+      if (event.target === byId('step-modal-shell')) closeStepModal();
     });
   </script>
 </body>

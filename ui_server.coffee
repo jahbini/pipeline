@@ -1993,6 +1993,144 @@ server = http.createServer (req, res) ->
     return sendHtml res, resolveUiAsset('index.html')
   if url is '/api/status'
     return sendJson res, 200, buildStatus()
+  if url.startsWith('/api/step_detail?')
+    # Return the state file and params file for one step so the SVG
+    # click-popup can show status + inputs and offer a restart button.
+    query = new URL(url, 'http://127.0.0.1').searchParams
+    name = String(query.get('name') ? '').trim()
+    return sendJson(res, 400, { ok: false, error: 'name required' }) unless name.length
+    return sendJson(res, 400, { ok: false, error: "invalid step name: #{name}" }) if name.includes('/') or name.includes(path.sep) or name in ['.', '..']
+    stateFile = path.join(CWD, 'state', "step-#{name}.json")
+    paramsFile = path.join(CWD, 'params', "#{name}.yaml")
+    state = null
+    stateErr = null
+    if fs.existsSync stateFile
+      try
+        state = JSON.parse fs.readFileSync(stateFile, 'utf8')
+      catch err
+        stateErr = String(err?.message ? err)
+    params_text = null
+    paramsErr = null
+    if fs.existsSync paramsFile
+      try
+        params_text = fs.readFileSync paramsFile, 'utf8'
+      catch err
+        paramsErr = String(err?.message ? err)
+    return sendJson res, 200,
+      ok: true
+      name: name
+      state: state
+      state_error: stateErr
+      state_path: path.relative(CWD, stateFile)
+      params_text: params_text
+      params_error: paramsErr
+      params_path: path.relative(CWD, paramsFile)
+  if url is '/api/step_restart' and req.method is 'POST'
+    # Restart via the runner's `restart_here` protocol
+    # (pipeline_runner.coffee §6). Set restart_here=true on the
+    # target step's state file — the runner picks that up at
+    # startup, deletes state for that step + every DOWNSTREAM step,
+    # clears the flag, and runs. **ONLY the target step is marked.**
+    # Upstream state, params, and control_override are left exactly
+    # as-is. If an upstream step's declared output file is missing
+    # on disk the runner may block waiting for it — that's the
+    # operator's problem to resolve (delete its state, then trigger
+    # a full launch, or restart that upstream step directly). We
+    # deliberately do NOT cascade upstream: previous auto-cascade
+    # behavior led to confusion about which prior steps got
+    # regenerated silently.
+    return Promise.resolve((->
+      bodyText = await readRequestBody req
+      payload = {}
+      try payload = JSON.parse(bodyText ? '{}') catch
+        return sendJson res, 400, { ok: false, error: 'invalid json body' }
+      name = String(payload?.name ? '').trim()
+      return sendJson(res, 400, { ok: false, error: 'name required' }) unless name.length
+      return sendJson(res, 400, { ok: false, error: "invalid step name: #{name}" }) if name.includes('/') or name.includes(path.sep) or name in ['.', '..']
+
+      attachedRun = findActiveWorkspaceRun()
+      if attachedRun?
+        return sendJson res, 200,
+          ok: true
+          attached: true
+          pid: attachedRun.pid
+          note: "a runner is already alive; restart_here NOT set (would race with the running pipeline). Kill the run first, then retry."
+
+      # Load experiment.yaml only to validate the target step exists.
+      experimentPath = path.join(CWD, 'experiment.yaml')
+      unless fs.existsSync experimentPath
+        return sendJson res, 400, { ok: false, error: "no experiment.yaml — run the pipeline once before using restart" }
+      experiment = null
+      try
+        experiment = yaml.load fs.readFileSync(experimentPath, 'utf8')
+      catch err
+        return sendJson res, 500, { ok: false, error: "cannot parse experiment.yaml: #{err?.message ? err}" }
+
+      RESERVED = ['run', 'artifacts', 'pipeline']
+      hasStep = false
+      for own k, v of experiment when k not in RESERVED and v? and typeof v is 'object' and v.run?
+        hasStep = true if k is name
+      return sendJson(res, 404, { ok: false, error: "step '#{name}' not found in experiment.yaml" }) unless hasStep
+
+      # Mark ONLY the target step with restart_here=true.
+      marked = false
+      stateFile = path.join(CWD, 'state', "step-#{name}.json")
+      if fs.existsSync stateFile
+        try
+          st = JSON.parse fs.readFileSync(stateFile, 'utf8')
+        catch err
+          return sendJson res, 500, { ok: false, error: "cannot read #{path.relative(CWD, stateFile)}: #{err?.message ? err}" }
+        st.restart_here = true
+        st.updated_at = new Date().toISOString()
+        fs.writeFileSync stateFile, JSON.stringify(st, null, 2), 'utf8'
+        marked = true
+      # If no state file, the step is already unmarked in the runner's
+      # eyes and will run on launch — no write needed.
+
+      # pipeline.json is the "we crashed last time" gate — its presence
+      # causes the runner to exit at startup. Remove so restart can run.
+      pipelinePath = path.join(CWD, 'pipeline.json')
+      removedPipelineJson = false
+      if fs.existsSync pipelinePath
+        fs.unlinkSync pipelinePath
+        removedPipelineJson = true
+
+      launch = startRunner()
+      seedUiRun launch, readControlOverride()
+      return sendJson res, 200,
+        ok: true
+        name: name
+        restart_here_marked: (if marked then [name] else [])
+        already_unmarked: (if marked then [] else [name])
+        removed_pipeline_json: removedPipelineJson
+        pid: launch.pid
+        hh_mm: launch.hh_mm
+        logdir: launch.logdir
+    )()).catch (err) ->
+      sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+  if url is '/api/pipeline_svg' and req.method is 'GET'
+    # Render the CURRENT pipe's experiment.yaml as a DAG SVG using
+    # pipeline_svg.coffee (self-contained styles, data-step attrs
+    # so downstream JS can toggle .running / .done classes to sync
+    # with #steps-body). No cache: hot-reload the renderer on every
+    # request so edits to pipeline_svg.coffee land without a restart.
+    expPath = path.join(CWD, 'experiment.yaml')
+    unless fs.existsSync expPath
+      res.writeHead 404, { 'Content-Type': 'text/plain; charset=utf-8' }
+      return res.end 'no experiment.yaml yet — run the pipeline once, then reload.'
+    try
+      scriptPath = path.join(EXEC_ROOT, 'pipeline_svg.coffee')
+      delete require.cache[require.resolve(scriptPath)] if require.cache[require.resolve(scriptPath)]?
+      { renderSvg } = require scriptPath
+      doc = yaml.load fs.readFileSync(expPath, 'utf8')
+      svg = renderSvg doc
+      res.writeHead 200,
+        'Content-Type': 'image/svg+xml; charset=utf-8'
+        'Cache-Control': 'no-store'
+      return res.end svg
+    catch err
+      res.writeHead 500, { 'Content-Type': 'text/plain; charset=utf-8' }
+      return res.end "[pipeline_svg] #{err?.message ? err}"
   if url is '/api/manifest'
     try
       return sendJson res, 200, { ok: true, manifest: buildManifest() }
