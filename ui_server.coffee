@@ -642,6 +642,14 @@ loadDropdownOptions = (specPath) ->
         base = if name is 'adapter' then 'adapter' else name
         for ckpt in fs.readdirSync(full).sort() when /^\d+_adapters\.safetensors$/.test(ckpt)
           rows.push { key: "build/#{name}/#{ckpt}", label: "#{base} @#{parseInt(ckpt, 10)}" }
+    # Append saved good adapters from this pipe's build/good_adapters/
+    # dir — see GPT/ui/save_good_adapter.md.
+    goodDir = path.join buildDir, 'good_adapters'
+    if fs.existsSync goodDir
+      for name in fs.readdirSync(goodDir).sort()
+        full = path.join goodDir, name
+        continue unless fs.statSync(full).isDirectory() and fs.existsSync(path.join(full, 'adapter_config.json'))
+        rows.push { key: "build/good_adapters/#{name}", label: "★ good: #{name}" }
     return rows
   if specPath is 'db/kag_keywords'
     dbPath = path.join CWD, 'runtime.sqlite'
@@ -1558,6 +1566,73 @@ handleShutdownUi = (req, res) ->
     shutting_down: true
   setTimeout((-> process.exit(0)), 150)
 
+# Save the current pipe's adapter to <pipe>/build/good_adapters/<name>/
+# so it can be compared with future training runs in the same pipe.
+# Reads adapter_path from the active pipe's experiment.yaml (first
+# step that has one), copies the .safetensors file + adapter_config.json
+# + a provenance meta.json. Refuses to overwrite an existing good adapter.
+handleSaveGoodAdapter = (req, res) ->
+  bodyText = await readRequestBody req
+  payload = {}
+  try payload = JSON.parse(bodyText ? '{}') catch
+    return sendJson res, 400, { ok: false, error: 'invalid json body' }
+  name = String(payload?.name ? '').trim()
+  return sendJson(res, 400, { ok: false, error: 'name required' }) unless name.length
+  return sendJson(res, 400, { ok: false, error: "invalid name: use letters, digits, _, -, . only" }) unless /^[A-Za-z0-9._-]+$/.test(name)
+  return sendJson(res, 400, { ok: false, error: "invalid name" }) if name in ['.', '..']
+
+  expPath = path.join(CWD, 'experiment.yaml')
+  return sendJson(res, 400, { ok: false, error: "no experiment.yaml — run the pipeline once first" }) unless fs.existsSync expPath
+  experiment = null
+  try
+    experiment = yaml.load fs.readFileSync(expPath, 'utf8')
+  catch err
+    return sendJson res, 500, { ok: false, error: "cannot parse experiment.yaml: #{err?.message ? err}" }
+
+  RESERVED = ['run', 'artifacts', 'pipeline']
+  sourceStep = null
+  sourcePath = null
+  for own k, v of experiment when k not in RESERVED and v? and typeof v is 'object' and v.run?
+    ap = v.adapter_path
+    if typeof ap is 'string' and ap.trim().length
+      sourceStep = k
+      sourcePath = ap.trim()
+      break
+  return sendJson(res, 400, { ok: false, error: "no step in experiment.yaml has adapter_path set" }) unless sourcePath?
+
+  absSource = if path.isAbsolute(sourcePath) then sourcePath else path.join(CWD, sourcePath)
+  return sendJson(res, 404, { ok: false, error: "adapter file not found: #{path.relative(CWD, absSource)}" }) unless fs.existsSync absSource
+
+  sourceIsFile = fs.statSync(absSource).isFile()
+  configDir = if sourceIsFile then path.dirname(absSource) else absSource
+  weightsSource = if sourceIsFile then absSource else path.join(absSource, 'adapters.safetensors')
+  configSource = path.join(configDir, 'adapter_config.json')
+  return sendJson(res, 404, { ok: false, error: "adapter weights not found: #{path.relative(CWD, weightsSource)}" }) unless fs.existsSync weightsSource
+  return sendJson(res, 404, { ok: false, error: "adapter_config.json not found in #{path.relative(CWD, configDir)}" }) unless fs.existsSync configSource
+
+  destDir = path.join(CWD, 'build', 'good_adapters', name)
+  if fs.existsSync destDir
+    return sendJson res, 409, { ok: false, error: "a good adapter named '#{name}' already exists (#{path.relative(CWD, destDir)}). Pick a different name or delete the existing one." }
+
+  fs.mkdirSync destDir, { recursive: true }
+  fs.copyFileSync weightsSource, path.join(destDir, 'adapters.safetensors')
+  fs.copyFileSync configSource, path.join(destDir, 'adapter_config.json')
+  meta =
+    saved_at: new Date().toISOString()
+    saved_as: name
+    source_pipe: path.basename(CWD)
+    source_step: sourceStep
+    source_adapter_path: sourcePath
+    source_weights_abs: weightsSource
+    source_config_abs: configSource
+  fs.writeFileSync path.join(destDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf8'
+
+  sendJson res, 200,
+    ok: true
+    name: name
+    source: "step #{sourceStep}: #{sourcePath}"
+    destination: path.relative(CWD, destDir)
+
 handleControl = (req, res) ->
   bodyText = await readRequestBody req
   payload = {}
@@ -2271,6 +2346,11 @@ server = http.createServer (req, res) ->
         error: String(err?.message ? err)
   if url is '/api/kill' and req.method is 'POST'
     return Promise.resolve(handleKill(req, res)).catch (err) ->
+      sendJson res, 500,
+        ok: false
+        error: String(err?.message ? err)
+  if url is '/api/save_good_adapter' and req.method is 'POST'
+    return Promise.resolve(handleSaveGoodAdapter(req, res)).catch (err) ->
       sendJson res, 500,
         ok: false
         error: String(err?.message ? err)

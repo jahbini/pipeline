@@ -611,7 +611,9 @@
               </label>
               <button id="launch-button" type="button">Write Override And Run</button>
               <button id="kill-button" type="button">Kill Run</button>
+              <button id="save-good-adapter-button" type="button" style="margin-top:6px; background:#3d7a45; color:#fff;">Save Good Adapter</button>
               <div id="launch-result" class="hint mono"></div>
+              <div id="save-good-adapter-result" class="hint mono"></div>
             </div>
 
             <div class="controls-group">
@@ -1708,6 +1710,35 @@
       }
     }
 
+    async function saveGoodAdapter() {
+      const result = byId('save-good-adapter-result');
+      const name = window.prompt(
+        'Save the current pipe\'s adapter as a good adapter.\n' +
+        'Give it a memorable name (letters, digits, _, -):'
+      );
+      if (name === null) return;
+      const trimmed = String(name).trim();
+      if (!trimmed) { result.textContent = 'save cancelled (empty name)'; return; }
+      result.textContent = `saving as "${trimmed}"…`;
+      try {
+        const res = await fetch('/api/save_good_adapter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: trimmed })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'save failed');
+        }
+        result.innerHTML =
+          `saved "${trimmed}"<br>` +
+          `from: ${data.source}<br>` +
+          `to:   ${data.destination}`;
+      } catch (err) {
+        result.textContent = `save failed: ${String(err?.message || err)}`;
+      }
+    }
+
     async function shutdownUi() {
       const result = byId('launch-result');
       try {
@@ -2023,6 +2054,9 @@
     });
     byId('kill-button').addEventListener('click', () => {
       killPipeline().catch(console.error);
+    });
+    byId('save-good-adapter-button').addEventListener('click', () => {
+      saveGoodAdapter().catch(console.error);
     });
     byId('clear-pipeline-state-button').addEventListener('click', () => {
       clearPipelineState().catch(console.error);
