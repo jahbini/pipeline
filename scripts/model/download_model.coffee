@@ -17,6 +17,10 @@ fs   = require 'fs'
 path = require 'path'
 cp   = require 'child_process'
 
+# Retry policy — keep in sync with `tools/retry_policy.coffee`
+# (the async twin used by meta/hfchat). Not require()'d here
+# because step scripts are location-anonymous (see
+# GPT/CONVENTIONS.md — no path-relative requires).
 SLEEP_10_MIN = 10 * 60 * 1000
 MAX_RETRIES  = 3
 
