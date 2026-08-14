@@ -237,6 +237,24 @@ module.exports = (M, opts={}) ->
     CREATE INDEX IF NOT EXISTS idx_evaluations_judged_at ON evaluations (judged_at);
     CREATE INDEX IF NOT EXISTS idx_evaluations_pipeline  ON evaluations (pipeline);
 
+    -- Simple-English paraphrases of KAG chunks, produced by the
+    -- hfchat-backed simplify_chunks_ite step (~/writer). Paired with
+    -- the Jim-style original at LoRA training time so the adapter
+    -- learns the simple→style transform. One row per
+    -- (story_id, chunk_index); `model` records which HF router model
+    -- generated the paraphrase (provenance — regenerate if you change
+    -- models).
+    CREATE TABLE IF NOT EXISTS chunk_simplifications (
+      story_id     TEXT NOT NULL,
+      chunk_index  INTEGER NOT NULL,
+      simple_text  TEXT NOT NULL,
+      model        TEXT,
+      created_at   TEXT,
+      PRIMARY KEY (story_id, chunk_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_simplifications_story_id
+      ON chunk_simplifications (story_id);
+
     -- Per-row change log (step 5 of the agent surface). Every INSERT,
     -- UPDATE, and DELETE on a tracked table fires a trigger that drops one
     -- row here. Powers GET /api/sqlite/diff?since=<run_id|ts|change_id> for
@@ -414,6 +432,22 @@ module.exports = (M, opts={}) ->
     CREATE TRIGGER IF NOT EXISTS trg_evaluations_del AFTER DELETE ON evaluations BEGIN
       INSERT INTO _change_log (ts, table_name, op, row_id)
       VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'evaluations', 'DELETE', OLD.run_id);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_chunk_simplifications_ins AFTER INSERT ON chunk_simplifications BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'chunk_simplifications', 'INSERT',
+              NEW.story_id || '|' || NEW.chunk_index);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_chunk_simplifications_upd AFTER UPDATE ON chunk_simplifications BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'chunk_simplifications', 'UPDATE',
+              NEW.story_id || '|' || NEW.chunk_index);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_chunk_simplifications_del AFTER DELETE ON chunk_simplifications BEGIN
+      INSERT INTO _change_log (ts, table_name, op, row_id)
+      VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'chunk_simplifications', 'DELETE',
+              OLD.story_id || '|' || OLD.chunk_index);
     END;
     """
 
@@ -1769,10 +1803,94 @@ module.exports = (M, opts={}) ->
           }
         write: null
       }
+
+      # `chunkSimplification{<story_id>|<chunk_index>}.json` (r/w) —
+      # one paraphrase row. Tuple arg is '|'-separated inside the
+      # curly braces (matches kagEmbeddingRegister's convention).
+      # Write body: {story_id, chunk_index, simple_text, model?, created_at?}.
+      # Read on missing row throws (mirrors storyByID / partsFor
+      # behavior) so the step can rely on presence semantics.
+      {
+        name: 'chunkSimplification'
+        regex: /^chunkSimplification\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: (db, tupleArg) ->
+          [argStory, argChunk] = String(tupleArg).split '|'
+          chunkIdx = Number(argChunk)
+          row = db.prepare("""
+            SELECT story_id, chunk_index, simple_text, model, created_at
+            FROM chunk_simplifications
+            WHERE story_id = ? AND chunk_index = ?
+          """).get(argStory, chunkIdx)
+          throw new Error "sqlite meta missing chunkSimplification #{tupleArg}" unless row?
+          row
+        write: (db, value, tupleArg) ->
+          throw new Error "sqlite meta chunkSimplification write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          [argStory, argChunk] = String(tupleArg).split '|'
+          storyID  = value.story_id ? argStory
+          chunkIdx = if value.chunk_index? then Number(value.chunk_index) else Number(argChunk)
+          throw new Error "sqlite meta chunkSimplification story_id mismatch" unless storyID is argStory
+          throw new Error "sqlite meta chunkSimplification chunk_index mismatch" unless chunkIdx is Number(argChunk)
+          throw new Error "sqlite meta chunkSimplification write expects simple_text" unless typeof value.simple_text is 'string' and value.simple_text.length > 0
+
+          model     = value.model     ? null
+          createdAt = value.created_at ? new Date().toISOString()
+
+          db.prepare("""
+            INSERT INTO chunk_simplifications (story_id, chunk_index, simple_text, model, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(story_id, chunk_index) DO UPDATE SET
+              simple_text = excluded.simple_text,
+              model       = excluded.model,
+              created_at  = excluded.created_at
+          """).run(storyID, chunkIdx, value.simple_text, model, createdAt)
+
+          {
+            story_id: storyID
+            chunk_index: chunkIdx
+            simple_text: value.simple_text
+            model: model
+            created_at: createdAt
+          }
+      }
+
+      # `chunkSimplificationsMissing.jsonl` (read-only) — every
+      # distinct (story_id, chunk_index) that appears in kag_entries
+      # but not yet in chunk_simplifications, joined to the parent
+      # story's text/title so the caller can reconstruct chunk_text
+      # via the same paragraph-grouping the diary step uses (see
+      # buildStoryGroups in collect_diary_kag_ite.coffee). The
+      # chunk-to-text mapping is not stored server-side because
+      # kag_entries.chunk_text is empty on legacy data; keeping the
+      # split in one JS place (the caller) means the sqlite layer
+      # stays a pure SQL projection.
+      {
+        name: 'chunkSimplificationsMissing'
+        regex: /^chunkSimplificationsMissing$/
+        allowedSuffixes: ['jsonl']
+        read: (db) ->
+          db.prepare("""
+            SELECT DISTINCT
+              ke.story_id,
+              ke.chunk_index,
+              s.title,
+              s.text AS story_text
+            FROM kag_entries ke
+            INNER JOIN stories s ON s.story_id = ke.story_id
+            WHERE ke.chunk_index IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM chunk_simplifications cs
+                WHERE cs.story_id = ke.story_id
+                  AND cs.chunk_index = ke.chunk_index
+              )
+            ORDER BY ke.story_id ASC, ke.chunk_index ASC
+          """).all()
+        write: null
+      }
     ]
 
     M.addMetaRule "sqlite",
-      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval)\.(json|jsonl|txt|csv)$/i,
+      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval|chunkSimplification\{[^}]+\}|chunkSimplificationsMissing)\.(json|jsonl|txt|csv)$/i,
       (key, value) ->
         debugLog "meta key", key, "write?", value isnt undefined
 
@@ -1838,4 +1956,5 @@ module.exports.requestNames = [
   'kagEmbeddingRegister', 'kagEmbedding',   'kagAllEmbeddings'
   'evaluationRegister',   'evaluation',     'evaluationHistory', 'evaluationLatest'
   'evaluationsByPromptHash', 'corpusHealth', 'trainingHistoryJoinEval'
+  'chunkSimplification',    'chunkSimplificationsMissing'
 ]
