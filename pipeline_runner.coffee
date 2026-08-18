@@ -386,9 +386,41 @@ stripUiDirectives = (node) ->
     return out
   node
 
+# Shell-style `${VAR}` and `${VAR:-default}` expansion applied to
+# every string leaf of a parsed YAML tree. Missing vars with no
+# default are left as the literal `${VAR}` — a visible failure
+# beats a silent empty-path (e.g. `/model4`). Introduced to support
+# the `$MODELS` shared-cache convention; any env var works.
+ENV_VAR_RE = /\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}/g
+_envMissWarned = {}
+
+expandEnvString = (s) ->
+  s.replace ENV_VAR_RE, (match, name, dflt) ->
+    val = process.env[name]
+    return val if val? and val.length
+    return dflt if dflt?
+    unless _envMissWarned[name]
+      console.warn "[env] ${#{name}} not set and no default; leaving literal in yaml"
+      _envMissWarned[name] = true
+    match
+
+expandEnvTree = (node) ->
+  return node unless node?
+  if typeof node is 'string'
+    return if ENV_VAR_RE.test(node) then expandEnvString(node) else node
+  if Array.isArray(node)
+    return node.map (item) -> expandEnvTree(item)
+  if typeof node is 'object'
+    out = {}
+    for own k, v of node
+      out[k] = expandEnvTree(v)
+    return out
+  node
+
 loadYamlSafe = (p) ->
   return {} unless p? and fs.existsSync(p)
-  yaml.load fs.readFileSync(p,'utf8') or {}
+  parsed = yaml.load(fs.readFileSync(p,'utf8')) or {}
+  expandEnvTree(parsed)
 
 expandIncludes = (spec, baseDir) ->
   incs = spec.include
