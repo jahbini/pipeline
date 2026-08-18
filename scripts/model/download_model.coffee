@@ -179,12 +179,29 @@ gitPublicArgs = [
     # ------------------------------------------------------------
 
     hfModelIdRaw = M.getStepParam stepName, 'model'
-    loraRoot     = M.getStepParam stepName, 'loraLand'
-
     throw new Error "Missing model param" unless hfModelIdRaw?
-    throw new Error "Missing loraLand param" unless loraRoot?
 
-    targetDir = path.resolve String(loraRoot)
+    # Path resolution (2026-08-19):
+    #   1. Explicit `download_dir` (or legacy `loraLand`) → wins.
+    #   2. Otherwise, if $MODELS (or `models_root` param) is set,
+    #      derive HF-cache-shaped path:
+    #        <root>/hub/models--<org>--<name>/
+    #      This mirrors the HuggingFace hub layout so multiple base
+    #      models coexist in one shared cache. Set HF_HOME=$MODELS
+    #      and HF's own snapshot_download lands things here too.
+    #   3. Legacy fallback: `build/model`.
+    explicit  = (M.getStepParam(stepName, 'download_dir') ? M.getStepParam(stepName, 'loraLand'))
+    modelsRoot = M.getStepParam(stepName, 'models_root') ? process.env.MODELS
+
+    targetDir = if explicit?
+      path.resolve String(explicit)
+    else if modelsRoot?
+      [org, name] = String(hfModelIdRaw).split('/')
+      unless org and name
+        throw new Error "model '#{hfModelIdRaw}' must be organization/name to derive a $MODELS-based path"
+      path.resolve String(modelsRoot), 'hub', "models--#{org}--#{name}"
+    else
+      path.resolve 'build/model'
 
     M.saveThis 'modelDir', targetDir
     console.log "[init] Model directory:", targetDir

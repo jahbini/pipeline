@@ -10,11 +10,21 @@
   the model.
 
   **Step params:**
-    src_dir         default: build/model       (input — the HF download)
-    quantized_dir   default: build/model4      (output — MLX-formatted)
+    model           org/name — used to derive paths when $MODELS set
+    models_root     optional override for $MODELS env
+    src_dir         explicit input path; wins over derivation
+    quantized_dir   explicit output path; wins over derivation
     q_bits          default: 4                 (quantization bit-width)
     group_size      default: 64                (quantization group size)
     skip_quantize   default: false             (true to skip this step)
+
+  Path derivation (when src_dir/quantized_dir not set explicitly):
+    $MODELS set + `model: org/name`:
+      src  = $MODELS/hub/models--org--name/
+      dst  = $MODELS/mlx<bits>/org/name/
+    $MODELS unset:
+      src  = build/model
+      dst  = build/model<bits>
 
   After this step succeeds, you can `rm -rf $src_dir` to reclaim
   disk; the quantized dir alone is enough for inference.
@@ -31,10 +41,33 @@ path = require 'path'
       S.done()
       return
 
-    srcDir       = S.param 'src_dir',       'build/model'
-    quantizedDir = S.param 'quantized_dir', 'build/model4'
     qBits        = S.param 'q_bits',        4
     groupSize    = S.param 'group_size',    64
+
+    # Path resolution (2026-08-19):
+    #   1. Explicit `src_dir`/`quantized_dir` params → win.
+    #   2. Otherwise, if $MODELS (or `models_root`) + `model` are
+    #      set, derive HF-cache-shaped paths:
+    #        src  = <root>/hub/models--<org>--<name>/
+    #        dst  = <root>/mlx<bits>/<org>/<name>/
+    #      This keeps multi-base-model caches uncollided and
+    #      matches download_model's layout.
+    #   3. Legacy fallback: `build/model` → `build/model<bits>`.
+    srcParam   = S.param 'src_dir',       null
+    dstParam   = S.param 'quantized_dir', null
+    modelsRoot = S.param('models_root', null) ? process.env.MODELS
+    modelId    = S.param 'model', null
+
+    deriveFrom = (kind) ->
+      return null unless modelsRoot? and modelId?
+      [org, name] = String(modelId).split('/')
+      return null unless org and name
+      switch kind
+        when 'src' then path.join String(modelsRoot), 'hub', "models--#{org}--#{name}"
+        when 'dst' then path.join String(modelsRoot), "mlx#{qBits}", org, name
+
+    srcDir       = srcParam ? deriveFrom('src') ? 'build/model'
+    quantizedDir = dstParam ? deriveFrom('dst') ? "build/model#{qBits}"
 
     srcAbs = path.resolve process.cwd(), srcDir
     dstAbs = path.resolve process.cwd(), quantizedDir
