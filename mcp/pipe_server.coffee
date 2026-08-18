@@ -47,7 +47,8 @@ errResult = (msg) ->
 wrapProxy = (method, buildPath) -> (args) ->
   try
     urlPath = buildPath(args ? {})
-    { status, body } = await httpJson(method, urlPath, if method is 'POST' then (args?.body ? {}) else null)
+    reqBody = if method is 'GET' then null else (args?.body ? {})
+    { status, body } = await httpJson(method, urlPath, reqBody)
     if status >= 400
       return errResult("HTTP #{status} from #{urlPath}: #{JSON.stringify(body)}")
     textResult(body)
@@ -185,6 +186,93 @@ controlTools = [
         body: { type: 'object', description: 'Payload for /api/switch_pipe.' }
       additionalProperties: false
     handler: wrapProxy 'POST', -> '/api/switch_pipe'
+  }
+  {
+    name: 'write_recipe'
+    description: 'Create/replace CWD/config/<name>.yaml on the peer (PUT /api/recipe?name=…). Returns merged experiment + warnings. Use to install a new pipe on the peer or overwrite an existing recipe. `content` is the raw YAML text.'
+    inputSchema:
+      type: 'object'
+      properties:
+        name:    { type: 'string', description: 'Recipe name (basename without .yaml). Writes CWD/config/<name>.yaml on the peer.' }
+        content: { type: 'string', description: 'Raw YAML text of the recipe.' }
+      required: ['name', 'content']
+      additionalProperties: false
+    handler: (args) ->
+      wrap = wrapProxy 'PUT', (a) -> "/api/recipe?name=#{enc(a.name)}"
+      wrap { name: args.name, body: { content: args.content } }
+  }
+  {
+    name: 'write_override'
+    description: 'Create/replace the per-pipe override yaml on the peer (PUT /api/override?recipe=…). Returns merged experiment + toposort check. The override is authoritative when no config recipe is present; otherwise it layers over it. `content` is the raw YAML text.'
+    inputSchema:
+      type: 'object'
+      properties:
+        recipe:  { type: 'string', description: 'Recipe name the override belongs to.' }
+        content: { type: 'string', description: 'Raw YAML text of the override.' }
+      required: ['recipe', 'content']
+      additionalProperties: false
+    handler: (args) ->
+      wrap = wrapProxy 'PUT', (a) -> "/api/override?recipe=#{enc(a.recipe)}"
+      wrap { recipe: args.recipe, body: { content: args.content } }
+  }
+  {
+    name: 'write_script'
+    description: 'Write a step script to CWD/scripts/<path> on the peer (PUT /api/script?path=…). `.coffee` bodies are compile-checked before write; a compile failure returns HTTP 4xx with the error.'
+    inputSchema:
+      type: 'object'
+      properties:
+        path:    { type: 'string', description: 'Path relative to CWD/scripts/, e.g. "remote_launch_ite.coffee".' }
+        content: { type: 'string', description: 'Raw source text.' }
+      required: ['path', 'content']
+      additionalProperties: false
+    handler: (args) ->
+      wrap = wrapProxy 'PUT', (a) -> "/api/script?path=#{enc(a.path)}"
+      wrap { path: args.path, body: { content: args.content } }
+  }
+  {
+    name: 'human_override'
+    description: 'Write the human override YAML for the active recipe (POST /api/human_override). Distinct from write_override in that this targets the ACTIVE recipe, no `recipe` arg required.'
+    inputSchema:
+      type: 'object'
+      properties:
+        body: { type: 'object', description: 'Payload for /api/human_override — typically {content: <yaml text>}.' }
+      required: ['body']
+      additionalProperties: false
+    handler: wrapProxy 'POST', -> '/api/human_override'
+  }
+  {
+    name: 'clear_pipeline_state'
+    description: 'Erase pipeline.json (the death record) on the peer (POST /api/clear_pipeline_state). Useful before a fresh launch to drop stale step outcomes.'
+    inputSchema: { type: 'object', properties: { body: { type: 'object' } }, additionalProperties: false }
+    handler: wrapProxy 'POST', -> '/api/clear_pipeline_state'
+  }
+  {
+    name: 'clear_logs'
+    description: "Delete the active pipe's logs/pipe_HH_MM.(log|err) files (POST /api/clear_logs)."
+    inputSchema: { type: 'object', properties: { body: { type: 'object' } }, additionalProperties: false }
+    handler: wrapProxy 'POST', -> '/api/clear_logs'
+  }
+  {
+    name: 'clear_output'
+    description: "Delete the contents of the active pipe's out/ directory (POST /api/clear_output)."
+    inputSchema: { type: 'object', properties: { body: { type: 'object' } }, additionalProperties: false }
+    handler: wrapProxy 'POST', -> '/api/clear_output'
+  }
+  {
+    name: 'merge_pipe'
+    description: 'Merge sqlite + adapter from another machine into this peer (POST /api/merge_pipe). Project-specific semantics; body is passed through verbatim.'
+    inputSchema:
+      type: 'object'
+      properties:
+        body: { type: 'object', description: 'Payload for /api/merge_pipe.' }
+      additionalProperties: false
+    handler: wrapProxy 'POST', -> '/api/merge_pipe'
+  }
+  {
+    name: 'shutdown_ui'
+    description: 'Stop the UI server process on the peer (POST /api/shutdown_ui). After this returns, further tool calls to this peer will fail until the UI is restarted.'
+    inputSchema: { type: 'object', properties: { body: { type: 'object' } }, additionalProperties: false }
+    handler: wrapProxy 'POST', -> '/api/shutdown_ui'
   }
 ]
 
