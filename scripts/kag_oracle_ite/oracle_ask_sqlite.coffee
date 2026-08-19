@@ -512,6 +512,12 @@ logGroupOutcome = (label, raw, filtered) ->
     # session-level keys (max-kv-size) that don't apply here.
     llmConfig = S.param('llm', null) ? S.param('mlx', null)
     throw new Error "[oracle_ask_sqlite] llm/mlx block must be an object when provided" if llmConfig? and (typeof llmConfig isnt 'object' or Array.isArray(llmConfig))
+    # Rewrite call gets its own generation budget — oracle's maxTokens
+    # (typically ~80, sized for keyword output) truncates a chunk-length
+    # rewrite mid-sentence. Falls back to llmConfig when unset, but
+    # you almost always want a bigger maxTokens here (~512+).
+    rewriteLlmConfig = S.param('rewrite_llm', null) ? llmConfig
+    throw new Error "[oracle_ask_sqlite] rewrite_llm block must be an object when provided" if rewriteLlmConfig? and (typeof rewriteLlmConfig isnt 'object' or Array.isArray(rewriteLlmConfig))
     quantizedModelMemoKey = S.param 'quantized_model_memo_key', 'quantizedModelDir'
     adapterPath = S.param 'adapter_path', null
     modelDir = S.theLowdown(quantizedModelMemoKey)?.value ? S.param('model_dir') ? S.theLowdown('modelDir')?.value
@@ -559,32 +565,28 @@ logGroupOutcome = (label, raw, filtered) ->
 
       for group in storyGroups
         # Second-pass rewrite: plain-English version of THIS chunk,
-        # for LoRA pair training (plain → jim). Idempotent — skips
-        # when a chunkSimplification row already exists for this
-        # (story, chunk). Runs before the oracle call because it's
-        # cheap and independent; a bad KAG parse shouldn't stop us
-        # from harvesting a valid training pair.
+        # for LoRA pair training (plain → jim). Runs on every chunk
+        # in every batch — matches the oracle's own "always
+        # re-classify" contract. Existing row (if any) is overwritten
+        # by the meta/sqlite UPSERT handler. If you're re-scanning a
+        # story, you want fresh output, not skipped output.
         if rewritePromptText?
           simKey = "chunkSimplification{#{storyID}|#{group.group_index}}.json"
-          existing = S.theLowdown(simKey)?.value
-          if existing?.simple_text?
-            console.log "[oracle_ask_sqlite] #{storyID}|#{group.group_index} simplification already present, skipping"
-          else
-            rewritePrompt = renderPrompt rewritePromptText, group.text
-            try
-              simpleText = await runRewriteOnce S, modelDir, rewritePrompt, adapterPath, llmConfig
-              if simpleText.length
-                S.saveThis simKey,
-                  story_id:    storyID
-                  chunk_index: group.group_index
-                  simple_text: simpleText
-                  model:       modelDir
-                  created_at:  new Date().toISOString()
-                console.log "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrote #{group.text.length}→#{simpleText.length} chars"
-              else
-                console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite returned empty; not persisting"
-            catch err
-              console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite failed: #{err?.message ? err}"
+          rewritePrompt = renderPrompt rewritePromptText, group.text
+          try
+            simpleText = await runRewriteOnce S, modelDir, rewritePrompt, adapterPath, rewriteLlmConfig
+            if simpleText.length
+              S.saveThis simKey,
+                story_id:    storyID
+                chunk_index: group.group_index
+                simple_text: simpleText
+                model:       modelDir
+                created_at:  new Date().toISOString()
+              console.log "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrote #{group.text.length}→#{simpleText.length} chars"
+            else
+              console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite returned empty; not persisting"
+          catch err
+            console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite failed: #{err?.message ? err}"
 
         groupPrompt = renderPrompt promptText, group.text
         attempt1 = await runOracleOnce S, modelDir, groupPrompt, adapterPath, llmConfig
