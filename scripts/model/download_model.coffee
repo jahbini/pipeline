@@ -184,11 +184,10 @@ gitPublicArgs = [
     # Path resolution (2026-08-19):
     #   1. Explicit `download_dir` (or legacy `loraLand`) → wins.
     #   2. Otherwise, if $MODELS (or `models_root` param) is set,
-    #      derive HF-cache-shaped path:
-    #        <root>/hub/models--<org>--<name>/
-    #      This mirrors the HuggingFace hub layout so multiple base
-    #      models coexist in one shared cache. Set HF_HOME=$MODELS
-    #      and HF's own snapshot_download lands things here too.
+    #      derive a nested-by-org path:
+    #        <root>/<org>/<name>/
+    #      Multiple base models coexist in one shared cache; the
+    #      quantized derivative sits alongside as `<name>-mlx<bits>`.
     #   3. Legacy fallback: `build/model`.
     explicit  = (M.getStepParam(stepName, 'download_dir') ? M.getStepParam(stepName, 'loraLand'))
     modelsRoot = M.getStepParam(stepName, 'models_root') ? process.env.MODELS
@@ -199,7 +198,7 @@ gitPublicArgs = [
       [org, name] = String(hfModelIdRaw).split('/')
       unless org and name
         throw new Error "model '#{hfModelIdRaw}' must be organization/name to derive a $MODELS-based path"
-      path.resolve String(modelsRoot), 'hub', "models--#{org}--#{name}"
+      path.resolve String(modelsRoot), org, name
     else
       path.resolve 'build/model'
 

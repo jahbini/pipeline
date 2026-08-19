@@ -281,6 +281,37 @@ runOracleOnce = (S, modelDir, prompt, adapterPath, llmConfig, debugLlm = false) 
   filtered = filterEmotions parsed
   { raw, parsed, filtered, embedding, embeddingError }
 
+DEFAULT_REWRITE_PROMPT = """
+You rewrite literary passages in plain, simple English. Preserve
+every event, character, and outcome; drop stylistic flourishes,
+allusion, and unusual vocabulary. Match the passage's length
+loosely — aim for a similar number of paragraphs. Return only the
+rewritten passage, no preamble or commentary.
+
+Passage to rewrite:
+{{{STORY}}}
+""".trim()
+
+# Second pass on the same base model: produce a plain-English
+# rewrite of the same chunk. Persisted as chunkSimplification{sid|idx}
+# and later paired with the original text for LoRA training (learn
+# the plain→jim transformation, not just jim-style completion).
+# Generate-only; no embedding pass. Uses the same llm config as the
+# oracle so kv-size / temperature stay consistent.
+runRewriteOnce = (S, modelDir, prompt, adapterPath, llmConfig, debugLlm = false) ->
+  genOpts = buildGenerateOpts llmConfig
+  genParams =
+    op:       'generate'
+    modelDir: modelDir
+    prompt:   prompt
+    raw:      true
+  genParams.adapterPath = adapterPath if adapterPath?
+  for own k, v of genOpts
+    genParams[k] = v
+
+  genResult = await S.callLLM genParams, debugLlm
+  String(genResult?.rawText ? genResult?.text ? '').trim()
+
 STORY_PLACEHOLDER = '{{{STORY}}}'
 
 renderPrompt = (template, text) ->
@@ -460,6 +491,18 @@ logGroupOutcome = (label, raw, filtered) ->
 
   action: (S) ->
     promptText = S.param 'prompt_text'
+    # Optional second-pass rewrite that produces a plain-English
+    # version of each chunk for LoRA pair training. Unset → feature
+    # is off, oracle behaves exactly as before. When set, `{{{STORY}}}`
+    # is substituted with the chunk text. Falls back to a sensible
+    # default when set to `true` / empty.
+    rewritePromptRaw = S.param 'rewrite_prompt_text', null
+    rewritePromptText = switch
+      when rewritePromptRaw is null or rewritePromptRaw is false then null
+      when rewritePromptRaw is true or rewritePromptRaw is '' then DEFAULT_REWRITE_PROMPT
+      else String(rewritePromptRaw)
+    if rewritePromptText? and rewritePromptText.indexOf(STORY_PLACEHOLDER) < 0
+      throw new Error "[oracle_ask_sqlite] rewrite_prompt_text must contain the placeholder #{STORY_PLACEHOLDER}"
     batchSzRaw = S.param 'batch_size'
     batchSz = Number(batchSzRaw)
     throw new Error "[oracle_ask_sqlite] batch_size must be a positive integer" unless Number.isFinite(batchSz) and batchSz > 0 and Math.floor(batchSz) is batchSz
@@ -515,6 +558,34 @@ logGroupOutcome = (label, raw, filtered) ->
       storyRetryAttempts = []
 
       for group in storyGroups
+        # Second-pass rewrite: plain-English version of THIS chunk,
+        # for LoRA pair training (plain → jim). Idempotent — skips
+        # when a chunkSimplification row already exists for this
+        # (story, chunk). Runs before the oracle call because it's
+        # cheap and independent; a bad KAG parse shouldn't stop us
+        # from harvesting a valid training pair.
+        if rewritePromptText?
+          simKey = "chunkSimplification{#{storyID}|#{group.group_index}}.json"
+          existing = S.theLowdown(simKey)?.value
+          if existing?.simple_text?
+            console.log "[oracle_ask_sqlite] #{storyID}|#{group.group_index} simplification already present, skipping"
+          else
+            rewritePrompt = renderPrompt rewritePromptText, group.text
+            try
+              simpleText = await runRewriteOnce S, modelDir, rewritePrompt, adapterPath, llmConfig
+              if simpleText.length
+                S.saveThis simKey,
+                  story_id:    storyID
+                  chunk_index: group.group_index
+                  simple_text: simpleText
+                  model:       modelDir
+                  created_at:  new Date().toISOString()
+                console.log "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrote #{group.text.length}→#{simpleText.length} chars"
+              else
+                console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite returned empty; not persisting"
+            catch err
+              console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite failed: #{err?.message ? err}"
+
         groupPrompt = renderPrompt promptText, group.text
         attempt1 = await runOracleOnce S, modelDir, groupPrompt, adapterPath, llmConfig
         logGroupOutcome "#{storyID} · group #{group.group_index} (paras #{group.start_paragraph}-#{group.end_paragraph})", attempt1.raw, attempt1.filtered
