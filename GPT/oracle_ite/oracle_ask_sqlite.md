@@ -113,13 +113,13 @@ Known pitfalls:
   is future work.
 - voice signal in the embedding inherits the ChatML wrapping
   `session_api.embed` applies (the chunk becomes a `<|im_start|>user`
-  message). For voice-similarity comparisons this is consistent —
-  the eval side wraps the same way via `raw:true` on the same prompt
-  — but the embedding is NOT a pure-chunk encoding. See
-  `GPT/eval_ite/voice_similarity_ite.md`.
+  message). Wrapping is consistent on both write and read sides,
+  but the embedding is NOT a pure-chunk encoding.
 
 See also:
 - `GPT/eval_ite/embedding_blob.md` — the SQLite BLOB + cosine helpers
-- `GPT/eval_ite/voice_similarity_ite.md` — the consumer that uses
-  these embeddings to build the Jim centroid + score completions
 - `GPT/pipeline_runner.md` — runner + memo docs
+
+<!-- Removed 2026-08-22: pointers to voice_similarity_ite.md — its
+     recipe (eval_ite) was deleted. -->
+

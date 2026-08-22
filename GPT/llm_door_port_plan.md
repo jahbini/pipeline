@@ -1,9 +1,16 @@
 # LLM-door port plan — folding mlxCoffee's `callLLM` into @jahbini/pipeline
 
-_2026-07-22._ Source of truth: `~/development/mlxCoffee/` (55 smoke
-assertions green as of 2026-07-21). Five-commit port. Decision docs
-already landed in `GPT/stage0_callLLM.md`, `GPT/stage1_layout.md`,
-`GPT/integration{1,2,3}_*.md`. Smoke tests already ported into
+**HISTORICAL** (2026-07-22). The port completed. Kept for context on
+how the callLLM machinery came in. Note: some recipes and scripts
+named below (`train_llm`, `fuse_llm`, `eval_ite`, and the standalone
+`download_model` recipe) were removed 2026-08-22 — the surviving
+recipes still use the callLLM/callMLX doors this port introduced.
+
+_Original preamble_: Source of truth: `~/development/mlxCoffee/`
+(55 smoke assertions green as of 2026-07-21). Five-commit port.
+Decision docs already landed in `GPT/stage0_callLLM.md`,
+`GPT/stage1_layout.md`, `GPT/integration1_chat_llm.md` (integration2/3
+were removed with their recipes). Smoke tests already ported into
 `test/llm/`. This file covers the four commits that require Mr.
 Hinds's hands.
 

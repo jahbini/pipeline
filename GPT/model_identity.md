@@ -34,25 +34,24 @@ directory name.
 
 ## What changed (2026-08-05)
 
-Stripped `run.model` from every recipe that had it (10 files):
+Stripped `run.model` from every recipe that had it (originally
+10 files). Recipes surviving the 2026-08-22 prune:
 
 - chat_llm.yaml
 - diary_ite.yaml
-- diary_translate_ite.yaml
-- eval_ite.yaml
-- fuse_llm.yaml
 - oracle_ite.yaml
 - prompt_ite.yaml
 - reset.yaml
-- train_llm.yaml
 - train_lora.yaml
 
-Each now carries a comment in its `run:` block pointing here.
-`download_model.yaml` never had a `run.model` (its model is a
-per-invocation param) and stays as-is. `test.yaml` has no model
-reference either.
+Each carries a comment in its `run:` block pointing here.
 
-`scripts/model/download_model.coffee` — the existing
+Removed 2026-08-22 (recipes deleted from the package; no consumers):
+`diary_translate_ite`, `eval_ite`, `fuse_llm`, `train_llm`,
+`download_model` (reset now inlines download+quantize).
+`test.yaml` has no model reference either.
+
+`scripts/model/download_model.coffee` (invoked from `reset.yaml` — the standalone `download_model.yaml` recipe was removed 2026-08-22) — the existing
 `throw new Error "Missing model param"` at the top of the action
 is the loud-fail behavior the rule relies on. When a pipe forgets
 to declare its model, that's the error a fresh user sees.

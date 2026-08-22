@@ -124,8 +124,9 @@ schema addition:
 
 ### Recipes
 
-- **`eval_ite.yaml`** — runs the three steps above against the **current**
-  adapter. One launch = one evaluation = one row in `evaluations`.
+<!-- `eval_ite.yaml` recipe removed 2026-08-22; the shipped
+     compare_adapters_ite covers current-adapter scoring. Left the
+     evaluations-table schema below for historical reference. -->
 - **`champion_ite.yaml`** — separate recipe that scans `evaluations`,
   ranks by score, writes a champion report. Equivalent to the old
   `judging_finalizer.coffee`.

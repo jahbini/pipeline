@@ -117,23 +117,37 @@ resolveConfigPath = (name) ->
   candidates[candidates.length - 1]
 
 # Discover available recipes for the Recipe Selector by enumerating
-# `<BASE_ROOT>/config/*.yaml` and `<EXEC_ROOT>/config/*.yaml` and taking the
-# sorted union of stems. BASE shadows EXEC for same-named recipes via
-# `resolveConfigPath`; here we only need the name set. Dot-prefixed and
-# non-`.yaml` files are ignored.
-discoverPipelineNames = ->
-  names = new Set()
-  for root in [BASE_ROOT, EXEC_ROOT]
+# Enumerate every pipeline recipe visible in the UI dropdown by
+# scanning three tiers, in precedence order:
+#   pipe    - <CWD>/config/*.yaml       (pipe-local, highest priority)
+#   project - <BASE_ROOT>/config/*.yaml (project-shared)
+#   shipped - <EXEC_ROOT>/config/*.yaml (bundled with @jahbini/pipeline)
+# Matches `resolveConfigPath`'s CWD > BASE > EXEC precedence. When a name
+# exists in multiple tiers, the highest-precedence source wins.
+#
+# `discoverPipelines()` returns `[{name, source}]`. The UI uses the
+# source to italicize non-shipped recipes so the human can see at a
+# glance which recipes are project overrides / pipe-local additions.
+# `discoverPipelineNames()` is preserved for callers that only need
+# the string list.
+discoverPipelines = ->
+  bySource = {}  # name -> highest-priority source seen so far
+  ORDER = ['pipe', 'project', 'shipped']  # index = precedence
+  for [source, root] in [['pipe', CWD], ['project', BASE_ROOT], ['shipped', EXEC_ROOT]]
     dir = path.join(root, 'config')
     continue unless fs.existsSync(dir) and fs.statSync(dir).isDirectory()
     try
       for entry in fs.readdirSync(dir)
         continue if entry.startsWith('.')
         continue unless entry.endsWith('.yaml')
-        names.add entry.slice(0, -'.yaml'.length)
+        name = entry.slice(0, -'.yaml'.length)
+        # First writer wins (loop runs in precedence order).
+        bySource[name] ?= source
     catch
       null
-  Array.from(names).sort()
+  ({name, source} for name in Object.keys(bySource).sort() when (source = bySource[name]))
+
+discoverPipelineNames = -> p.name for p in discoverPipelines()
 
 RUNNER = path.join(EXEC_ROOT, 'pipeline_runner.coffee')
 MERGE_SCRIPT = path.join(EXEC_ROOT, 'merge_sqlite_dbs.coffee')
@@ -950,6 +964,10 @@ buildControls = ->
     continuous: uiControl.continuous is true
     continuous_delay_seconds: normalizeCooldownSeconds(uiControl.continuous_delay_seconds, 60)
     pipelines: discoverPipelineNames()
+    # Enriched form: [{name, source}] with source in
+    # {'pipe','project','shipped'}. UI italicizes non-shipped
+    # entries so the human can see which recipes are local overlays.
+    pipelines_enriched: discoverPipelines()
     scene_options: makeOptions 'scenes'
     arrival_options: makeOptions 'characters'
     disturbance_options: makeOptions 'disturbances'

@@ -787,7 +787,10 @@
 
     function renderControls(controls) {
       const pipelineSelect = byId('pipeline-select');
-      const pipelines = controls?.pipelines || [];
+      // Enriched form: [{name, source}]. Falls back to string array
+      // when talking to an older server that only sends `pipelines`.
+      const enriched = controls?.pipelines_enriched
+        || (controls?.pipelines || []).map((name) => ({ name, source: 'shipped' }));
       const selectedPipeline = controls?.pipeline || '';
       const uiFields = controls?.ui_fields || [];
       const uiTarget = byId('ui-fields');
@@ -796,9 +799,14 @@
         return;
       }
 
-      pipelineSelect.innerHTML = pipelines.map((name) => `
-        <option value="${name}" ${name === selectedPipeline ? 'selected' : ''}>${name}</option>
-      `).join('');
+      // Italic + a small tag on non-shipped recipes so a human can see
+      // at a glance which are project overrides / pipe-local additions.
+      pipelineSelect.innerHTML = enriched.map(({ name, source }) => {
+        const isLocal = source !== 'shipped';
+        const style = isLocal ? ' style="font-style:italic"' : '';
+        const suffix = source === 'pipe' ? ' • pipe' : source === 'project' ? ' • project' : '';
+        return `<option value="${name}"${style} ${name === selectedPipeline ? 'selected' : ''}>${name}${suffix}</option>`;
+      }).join('');
       uiTarget.innerHTML = uiFields.map((field) => {
         if (field.type === 'checkbox') {
           return `

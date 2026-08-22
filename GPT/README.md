@@ -10,9 +10,10 @@ drafts (four commits Mr. Hinds must apply).
 - [`stage0_callLLM.md`](stage0_callLLM.md) — two-door API rationale + anti-standards
 - [`stage1_layout.md`](stage1_layout.md) — layout / override / ui-run.json parity (this repo is the exemplar)
 - [`integration1_chat_llm.md`](integration1_chat_llm.md) — `llm:` block convention; `chat_llm` recipe
-- [`integration2_train_llm.md`](integration2_train_llm.md) — `train_llm` recipe; laptop-memory hard rule (`iters ≤ 20` in recipe files)
-- [`integration3_fuse_llm.md`](integration3_fuse_llm.md) — `fuse_llm` recipe; closes the chat→train→fuse loop
-- [`llm_door_port_plan.md`](llm_door_port_plan.md) — five-commit port plan (mlx/ copy, runner two-hunk patch, package.json deps, recipes+scripts, smoke tests)
+<!-- integration2 (train_llm) + integration3 (fuse_llm) removed 2026-08-22:
+     both recipes deleted from the package. train_lora + external fusion
+     cover the same ground. -->
+- [`llm_door_port_plan.md`](llm_door_port_plan.md) — five-commit port plan (historical; some recipes it names have since been removed)
 
 ## Assistant-owned working memory
 
