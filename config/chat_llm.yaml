@@ -22,7 +22,7 @@ run:
   # it. See GPT/model_identity.md.
   output_dir: out
   data_dir: data
-  loraLand: build/model
+  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_llm: false
 
@@ -39,7 +39,7 @@ chat_llm:
   depends_on: []
   needs: []
   makes: [chat_raw, chat_meta, chat_text]
-  quantized_model_dir: build/model4
+  quantized_model_dir: ${MODELS}/${run.model}-mlx4
   # prompt_text is expected to come from override (control_override.yaml
   # or override/chat_llm.yaml). Empty default; step throws if not set.
   prompt_text: [ UI_textarea, "" ]

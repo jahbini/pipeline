@@ -422,6 +422,56 @@ loadYamlSafe = (p) ->
   parsed = yaml.load(fs.readFileSync(p,'utf8')) or {}
   expandEnvTree(parsed)
 
+# Post-merge cross-field references — expand `${dotted.path}` in any
+# string leaf by looking up the value at that path within the merged
+# experiment. Enables truly universal EXEC recipes like:
+#   download_dir: ${MODELS}/${run.model}
+# where ${MODELS} is env (load time) and ${run.model} is filled from
+# the pipe's own override at post-merge time.
+#
+# Distinct from ENV_VAR_RE by casing: env vars are all-caps, cross-refs
+# are dotted paths starting with lowercase.
+REF_RE = /\$\{([a-z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9_]+)*)\}/g
+
+lookupRef = (root, dotted) ->
+  cur = root
+  for part in dotted.split('.')
+    return undefined unless cur? and typeof cur is 'object'
+    cur = cur[part]
+  cur
+
+expandRefsString = (s, root) ->
+  s.replace REF_RE, (match, dotted) ->
+    val = lookupRef(root, dotted)
+    return String(val) if val? and typeof val isnt 'object'
+    match   # leave literal on miss (visible failure > silent empty)
+
+expandRefsTree = (node, root) ->
+  return node unless node?
+  if typeof node is 'string'
+    return if REF_RE.test(node) then expandRefsString(node, root) else node
+  if Array.isArray(node)
+    return node.map (item) -> expandRefsTree(item, root)
+  if typeof node is 'object'
+    out = {}
+    for own k, v of node
+      out[k] = expandRefsTree(v, root)
+    return out
+  node
+
+# Multi-pass so a ref can resolve to another ref. Caps at MAX_PASSES
+# to prevent infinite loops on circular refs.
+resolveExperimentRefs = (experiment) ->
+  MAX_PASSES = 5
+  current = experiment
+  for i in [0...MAX_PASSES]
+    next = expandRefsTree(current, current)
+    return next if JSON.stringify(next) is JSON.stringify(current)
+    current = next
+  # If we hit the cap, something's circular. Warn once.
+  console.warn "[refs] expansion did not converge after #{MAX_PASSES} passes — possible circular reference"
+  current
+
 expandIncludes = (spec, baseDir) ->
   incs = spec.include
   return spec unless incs? and Array.isArray(incs)
@@ -919,6 +969,11 @@ createExperimentObject = (configPath, overridePaths, controlOverridePath = null)
     merged = deepMerge merged, loadYamlSafe(overridePath)
   if controlOverridePath? and fs.existsSync(controlOverridePath)
     merged = deepMerge merged, loadYamlSafe(controlOverridePath)
+  # Post-merge: expand cross-field references (e.g. ${run.model} inside
+  # a step's path param). Env vars (${MODELS}) already expanded per-file
+  # at load time; this second pass resolves anything that needed the
+  # fully-merged view to know its value.
+  merged = resolveExperimentRefs(merged)
   return stripUiDirectives(merged)
 
 ###

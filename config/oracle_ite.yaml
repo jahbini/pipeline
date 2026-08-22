@@ -13,7 +13,7 @@ run:
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: build/model
+  loraLand: ${MODELS}/${run.model}
 
 artifacts:
   new_story_ids:
@@ -30,7 +30,7 @@ oracle_ask_sqlite:
   depends_on: []
   needs: []
   makes: [new_story_ids, oracle_remaining_count, kag_rejects, kag_viewed]
-  model_dir: build/model4
+  model_dir: ${MODELS}/${run.model}-mlx4
   # Block scalar is `>` (folded). Tried `|` (literal) on 2026-08-06
   # thinking it'd help the model — the model got WORSE (bare keywords
   # only, no headlines, identical output every group). Folded works

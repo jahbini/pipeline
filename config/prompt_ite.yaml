@@ -20,7 +20,7 @@ run:
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: build/model
+  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_mlx: false
   debug_sql: false
@@ -38,7 +38,7 @@ generate_prompt_ite:
   depends_on: []
   needs: []
   makes: [prompt_generate_raw, prompt_generate_meta, prompt_generate_text]
-  quantized_model_dir: build/model4
+  quantized_model_dir: ${MODELS}/${run.model}-mlx4
   output_file_prefix: prompt_generate
   prompt_text: [ UI_textarea, "" ]
   llm:

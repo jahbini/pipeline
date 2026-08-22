@@ -26,7 +26,7 @@ run:
   # it. See GPT/model_identity.md.
   output_dir: out
   data_dir: data
-  loraLand: build/model
+  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_llm: false
 
@@ -43,7 +43,7 @@ storacle:
   depends_on: []
   needs: []
   makes: [storacle_raw, storacle_meta, storacle_text]
-  quantized_model_dir: build/model4
+  quantized_model_dir: ${MODELS}/${run.model}-mlx4
   # Story picker: dropdown of every story in the pipe's runtime.sqlite.
   # See ui_server.coffee's `db/story_titles` dropdown source handler.
   story_id: [ UI_dropdown, db/story_titles, "" ]

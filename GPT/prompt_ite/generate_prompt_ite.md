@@ -1,3 +1,5 @@
+<!-- 2026-08-22: model paths under $MODELS supersede any `build/model[4]` mentions below. See GPT/model_paths.md for the current convention. -->
+
 Step: `generate_prompt_ite`
 Recipe: `prompt_ite`
 

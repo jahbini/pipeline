@@ -1,3 +1,5 @@
+<!-- 2026-08-22: model paths under $MODELS supersede any `build/model[4]` mentions below. See GPT/model_paths.md for the current convention. -->
+
 # LLM-door port plan — folding mlxCoffee's `callLLM` into @jahbini/pipeline
 
 **HISTORICAL** (2026-07-22). The port completed. Kept for context on

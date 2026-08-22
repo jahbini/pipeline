@@ -34,7 +34,8 @@ Shared functionality used by more than one step lives in `tools/<toolname>.coffe
 and is accessed only through `S.tools.<toolname>.<entrypoint>(args...)`.
 
 **Resolution (CWD↠BASE↠EXEC shadowing, deduped — same tier order as
-step scripts):**
+step scripts and recipes; see [`recipe_lifecycle.md`](recipe_lifecycle.md)
+for when to promote work between tiers):**
 
 ```
 1. {CWD}/tools/<toolname>.coffee    ← per-pipe override (recipe-local)

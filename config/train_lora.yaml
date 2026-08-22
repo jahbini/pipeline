@@ -29,7 +29,7 @@ run:
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: build/model
+  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_mlx: false
   debug_sql: false
@@ -76,7 +76,7 @@ run_lora_train_ite:
   needs: [lora_cycle_state, selected_story_ids, train_rows, valid_rows, test_rows]
   makes: [lora_stdout, lora_run_record]
   test_only: false
-  quantized_model_dir: build/model4
+  quantized_model_dir: ${MODELS}/${run.model}-mlx4
   adapter_path: build/adapter
   resume_adapter_file: build/adapter/adapters.safetensors
   llm:

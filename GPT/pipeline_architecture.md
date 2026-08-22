@@ -1,3 +1,5 @@
+<!-- 2026-08-22: model paths under $MODELS supersede any `build/model[4]` mentions below. See GPT/model_paths.md for the current convention. -->
+
 # Pipeline Runner — Universal Starting Point
 
 The `pipeline_runner` architecture in this repo is **the default starting

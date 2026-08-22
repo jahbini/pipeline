@@ -38,7 +38,7 @@ run:
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: build/model
+  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_mlx: false
   debug_sql: false
@@ -60,15 +60,15 @@ download_model:
   depends_on: [reset_base_environment_ite]
   needs: []
   makes: []
-  download_dir: build/model
+  download_dir: ${MODELS}/${run.model}
 
 quantize_model:
   run: model/quantize_model.coffee
   depends_on: [download_model]
   needs: []
   makes: []
-  src_dir: build/model
-  quantized_dir: build/model4
+  src_dir:       ${MODELS}/${run.model}
+  quantized_dir: ${MODELS}/${run.model}-mlx4
   q_bits: 4
 
 seed_story_sqlite:

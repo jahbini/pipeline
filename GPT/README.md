@@ -31,6 +31,15 @@ across multiple unrelated domains (writeStory's ML pipelines + publicist's
 PR outreach). When work is ambiguous, separate "framework orbit" from
 "domain orbit" before acting.
 
+**Where new work lives**: [`recipe_lifecycle.md`](recipe_lifecycle.md) —
+the three-tier promotion path (pipe → project → pipeline) for recipes
+and step scripts. New experiments start pipe-local; stable work moves
+up. Especially useful when a script needs iterative debugging.
+
+**Where model paths live**: [`model_paths.md`](model_paths.md) —
+`$MODELS`-based shared cache convention. Supersedes any `build/model[4]`
+references in older docs.
+
 Rules:
 - keep files short and factual
 - update a step memory when its contract changes

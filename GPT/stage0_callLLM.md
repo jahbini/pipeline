@@ -1,3 +1,5 @@
+<!-- 2026-08-22: model paths under $MODELS supersede any `build/model[4]` mentions below. See GPT/model_paths.md for the current convention. -->
+
 > **Provenance note.** Authored 2026-07-22 in `~/development/mlxCoffee/GPT/`
 > as design record for the two-door LLM API. Ported verbatim into
 > `@jahbini/pipeline` (this repo) on 2026-07-22 as part of folding the
