@@ -197,18 +197,26 @@ class LinearAttention extends nn.Module
 
     # (0) State lives on the cache slot to survive mx.tidy passes.
     #     Fresh session (cache.offset == 0) → allocate zeros.
+    #     State has one matrix per VALUE head. On 27B nValueHeads > nHeads
+    #     (48 vs 16); each K/Q head serves nGroups=nValueHeads/nHeads V
+    #     heads (grouped-query linear attention).
     if not cache? or cache.offset == 0
-      cache.deltaState = mx.zeros [B, @nHeads, @valueDim, @keyDim], x.dtype
+      cache.deltaState = mx.zeros [B, @nValueHeads, @valueDim, @keyDim], x.dtype
     state = cache.deltaState
+    nGroups = Math.floor(@nValueHeads / @nHeads)
 
     # (1) Depthwise causal conv over the sequence axis, then silu, then split.
     #     Conv1d input is channel-last [B, L, C]; padding=0 shrinks L
     #     by (k-1), so we left-pad to preserve length + get causality.
     #     Silu after conv is the trained-in activation (per HF reference).
-    qkv = @inProjQkv.forward(x)                                   # [B, L, 3*nH*kHD]
+    qkv = @inProjQkv.forward(x)                                   # [B, L, qDim+kDim+vDim]
     padded = mx.pad qkv, [[0,0], [@_convKernel - 1, 0], [0,0]]    # [B, L+k-1, C]
     qkvConv = nn.silu(@conv1d.forward(padded))                    # [B, L, C]
-    parts = mx.split(qkvConv, 3, -1)                              # 3× [B, L, nH*hD]
+    # Split by SIZES (not equal thirds) — on 27B, vDim = 48*128 = 6144
+    # while qDim = kDim = 16*128 = 2048. Equal thirds would mangle it.
+    qDim = @nHeads * @keyDim
+    kDim = @nHeads * @keyDim
+    parts = mx.split(qkvConv, [qDim, qDim + kDim], -1)            # [q, k, v]
     q = parts[0].reshape B, L, @nHeads,      @keyDim
     k = parts[1].reshape B, L, @nHeads,      @keyDim
     v = parts[2].reshape B, L, @nValueHeads, @valueDim
@@ -248,47 +256,60 @@ class LinearAttention extends nn.Module
     betaSl  = mx.split beta,  L, 1
     decaySl = mx.split decay, L, 1
 
+    # Broadcast a per-K-head tensor [B, nHeads, dim] to per-V-head
+    # [B, nValueHeads, dim] by repeating each K head nGroups times.
+    # No-op when nGroups=1 (0.8B, where nHeads == nValueHeads).
+    kToV = (t, dim) ->
+      return t if nGroups is 1
+      # [B, nH, dim] → [B, nH, 1, dim] → broadcast → [B, nH*nGroups, dim]
+      t.reshape(B, @nHeads, 1, dim)
+        .broadcastTo([B, @nHeads, nGroups, dim])
+        .reshape(B, @nValueHeads, dim)
+
     outs = []
     for t in [0...L]
-      qT      = qSl[t].reshape     B, @nHeads,      @keyDim
-      kT      = kSl[t].reshape     B, @nHeads,      @keyDim
+      qT_kh   = qSl[t].reshape     B, @nHeads,      @keyDim         # per-K-head
+      kT_kh   = kSl[t].reshape     B, @nHeads,      @keyDim
+      qT      = kToV.call this, qT_kh, @keyDim                     # → per-V-head
+      kT      = kToV.call this, kT_kh, @keyDim
       vT      = vSl[t].reshape     B, @nValueHeads, @valueDim
       betaT   = betaSl[t].reshape  B, @nValueHeads
       decayT  = decaySl[t].reshape B, @nValueHeads
 
-      # Decay: S ← decay_t · S    (broadcast [B, nH, 1, 1] over [..., vHD, kHD])
-      dExp = decayT.reshape B, @nHeads, 1, 1
+      # Decay: S ← decay_t · S    (broadcast [B, nVH, 1, 1] over [..., vHD, kHD])
+      dExp = decayT.reshape B, @nValueHeads, 1, 1
       state = mx.multiply state, dExp
 
-      # Delta rule (not plain rank-1 outer):
-      #   pred  = S · k_t                       ← what S currently returns for k
-      #   delta = β_t · (v_t − pred)            ← prediction error, not v alone
+      # Delta rule:
+      #   pred  = S · k_t
+      #   delta = β_t · (v_t − pred)
       #   S    += delta ⊗ k_t
-      kCol  = mx.expandDims kT, -1                                   # [B, nH, kHD, 1]
-      pred  = mx.matmul(state, kCol).reshape(B, @nValueHeads, @valueDim)  # [B, nH, vHD]
-      err   = mx.subtract vT, pred                                   # [B, nH, vHD]
-      delta = mx.multiply err, betaT.reshape(B, @nValueHeads, 1)     # [B, nH, vHD]
-      dExpV = mx.expandDims delta, -1                                # [B, nH, vHD, 1]
-      kExpK = mx.expandDims kT,    -2                                # [B, nH, 1,   kHD]
+      kCol  = mx.expandDims kT, -1                                   # [B, nVH, kHD, 1]
+      pred  = mx.matmul(state, kCol).reshape(B, @nValueHeads, @valueDim)
+      err   = mx.subtract vT, pred                                   # [B, nVH, vHD]
+      delta = mx.multiply err, betaT.reshape(B, @nValueHeads, 1)
+      dExpV = mx.expandDims delta, -1                                # [B, nVH, vHD, 1]
+      kExpK = mx.expandDims kT,    -2                                # [B, nVH, 1,   kHD]
       state = mx.add state, mx.multiply(dExpV, kExpK)
 
       # Readout: out_t = S · q_t
-      qCol = mx.expandDims qT, -1                                    # [B, nH, kHD, 1]
-      outT = mx.matmul(state, qCol).reshape(B, @nHeads, @valueDim)   # [B, nH, vHD]
+      qCol = mx.expandDims qT, -1                                    # [B, nVH, kHD, 1]
+      outT = mx.matmul(state, qCol).reshape(B, @nValueHeads, @valueDim)
       outs.push outT
 
     # Persist final S back onto the cache slot.
     cache.deltaState = state
 
-    out = mx.stack outs, 1                                           # [B, L, nH, vHD]
+    out = mx.stack outs, 1                                           # [B, L, nVH, vHD]
 
     # (5) Per-head RMSNorm (weight shape [vHD]) then multiply by silu(z).
+    #     z has shape [B, L, nValueHeads * valueDim] — reshape to per-head.
     out = @norm.forward out                                          # normalizes along vHD
-    zR = z.reshape B, L, @nHeads, @valueDim
+    zR = z.reshape B, L, @nValueHeads, @valueDim
     out = mx.multiply out, nn.silu(zR)
 
     # (6) Flatten heads + output projection.
-    out = out.reshape B, L, @nHeads * @valueDim
+    out = out.reshape B, L, @nValueHeads * @valueDim
     result = @outProj.forward out
 
     # (7) Prime the sibling KVCache with a 1-token zero pair so the
@@ -338,6 +359,11 @@ class LanguageModelInner extends nn.Module
     @embedTokens = new nn.Embedding(args.vocabSize, args.hiddenSize)
     @layers = (new TransformerBlock(args, args.layerTypes[i]) for i in [0...args.numHiddenLayers])
     @norm = new nn.RMSNorm(args.hiddenSize, args.rmsNormEps)
+    # 27B ships tie_word_embeddings=false and stores lm_head UNDER the
+    # language_model subtree (path `model.language_model.lm_head`).
+    # 0.8B ships tie_word_embeddings=true and has no lm_head at all.
+    unless args.tieWordEmbeddings
+      @lmHead = new nn.Linear(args.hiddenSize, args.vocabSize, false)
   forward: (embeddings, cache) ->
     h = embeddings
     mask = createAttentionMask(h, cache)
@@ -357,8 +383,9 @@ class Model extends BaseModel
     super()
     @args = modelArgs(json)
     @model = new ModelWrapper(@args)
-    unless @args.tieWordEmbeddings
-      @lmHead = new nn.Linear(@args.hiddenSize, @args.vocabSize, false)
+    # lm_head lives on LanguageModelInner for qwen3_5 (see comment there).
+    # No top-level @lmHead here — the safetensors doesn't have one at that
+    # path, and creating it would fail loadWeights strict mode.
 
   # Called by session_api BEFORE loadWeights. Two jobs:
   #   1. Drop weight keys we deliberately don't model:
@@ -416,10 +443,14 @@ class Model extends BaseModel
         continue
       # Depthwise Conv1d weight layout differs: PyTorch/HF ships
       # [outCh, inCh/groups, kernel]; MLX wants [outCh, kernel, inCh/groups].
-      # Transpose the last two axes for every conv1d.weight tensor.
+      # Only transpose when we see HF layout — some mlx-community
+      # quantized dumps (e.g. Qwen3.8-27B-4bit) pre-transpose to MLX
+      # layout at their convert step, and a blanket transpose here
+      # would UN-do that. Heuristic: depthwise groups=channels means
+      # inCh/groups == 1, so shape[1]==1 → HF, shape[1]>1 → already MLX.
       if key.endsWith('.conv1d.weight')
         w = weights[key]
-        if w?.shape?.length is 3
+        if w?.shape?.length is 3 and w.shape[1] is 1
           weights[key] = w.transpose(0, 2, 1)
           convTransposed++
         continue
@@ -449,7 +480,7 @@ class Model extends BaseModel
     if @args.tieWordEmbeddings
       @model.languageModel.embedTokens.asLinear(out)
     else
-      @lmHead.forward(out)
+      @model.languageModel.lmHead.forward(out)
 
   getDecoderKVCacheOptions: -> {nLayers: @model.languageModel.layers.length}
 
