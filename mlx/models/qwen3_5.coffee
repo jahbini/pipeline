@@ -373,8 +373,38 @@ class Model extends BaseModel
     renamed = 0
     convTransposed = 0
     normFolded = 0
+    # Prefix canonicalization: some Qwen3.5 exports nest as
+    #   `model.language_model.<...>`  (0.8B-Base HF release), others as
+    #   `language_model.model.<...>`  (27B mlx-community quantized).
+    # Rewrite the latter to the former so the rest of sanitize + the
+    # class attribute tree only needs to speak one dialect.
+    if weights['language_model.model.embed_tokens.weight']?
+      prefixRewrites = 0
+      for own key of weights
+        if key.startsWith('language_model.model.')
+          newKey = 'model.language_model.' + key.slice('language_model.model.'.length)
+          weights[newKey] = weights[key]
+          delete weights[key]
+          prefixRewrites++
+        else if key.startsWith('language_model.') and not key.startsWith('language_model.model.')
+          # e.g. `language_model.norm.weight` -> `model.language_model.norm.weight`
+          newKey = 'model.language_model.' + key.slice('language_model.'.length)
+          weights[newKey] = weights[key]
+          delete weights[key]
+          prefixRewrites++
+      console.log "[qwen3_5.sanitize] rewrote #{prefixRewrites} keys: language_model.model.* → model.language_model.*"
+
+    # Vision / MTP prefixes vary across qwen3_5 checkpoints:
+    #   0.8B-Base uses `model.visual.*`, 27B-4bit uses `vision_tower.*`.
+    # Also seen: `visual.*` (no prefix) on some HF exports. Drop all
+    # three variants + any mtp head weights.
+    dropPrefixes = ['mtp.', 'model.visual.', 'vision_tower.', 'visual.']
     for own key of weights
-      if key.startsWith('mtp.') or key.startsWith('model.visual.')
+      shouldDrop = false
+      for pfx in dropPrefixes when key.startsWith(pfx)
+        shouldDrop = true
+        break
+      if shouldDrop
         delete weights[key]
         dropped++
         continue
