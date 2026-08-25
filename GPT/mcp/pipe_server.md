@@ -34,6 +34,8 @@ lives in this file.
 | `read_recipe` | `GET /api/recipe?name=…` | Recipe yaml + parsed step/artifact view. |
 | `read_override` | `GET /api/override?recipe=…` | Per-pipe override yaml. |
 | `read_script` | `GET /api/script?path=…` | Step script source via three-tier resolution. |
+| `step_detail` | `GET /api/step_detail?name=…` | One step's state file + params file. Post-mortem for a failed step. |
+| `pipeline_svg` | `GET /api/pipeline_svg` | DAG SVG for the active recipe. Snapshot into a run report. |
 
 ## Control tools (require `PIPE_MCP_ALLOW_CONTROL=1`)
 
@@ -44,6 +46,9 @@ lives in this file.
 | `launch` | `POST /api/launch` | Launch the active pipe. Idempotent via `ensureSingleInstance` in ui_server. |
 | `kill` | `POST /api/kill` | SIGTERM the active run. |
 | `switch_pipe` | `POST /api/switch_pipe` | Switch to a different pipe or restart in place. Body passed through verbatim; typical payload `{name: <pipe>}`. |
+| `control` | `POST /api/control` | Write `control_override.yaml` — recipe selector + UI dropdown knobs in one call. Body accepts `{pipeline, scene, arrival, disturbance, reflection, realization, ui_values, control_override_text, continuous, continuous_delay_seconds}`. Setting `{pipeline: "<recipe>"}` flips the active recipe for the pipe. Combine with `ui_values` to preset dropdown knobs. |
+| `create_pipe` | `POST /api/create_pipe` | Scaffold `pipes/<name>/` on the peer. Body `{name, model, pipeline?}` — `model` is the HF org/name written to `run.model`; `pipeline` defaults to `reset`. Refuses (409) if the pipe dir exists. Follow with `switch_pipe {pipe: <name>}` to activate. |
+| `step_restart` | `POST /api/step_restart` | Restart a single step by name (body `{name: "<step>"}`) without a full launch. |
 
 ### File writes
 

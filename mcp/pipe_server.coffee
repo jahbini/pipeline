@@ -8,7 +8,7 @@
 # Env:
 #   UI_HOST                 default 127.0.0.1
 #   UI_PORT                 default 4311
-#   PIPE_MCP_ALLOW_CONTROL  when '1', registers launch/kill/switch_pipe tools
+#   PIPE_MCP_ALLOW_CONTROL  when '1', registers launch/kill/switch_pipe/control/step_restart/write_* tools
 
 { Server }              = require '@modelcontextprotocol/sdk/server/index.js'
 { StdioServerTransport } = require '@modelcontextprotocol/sdk/server/stdio.js'
@@ -162,6 +162,23 @@ readTools = [
       additionalProperties: false
     handler: wrapProxy 'GET', (args) -> "/api/script?path=#{enc(args.path)}"
   }
+  {
+    name: 'step_detail'
+    description: "Read one step's state file + params file for the active pipe (GET /api/step_detail?name=…). Returns {ok, name, state, params_text, ...}. Useful for post-mortem: which step died, with what error and inputs."
+    inputSchema:
+      type: 'object'
+      properties:
+        name: { type: 'string', description: 'Step name (e.g. "story_outline").' }
+      required: ['name']
+      additionalProperties: false
+    handler: wrapProxy 'GET', (args) -> "/api/step_detail?name=#{enc(args.name)}"
+  }
+  {
+    name: 'pipeline_svg'
+    description: 'DAG SVG for the currently-active recipe (GET /api/pipeline_svg). Handy to snapshot into a run report.'
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+    handler: wrapProxy 'GET', -> '/api/pipeline_svg'
+  }
 ]
 
 controlTools = [
@@ -228,6 +245,39 @@ controlTools = [
     handler: (args) ->
       wrap = wrapProxy 'PUT', (a) -> "/api/script?path=#{enc(a.path)}"
       wrap { path: args.path, body: { content: args.content } }
+  }
+  {
+    name: 'control'
+    description: 'Write control_override.yaml on the peer (POST /api/control) — the recipe selector + UI-dropdown knobs in one call. Body accepts {pipeline, scene, arrival, disturbance, reflection, realization, ui_values, control_override_text, continuous, continuous_delay_seconds}. Setting {pipeline: "<recipe>"} flips the active recipe for the pipe without touching files by hand; combine with ui_values to preset dropdown knobs the recipe declares.'
+    inputSchema:
+      type: 'object'
+      properties:
+        body: { type: 'object', description: 'Payload for /api/control — see handleControl in ui_server.coffee.' }
+      required: ['body']
+      additionalProperties: false
+    handler: wrapProxy 'POST', -> '/api/control'
+  }
+  {
+    name: 'create_pipe'
+    description: "Scaffold a new pipe under pipes/<name>/ on the peer (POST /api/create_pipe). Body: {name, model, pipeline?}. `model` is the HuggingFace org/name written into the new override.yaml's run.model (required — recipes must not default it). `pipeline` defaults to 'reset'. Refuses (409) if pipes/<name>/ already exists. After success, call switch_pipe {pipe: <name>} to activate."
+    inputSchema:
+      type: 'object'
+      properties:
+        body: { type: 'object', description: 'Payload for /api/create_pipe — {name, model, pipeline?}.' }
+      required: ['body']
+      additionalProperties: false
+    handler: wrapProxy 'POST', -> '/api/create_pipe'
+  }
+  {
+    name: 'step_restart'
+    description: 'Restart a single step by name on the peer (POST /api/step_restart). Body: {name: <step>}. Useful for crash-recovery without a full pipeline launch.'
+    inputSchema:
+      type: 'object'
+      properties:
+        body: { type: 'object', description: 'Payload for /api/step_restart — typically {name: "<step>"}.' }
+      required: ['body']
+      additionalProperties: false
+    handler: wrapProxy 'POST', -> '/api/step_restart'
   }
   {
     name: 'human_override'
