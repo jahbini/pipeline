@@ -35,7 +35,15 @@ fs = require 'fs'
 # @frost-beta/llm bundles: llama, qwen2, gemma, llava, t5. We add qwen3 here
 # via ./models/qwen3. New architectures land under ./models/<model_type>.
 LOCAL_MODELS =
-  qwen3: -> require './models/qwen3'
+  qwen3:   -> require './models/qwen3'
+  # Qwen3.5 (config.json model_type = 'qwen3_5') reuses the Qwen3
+  # architecture in the shipped previews we've seen: per-head RMSNorm on
+  # Q/K, no attention biases, explicit head_dim, tieWordEmbeddings.
+  # Aliased here so the pipeline loads it without a model-class stub.
+  # If a future qwen3_5 variant diverges (e.g. adds MoE routing or a
+  # different attention pattern), split this into its own class under
+  # ./models/qwen3_5.coffee.
+  qwen3_5: -> require './models/qwen3'
 
 resolveModelClass = (modelType) ->
   if LOCAL_MODELS[modelType]?
