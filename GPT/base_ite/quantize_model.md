@@ -29,6 +29,14 @@ Validation:
 - if q-bits are requested, an existing target directory is only valid when `config.json` contains quantization metadata
 - a converted-only `build/model4` must be rejected and rebuilt
 
+Pre-quantized sources (2026-08-25):
+- if `src_dir` itself is already an MLX quantized model (its `config.json`
+  has a `quantization` block matching `q_bits` / `group_size`), the step
+  symlinks `quantized_dir → src_dir` instead of re-quantizing. Common
+  case: HF repos named `mlx-community/<name>-4bit`. Attempting to
+  re-quantize packed uint32 weights fails with an MLX kernel error
+  (`affine_quantize_uint32_t_gs_*_b_*`).
+
 Known pitfalls:
 - `--q` is ambiguous in the installed MLX CLI; use `--quantize`
 - a converted-only `build/model4` can be much larger and can OOM inference
