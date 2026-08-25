@@ -261,10 +261,12 @@ class LinearAttention extends nn.Module
     # No-op when nGroups=1 (0.8B, where nHeads == nValueHeads).
     kToV = (t, dim) ->
       return t if nGroups is 1
-      # [B, nH, dim] → [B, nH, 1, dim] → broadcast → [B, nH*nGroups, dim]
-      t.reshape(B, @nHeads, 1, dim)
-        .broadcastTo([B, @nHeads, nGroups, dim])
-        .reshape(B, @nValueHeads, dim)
+      # [B, nH, dim] → [B, nH, 1, dim] → broadcast → [B, nH, nGroups, dim]
+      # → [B, nH*nGroups, dim]. mx.broadcastTo is a top-level function
+      # (not a tensor method) in @frost-beta/mlx.
+      expanded = t.reshape(B, @nHeads, 1, dim)
+      broad    = mx.broadcastTo(expanded, [B, @nHeads, nGroups, dim])
+      broad.reshape(B, @nValueHeads, dim)
 
     outs = []
     for t in [0...L]
