@@ -1823,7 +1823,7 @@ main = ->
 
   M = new Memo()
   metaLoader = require path.join(EXEC, 'meta')
-  metaLoader(M, { baseDir: CWD })
+  metaLoader(M, { baseDir: CWD, basePath: BASE, execDir: EXEC })
   S = new StepStateStore path.join(CWD,'state')
   U = createUiRecorder M, path.join(CWD,'state')
   U.reset()

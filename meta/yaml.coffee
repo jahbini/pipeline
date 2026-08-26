@@ -22,14 +22,22 @@ path = require 'path'
 yaml = require 'js-yaml'
 
 module.exports = (M, opts={}) ->
-    baseDir = opts.baseDir ? process.cwd()
-    execDir = process.env.EXEC ? baseDir
+    baseDir  = opts.baseDir  ? process.cwd()
+    # Three-tier read fallback: CWD → project BASE → runner EXEC.
+    # BASE was CWD-only until 2026-08-26; adding the middle tier
+    # lets a project keep shared data files at its root (e.g.
+    # writer/data/*.yaml) instead of duplicating per-pipe. Writes
+    # still land in CWD only.
+    basePath = opts.basePath ? process.env.BASE ? baseDir
+    execDir  = opts.execDir  ? process.env.EXEC ? baseDir
     readJSON = (p) -> try JSON.parse(readText(p)) catch then undefined
     resolveReadPath = (key) ->
       dest = path.join(baseDir, key)
       return dest if fs.existsSync(dest)
-      fallback = path.join(execDir, key)
-      return fallback if fs.existsSync(fallback)
+      viaBase = path.join(basePath, key)
+      return viaBase if fs.existsSync(viaBase)
+      viaExec = path.join(execDir, key)
+      return viaExec if fs.existsSync(viaExec)
       dest
     readText = (p) -> if fs.existsSync(p) then fs.readFileSync(p,'utf8') else undefined
     writeText = (p,s) -> fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,s,'utf8')

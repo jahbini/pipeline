@@ -22,7 +22,9 @@ fs   = require 'fs'
 path = require 'path'
 
 module.exports = (M, opts={}) ->
-    baseDir = opts.baseDir ? process.cwd()
+    baseDir  = opts.baseDir  ? process.cwd()
+    basePath = opts.basePath ? process.env.BASE ? baseDir
+    execDir  = opts.execDir  ? process.env.EXEC ? baseDir
     readJSON = (p) -> try JSON.parse(readText(p)) catch then undefined
     readText = (p) -> if fs.existsSync(p) then fs.readFileSync(p,'utf8') else undefined
     writeText = (p,s) -> fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,s,'utf8')
@@ -32,13 +34,22 @@ module.exports = (M, opts={}) ->
       for l in raw.split(/\r?\n/) when l.trim().length
         try out.push JSON.parse(l) catch then continue
       out
+    # Reads: CWD → project BASE → runner EXEC. Writes: CWD only.
+    resolveReadPath = (key) ->
+      dest = path.join(baseDir, key)
+      return dest if fs.existsSync(dest)
+      viaBase = path.join(basePath, key)
+      return viaBase if fs.existsSync(viaBase)
+      viaExec = path.join(execDir, key)
+      return viaExec if fs.existsSync(viaExec)
+      dest
 
     M.addMetaRule "jsonl",
       /\.jsonl$/i,
       (key, value) ->
-        dest = path.join(baseDir, key)
         if value is undefined
-          return readJSONL(dest)
+          return readJSONL(resolveReadPath(key))
+        dest = path.join(baseDir, key)
         fs.mkdirSync(path.dirname(dest),{recursive:true})
         fs.writeFileSync(dest,'','utf8')
         for t in value

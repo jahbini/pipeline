@@ -41,6 +41,54 @@
 {core: mx, nn} = require '@frost-beta/mlx'
 {BaseModel, baseModelArgs, createAttentionMask} = require '@frost-beta/llm'
 
+# ---------- profiler --------------------------------------------------------
+# Enable with `QWEN35_PROFILE=1` in the environment. Emits per-layer + per-
+# stage wall-clock breakdowns for the first PROFILE_TOKENS tokens (default
+# 3) then falls silent so long runs don't drown in logs. Each stage is
+# forced to materialize with `mx.eval` so numbers reflect actual work, not
+# deferred graph construction.
+PROFILE          = process.env.QWEN35_PROFILE is '1'
+PROFILE_DEEP     = process.env.QWEN35_PROFILE_DEEP is '1'   # per-stage inside layer (heavier, more memory)
+PROFILE_TOKENS   = Number(process.env.QWEN35_PROFILE_TOKENS ? 3)
+_profStats       = { tokensSeen: 0, layerAgg: {}, perTokenTotals: [] }
+
+profNow = ->
+  return 0 unless PROFILE
+  hr = process.hrtime()
+  hr[0] * 1000 + hr[1] / 1e6      # milliseconds
+profShouldLog = -> PROFILE and _profStats.tokensSeen < PROFILE_TOKENS
+# profStep only forces materialization in DEEP mode. Otherwise it measures
+# wall-clock around the JS→binding call only (which is what actually costs
+# on this per-token loop, since each binding call is synchronous even
+# under lazy-graph mode). Shallow mode adds ~0 memory overhead.
+profStep = (label, fn) ->
+  return fn() unless profShouldLog()
+  t0 = profNow()
+  r  = fn()
+  mx.eval(r) if PROFILE_DEEP and r?.shape?
+  dt = profNow() - t0
+  _profStats.layerAgg[label] ?= { calls: 0, totalMs: 0 }
+  _profStats.layerAgg[label].calls++
+  _profStats.layerAgg[label].totalMs += dt
+  r
+profTokenBegin = ->
+  return unless PROFILE
+  _profStats._tokenStart = profNow()
+  _profStats._tokenLayerStart = _profStats.layerAgg
+  _profStats.layerAgg = {}
+profTokenEnd = ->
+  return unless profShouldLog()
+  totalMs = profNow() - _profStats._tokenStart
+  _profStats.perTokenTotals.push totalMs
+  console.log "\n[qwen3_5 PROFILE] token #{_profStats.tokensSeen + 1} = #{totalMs.toFixed(1)}ms"
+  rows = ([label, s.calls, s.totalMs, (s.totalMs / s.calls).toFixed(2)] for own label, s of _profStats.layerAgg)
+  rows.sort (a, b) -> b[2] - a[2]
+  console.log "  %-32s %6s %10s %10s", 'stage', 'calls', 'total_ms', 'avg_ms'
+  for [label, calls, total, avg] in rows
+    console.log "  %-32s %6d %10.1f %10s", label, calls, total, avg
+  _profStats.tokensSeen++
+  _profStats.layerAgg = {}
+
 # ---------- args ------------------------------------------------------------
 # Config JSON has model_type at root and a nested text_config with the real
 # transformer knobs. Unwrap here so downstream code sees a single flat args.
@@ -209,9 +257,9 @@ class LinearAttention extends nn.Module
     #     Conv1d input is channel-last [B, L, C]; padding=0 shrinks L
     #     by (k-1), so we left-pad to preserve length + get causality.
     #     Silu after conv is the trained-in activation (per HF reference).
-    qkv = @inProjQkv.forward(x)                                   # [B, L, qDim+kDim+vDim]
-    padded = mx.pad qkv, [[0,0], [@_convKernel - 1, 0], [0,0]]    # [B, L+k-1, C]
-    qkvConv = nn.silu(@conv1d.forward(padded))                    # [B, L, C]
+    qkv     = profStep 'la.inProjQkv',  => @inProjQkv.forward(x)
+    padded  = profStep 'la.pad',        => mx.pad qkv, [[0,0], [@_convKernel - 1, 0], [0,0]]
+    qkvConv = profStep 'la.conv+silu',  => nn.silu(@conv1d.forward(padded))
     # Split by SIZES (not equal thirds) — on 27B, vDim = 48*128 = 6144
     # while qDim = kDim = 16*128 = 2048. Equal thirds would mangle it.
     qDim = @nHeads * @keyDim
@@ -239,9 +287,9 @@ class LinearAttention extends nn.Module
     #     the point of use. (A promote-everything-to-fp32 path would
     #     be more faithful to the reference impl; revisit if numerical
     #     quality suffers.)
-    z    = @inProjZ.forward(x)                                    # [B, L, nH*vHD]
-    beta = mx.sigmoid @inProjB.forward(x)                         # [B, L, nH]
-    aRaw = @inProjA.forward(x)                                    # [B, L, nH]
+    z    = profStep 'la.inProjZ',    => @inProjZ.forward(x)
+    beta = profStep 'la.inProjB+sig',=> mx.sigmoid @inProjB.forward(x)
+    aRaw = profStep 'la.inProjA',    => @inProjA.forward(x)
     # softplus(y) = log1p(exp(y)) — sufficient at these magnitudes.
     sp     = mx.log1p mx.exp(mx.add(aRaw, @dtBias))
     aLogX  = @aLog.astype(x.dtype)
@@ -268,6 +316,7 @@ class LinearAttention extends nn.Module
       broad    = mx.broadcastTo(expanded, [B, @nHeads, nGroups, dim])
       broad.reshape(B, @nValueHeads, dim)
 
+    loopT0 = profNow()
     outs = []
     for t in [0...L]
       qT_kh   = qSl[t].reshape     B, @nHeads,      @keyDim         # per-K-head
@@ -302,7 +351,14 @@ class LinearAttention extends nn.Module
     # Persist final S back onto the cache slot.
     cache.deltaState = state
 
-    out = mx.stack outs, 1                                           # [B, L, nVH, vHD]
+    if profShouldLog()
+      mx.eval(outs[outs.length - 1]) if PROFILE_DEEP and outs.length     # force loop materialize (deep only)
+      dtLoop = profNow() - loopT0
+      _profStats.layerAgg['la.perTokenLoop'] ?= { calls: 0, totalMs: 0 }
+      _profStats.layerAgg['la.perTokenLoop'].calls++
+      _profStats.layerAgg['la.perTokenLoop'].totalMs += dtLoop
+
+    out = profStep 'la.stack',       => mx.stack outs, 1              # [B, L, nVH, vHD]
 
     # (5) Per-head RMSNorm (weight shape [vHD]) then multiply by silu(z).
     #     z has shape [B, L, nValueHeads * valueDim] — reshape to per-head.
@@ -312,7 +368,7 @@ class LinearAttention extends nn.Module
 
     # (6) Flatten heads + output projection.
     out = out.reshape B, L, @nValueHeads * @valueDim
-    result = @outProj.forward out
+    result = profStep 'la.outProj',  => @outProj.forward out
 
     # (7) Prime the sibling KVCache with a 1-token zero pair so the
     #     framework's `state` getter has something to eval. The tensor
@@ -367,11 +423,34 @@ class LanguageModelInner extends nn.Module
     unless args.tieWordEmbeddings
       @lmHead = new nn.Linear(args.hiddenSize, args.vocabSize, false)
   forward: (embeddings, cache) ->
+    profTokenBegin()
     h = embeddings
     mask = createAttentionMask(h, cache)
+    tFullSum = 0
+    tLinSum  = 0
+    tMlpSum  = 0
     for layer, i in @layers
-      h = layer.forward(h, mask, if cache then cache[i] else undefined)
-    @norm.forward(h)
+      cSlot = if cache then cache[i] else undefined
+      if profShouldLog()
+        t0 = profNow()
+        h  = layer.forward(h, mask, cSlot)
+        mx.eval h if PROFILE_DEEP     # force per-layer materialization only in deep mode
+        dt = profNow() - t0
+        if layer.selfAttn?
+          tFullSum += dt
+        else
+          tLinSum += dt
+      else
+        h = layer.forward(h, mask, cSlot)
+    if profShouldLog()
+      nFull = 0; nLin = 0
+      nFull++ for layer in @layers when layer.selfAttn?
+      nLin = @layers.length - nFull
+      _profStats.layerAgg['block.fullAttnLayers']   = { calls: nFull, totalMs: tFullSum }
+      _profStats.layerAgg['block.linearAttnLayers'] = { calls: nLin,  totalMs: tLinSum }
+    h = @norm.forward(h)
+    profTokenEnd()
+    h
 
 # Extra nesting to match `model.language_model.*` safetensors prefix.
 class ModelWrapper extends nn.Module

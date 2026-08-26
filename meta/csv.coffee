@@ -21,10 +21,21 @@ fs   = require 'fs'
 path = require 'path'
 
 module.exports = (M, opts={}) ->
-    baseDir = opts.baseDir ? process.cwd()
+    baseDir  = opts.baseDir  ? process.cwd()
+    basePath = opts.basePath ? process.env.BASE ? baseDir
+    execDir  = opts.execDir  ? process.env.EXEC ? baseDir
     readJSON = (p) -> try JSON.parse(readText(p)) catch then undefined
     readText = (p) -> if fs.existsSync(p) then fs.readFileSync(p,'utf8') else undefined
     writeText = (p,s) -> fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,s,'utf8')
+    # Reads: CWD → project BASE → runner EXEC. Writes: CWD only.
+    resolveReadPath = (key) ->
+      dest = path.join(baseDir, key)
+      return dest if fs.existsSync(dest)
+      viaBase = path.join(basePath, key)
+      return viaBase if fs.existsSync(viaBase)
+      viaExec = path.join(execDir, key)
+      return viaExec if fs.existsSync(viaExec)
+      dest
 
     parseCSV = (text) ->
       lines = text.trim().split /\r?\n/
@@ -63,12 +74,12 @@ module.exports = (M, opts={}) ->
     M.addMetaRule "csv",
       /\.csv$/,
       (key, value) ->
-        dest = path.join baseDir, key
-
         if value is undefined
-          return undefined unless fs.existsSync dest
-          return parseCSV fs.readFileSync(dest,'utf8')
+          src = resolveReadPath(key)
+          return undefined unless fs.existsSync src
+          return parseCSV fs.readFileSync(src,'utf8')
 
+        dest = path.join baseDir, key
         fs.mkdirSync path.dirname(dest), { recursive: true }
         fs.writeFileSync dest, stringifyCSV(value)
         value
