@@ -243,13 +243,17 @@ class LinearAttention extends nn.Module
   forward: (x, mask, cache) ->
     [B, L, D] = x.shape
 
+    inputDtype = x.dtype
     # (0) State lives on the cache slot to survive mx.tidy passes.
     #     Fresh session (cache.offset == 0) → allocate zeros.
     #     State has one matrix per VALUE head. On 27B nValueHeads > nHeads
     #     (48 vs 16); each K/Q head serves nGroups=nValueHeads/nHeads V
     #     heads (grouped-query linear attention).
+    #     STATE MUST BE FP32 — the delta-rule accumulator drifts in bf16
+    #     (Fable's earlier warning; verified against HF reference which
+    #     casts every recurrence tensor to fp32 before the loop).
     if not cache? or cache.offset == 0
-      cache.deltaState = mx.zeros [B, @nValueHeads, @valueDim, @keyDim], x.dtype
+      cache.deltaState = mx.zeros [B, @nValueHeads, @valueDim, @keyDim], mx.float32
     state = cache.deltaState
     nGroups = Math.floor(@nValueHeads / @nHeads)
 
@@ -257,9 +261,25 @@ class LinearAttention extends nn.Module
     #     Conv1d input is channel-last [B, L, C]; padding=0 shrinks L
     #     by (k-1), so we left-pad to preserve length + get causality.
     #     Silu after conv is the trained-in activation (per HF reference).
-    qkv     = profStep 'la.inProjQkv',  => @inProjQkv.forward(x)
-    padded  = profStep 'la.pad',        => mx.pad qkv, [[0,0], [@_convKernel - 1, 0], [0,0]]
-    qkvConv = profStep 'la.conv+silu',  => nn.silu(@conv1d.forward(padded))
+    qkv = profStep 'la.inProjQkv', => @inProjQkv.forward(x)
+    # Causal depthwise conv with PERSISTENT STATE across forward calls.
+    # HF reference (`causal_conv1d_update`) maintains a rolling buffer
+    # of the last (k-1) real inputs. Without it, decode-time conv sees
+    # [0,0,0,new_token] instead of [t-3,t-2,t-1,new_token] and loses
+    # 3 tokens of context every step.
+    kM1 = @_convKernel - 1
+    convChan = qkv.shape[2]
+    past =
+      if cache?.convState?
+        cache.convState
+      else
+        mx.zeros [B, kM1, convChan], qkv.dtype
+    extended = profStep 'la.concat',   => mx.concatenate [past, qkv], 1
+    # Save the last kM1 rows of extended as next-call's state.
+    if cache?
+      partsExt = mx.split extended, [L], 1     # [first L rows, last kM1 rows]
+      cache.convState = partsExt[1]
+    qkvConv = profStep 'la.conv+silu', => nn.silu(@conv1d.forward(extended))
     # Split by SIZES (not equal thirds) — on 27B, vDim = 48*128 = 6144
     # while qDim = kDim = 16*128 = 2048. Equal thirds would mangle it.
     qDim = @nHeads * @keyDim
@@ -281,37 +301,45 @@ class LinearAttention extends nn.Module
     q = mx.multiply q, qScale
 
     # (3) Auxiliary projections + gate math.
-    #     A_log ships as float32 per `mamba_ssm_dtype`; everything else
-    #     from the model is bf16. Mixed-dtype ops fail with
-    #     "Unsupported array type", so cast fp32 params to x.dtype at
-    #     the point of use. (A promote-everything-to-fp32 path would
-    #     be more faithful to the reference impl; revisit if numerical
-    #     quality suffers.)
+    #     Gate math must be in fp32 (matches HF reference and Fable's
+    #     earlier note). A_log is already fp32 from the safetensors;
+    #     cast a and dt_bias to fp32 before softplus so precision is
+    #     preserved through the decay calc.
     z    = profStep 'la.inProjZ',    => @inProjZ.forward(x)
     beta = profStep 'la.inProjB+sig',=> mx.sigmoid @inProjB.forward(x)
     aRaw = profStep 'la.inProjA',    => @inProjA.forward(x)
+    aRawF   = aRaw.astype(mx.float32)
+    dtBiasF = @dtBias.astype(mx.float32)
+    aLogF   = @aLog.astype(mx.float32)
     # softplus(y) = log1p(exp(y)) — sufficient at these magnitudes.
-    sp     = mx.log1p mx.exp(mx.add(aRaw, @dtBias))
-    aLogX  = @aLog.astype(x.dtype)
+    sp     = mx.log1p mx.exp(mx.add(aRawF, dtBiasF))
     # dt = -exp(A_log) · softplus, decay = exp(dt) ∈ (0, 1]
-    dt     = mx.multiply mx.negative(mx.exp(aLogX)), sp
-    decay  = mx.exp dt                                             # [B, L, nH]
+    dt     = mx.multiply mx.negative(mx.exp(aLogF)), sp
+    decay  = mx.exp dt                                             # fp32 [B, L, nH]
+    betaF  = beta.astype(mx.float32)                               # fp32 [B, L, nH]
 
-    # (4) Pre-slice the per-token tensors to avoid re-indexing in the loop.
-    qSl     = mx.split q,     L, 1
-    kSl     = mx.split k,     L, 1
-    vSl     = mx.split v,     L, 1
-    betaSl  = mx.split beta,  L, 1
+    # (4) Cast Q, K, V to fp32 for the recurrence (matches HF ref),
+    #     then pre-slice per-token to avoid re-indexing in the loop.
+    qF = q.astype(mx.float32)
+    kF = k.astype(mx.float32)
+    vF = v.astype(mx.float32)
+    qSl     = mx.split qF,    L, 1
+    kSl     = mx.split kF,    L, 1
+    vSl     = mx.split vF,    L, 1
+    betaSl  = mx.split betaF, L, 1
     decaySl = mx.split decay, L, 1
 
     # Broadcast a per-K-head tensor [B, nHeads, dim] to per-V-head
     # [B, nValueHeads, dim] by repeating each K head nGroups times.
     # No-op when nGroups=1 (0.8B, where nHeads == nValueHeads).
+    # Broadcast pattern: BLOCK (matches HF reference's `repeat_interleave`
+    # + reshape). K head i services V heads {i·nG, i·nG+1, ..., (i+1)·nG-1}.
+    # Reference:
+    #     query.repeat_interleave(nG, dim=2)   → [B, seq, nH*nG, dim]
+    # and V comes from `value.reshape(-1, head_v_dim)` on a per-K-head
+    # [nH, head_v_dim*nG] tensor, which also produces block layout.
     kToV = (t, dim) ->
       return t if nGroups is 1
-      # [B, nH, dim] → [B, nH, 1, dim] → broadcast → [B, nH, nGroups, dim]
-      # → [B, nH*nGroups, dim]. mx.broadcastTo is a top-level function
-      # (not a tensor method) in @frost-beta/mlx.
       expanded = t.reshape(B, @nHeads, 1, dim)
       broad    = mx.broadcastTo(expanded, [B, @nHeads, nGroups, dim])
       broad.reshape(B, @nValueHeads, dim)
@@ -358,13 +386,20 @@ class LinearAttention extends nn.Module
       _profStats.layerAgg['la.perTokenLoop'].calls++
       _profStats.layerAgg['la.perTokenLoop'].totalMs += dtLoop
 
-    out = profStep 'la.stack',       => mx.stack outs, 1              # [B, L, nVH, vHD]
+    out = profStep 'la.stack',       => mx.stack outs, 1              # fp32 [B, L, nVH, vHD]
 
-    # (5) Per-head RMSNorm (weight shape [vHD]) then multiply by silu(z).
-    #     z has shape [B, L, nValueHeads * valueDim] — reshape to per-head.
+    # (5) Cast the recurrence output back to input dtype, then per-head
+    #     RMSNorm (weight shape [vHD]) and gate by silu(z). Matches HF
+    #     reference's Qwen3NextRMSNormGated which does norm in fp32 but
+    #     multiplies by weight in input_dtype before gating.
+    out = out.astype(inputDtype)
     out = @norm.forward out                                          # normalizes along vHD
+    # Reference does the final gate multiply in fp32 (bf16 * silu(fp32)
+    # promotes). Match: promote z to fp32 for silu, promote out to fp32,
+    # multiply, then cast back to input dtype.
     zR = z.reshape B, L, @nValueHeads, @valueDim
-    out = mx.multiply out, nn.silu(zR)
+    zSilu = nn.silu(zR.astype(mx.float32))
+    out = mx.multiply(out.astype(mx.float32), zSilu).astype(inputDtype)
 
     # (6) Flatten heads + output projection.
     out = out.reshape B, L, @nValueHeads * @valueDim

@@ -40,6 +40,14 @@ up. Especially useful when a script needs iterative debugging.
 `$MODELS`-based shared cache convention. Supersedes any `build/model[4]`
 references in older docs.
 
+**Qwen3.5 (a.k.a. Qwen3-Next) model class**: [`qwen3_5.md`](qwen3_5.md) —
+hybrid attention (linear DeltaNet + full-gated), fp32 recurrence, block-
+pattern grouped-query, persistent conv1d state. Landed 2026-08-26.
+
+**Live sync between laptop and mac-mini** (git-bypass debug loop):
+[`mac-mini-sync.md`](mac-mini-sync.md) — read before making pipeline-side
+changes so you don't lose them.
+
 Rules:
 - keep files short and factual
 - update a step memory when its contract changes
