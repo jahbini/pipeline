@@ -97,7 +97,7 @@ build_diary_prompt_ite:
 
 generate_diary_with_adapter_ite:
   run: diary_ite/generate_diary_with_adapter_ite.coffee
-  depends_on: [never]
+  depends_on: [generate_diary_without_adapter_ite]
   needs: [story_parts, diary_prompt_text]
   makes: [diary_adapted_raw, diary_adapted_meta, diary_adapted_text]
   # Adapter picker (UI dropdown). Lists build/adapter* dirs + checkpoints + a

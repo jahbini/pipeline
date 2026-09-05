@@ -1553,12 +1553,39 @@ handleKill = (req, res) ->
 
   return sendJson(res, 400, { ok: false, error: 'no active run pid recorded' }) unless pid > 0
 
+  # Kill the whole PROCESS GROUP (negative pid), then escalate to
+  # SIGKILL if the runner doesn't exit within 1s. The runner is
+  # spawned detached (see startRunner), so it's its own process-
+  # group leader. Its children (git-lfs, python subprocs, step
+  # scripts) inherit the group. Plain `process.kill(pid, sig)`
+  # only signals the leader — subprocesses survive and hold FDs,
+  # keeping the run visibly alive. `process.kill(-pid, sig)`
+  # signals every process in the group. SIGTERM is often swallowed
+  # by a runner mid-native-MLX-call whose JS event loop can't spin;
+  # SIGKILL is the reliable exit.
+  killGroup = (target, sig) ->
+    try
+      process.kill -target, sig
+    catch
+      # No process group (runner wasn't detached) — signal pid directly.
+      process.kill target, sig
+
   try
-    process.kill pid, 'SIGTERM'
+    killGroup pid, 'SIGTERM'
   catch err
     return sendJson res, 500,
       ok: false
       error: String(err?.message ? err)
+
+  setTimeout (->
+    try
+      # signal 0 = liveness probe; throws ESRCH when pid is gone.
+      process.kill pid, 0
+      killGroup pid, 'SIGKILL'
+      console.log "[kill] pid #{pid} did not exit on SIGTERM within 1s; sent SIGKILL to process group"
+    catch
+      null   # process already gone
+  ), 1000
 
   next = Object.assign {}, run,
     status: 'killing'

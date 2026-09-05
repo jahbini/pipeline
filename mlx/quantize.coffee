@@ -95,23 +95,48 @@ quantizeModelDir = (sourceDir, targetDir, opts = {}) ->
   logger "  loaded #{Object.keys(weights).length} tensors in #{Date.now()-t0}ms"
 
   # ---- 2. Quantize eligible weights ------------------------------------
-  logger "quantizing eligible weights (bits=#{bits} groupSize=#{groupSize})"
+  # Verbose progress logging: Metal can SIGABRT mid-quantize with
+  # kIOGPUCommandBufferCallbackErrorTimeout, which is an uncaught C++
+  # exception JavaScript try/catch can't reach. Log BEFORE every
+  # dangerous op (mx.quantize, mx.eval flush) so the last visible
+  # line pinpoints where the crash happened. Also print a heartbeat
+  # every PROGRESS_EVERY tensors so long-running quantize appears
+  # alive even between crashes.
+  totalTensors = Object.keys(weights).length
+  logger "quantizing eligible weights (bits=#{bits} groupSize=#{groupSize}, #{totalTensors} tensors total)"
   t1 = Date.now()
   out = {}
   nQuant = 0
   nCopy = 0
+  seen = 0
   pending = []
   EVAL_BATCH = 32     # tensors per Metal command buffer — small enough
                       # to avoid kIOGPUCommandBufferCallbackErrorTimeout
                       # on a 4B-param model, large enough to amortize
                       # per-buffer overhead.
+  PROGRESS_EVERY = 50
+  batchIdx = 0
   flushPending = ->
     return unless pending.length
+    batchIdx += 1
+    n = pending.length
+    logger "  eval batch ##{batchIdx} — #{n} pending arrays (about to flush to Metal)"
+    tFlush = Date.now()
     mx.eval pending
+    logger "  eval batch ##{batchIdx} done in #{Date.now()-tFlush}ms"
     pending.length = 0
   for name, arr of weights
+    seen += 1
+    shapeStr = JSON.stringify(arr?.shape ? [])
     if isQuantizeCandidate(name, arr)
-      [wq, scales, biases] = mx.quantize arr, groupSize, bits
+      # Announce BEFORE the potentially-crashing quantize call.
+      if seen % PROGRESS_EVERY is 0 or arr?.shape?[0] * (arr?.shape?[1] ? 1) > 50_000_000
+        logger "  [#{seen}/#{totalTensors}] quantizing #{name} shape=#{shapeStr}"
+      try
+        [wq, scales, biases] = mx.quantize arr, groupSize, bits
+      catch err
+        logger "  FAILED at #{name} shape=#{shapeStr}: #{err?.message ? err}"
+        throw err
       base = name[...-'.weight'.length]
       out["#{base}.weight"] = wq
       out["#{base}.scales"] = scales
@@ -119,6 +144,7 @@ quantizeModelDir = (sourceDir, targetDir, opts = {}) ->
       pending.push wq, scales, biases
       nQuant += 1
     else
+      logger "  [#{seen}/#{totalTensors}] copy #{name} shape=#{shapeStr}" if seen % PROGRESS_EVERY is 0
       out[name] = arr
       pending.push arr
       nCopy += 1

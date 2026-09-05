@@ -63,8 +63,11 @@ download_model:
   download_dir: ${MODELS}/${run.model}
 
 quantize_model:
+  # Runs LAST — after seed_story_sqlite — so a Metal SIGABRT here
+  # can only take itself down; download and seed are already safely
+  # persisted.
   run: model/quantize_model.coffee
-  depends_on: [download_model]
+  depends_on: [download_model, seed_story_sqlite]
   needs: []
   makes: []
   src_dir:       ${MODELS}/${run.model}
@@ -72,7 +75,16 @@ quantize_model:
   q_bits: 4
 
 seed_story_sqlite:
+  # Seed runs AFTER download_model but BEFORE quantize_model. Rationale:
+  #   - Making it depend on quantize meant a Metal SIGABRT during
+  #     quantize killed the runner before seed ran.
+  #   - Making it depend only on reset_base meant it ran IN PARALLEL
+  #     with quantize — same SIGABRT killed both. pipeline_runner
+  #     doesn't recover cleanly from Metal-abort.
+  #   - Serialized between download and quantize: seed finishes in
+  #     seconds against the just-landed data/, and a later quantize
+  #     crash leaves the stories intact.
   run: kag_oracle_ite/seed_story_sqlite.coffee
-  depends_on: [quantize_model]
+  depends_on: [download_model]
   needs: [stories_md]
   makes: [story_seed_ids]

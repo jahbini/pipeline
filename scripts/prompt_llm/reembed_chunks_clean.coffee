@@ -14,7 +14,8 @@
   One-time; re-run if the corpus changes. ~1-3 min for ~900 chunks (embed is a
   single cold-KV prefill each; session cache disposed per call, so flat memory).
 ###
-fs = require 'fs'
+fs   = require 'fs'
+path = require 'path'
 
 splitParagraphs = (text) ->
   parts = []
@@ -43,8 +44,32 @@ buildStoryGroups = (text) ->
   desc: "Re-embed each story chunk's raw text (clean semantic embeddings for RAG)"
 
   action: (L) ->
-    modelDir = L.param 'quantized_model_dir', null
-    throw new Error "[#{L.stepName}] Missing quantized_model_dir" unless modelDir?
+    # Resolve model dir with the same graceful degradation session_api
+    # uses. Priority:
+    #   1. explicit `quantized_model_dir` param (if set and dir exists)
+    #   2. that same path with `-mlx4` stripped (raw fp16 dir) if the
+    #      quantized dir is missing but the raw is present — matches
+    #      the fallback symlink pattern quantize_model.coffee stages
+    #      after a Metal crash.
+    #   3. `model_dir` param, or run.loraLand.
+    # We throw only if NOTHING is usable.
+    quantParam = L.param 'quantized_model_dir', null
+    modelParam = L.param 'model_dir', null
+    loraLand   = L.param 'loraLand', null   # ${MODELS}/${run.model}
+    candidates = [quantParam, modelParam]
+    # If quantParam ends with -mlx4 and doesn't exist, try the raw
+    # sibling. session_api does the same trick.
+    if quantParam and quantParam.endsWith('-mlx4')
+      candidates.push quantParam.slice(0, -'-mlx4'.length)
+    candidates.push loraLand if loraLand
+    modelDir = null
+    for c in candidates when c
+      if fs.existsSync(c) and fs.existsSync(path.join(c, 'config.json'))
+        modelDir = c
+        break
+    unless modelDir?
+      throw new Error "[#{L.stepName}] no usable model dir; tried: #{candidates.filter((c)->c).join(', ')}"
+    console.log "[#{L.stepName}] using modelDir=#{modelDir} (from: #{if modelDir is quantParam then 'quantized_model_dir' else if modelDir is modelParam then 'model_dir' else 'raw fallback'})"
     outFile = String(L.param('clean_embeddings_file', 'build/chunk_embeddings_clean.jsonl'))
 
     stories = L.theLowdown('allStories.jsonl')?.value ? []

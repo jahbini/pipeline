@@ -172,7 +172,12 @@ class FullAttention extends nn.Module
     else
       queries = @rope.forward(queries)
       keys    = @rope.forward(keys)
-    out = mx.fast.scaledDotProductAttention(queries, keys, values, @scale, mask)
+    console.error "[qwen3_5.full] preSDPA q=#{JSON.stringify queries.shape} k=#{JSON.stringify keys.shape} v=#{JSON.stringify values.shape} mask=#{if mask? then JSON.stringify(mask.shape) else 'null'} cache.offset=#{cache?.offset}"
+    try
+      out = mx.fast.scaledDotProductAttention(queries, keys, values, @scale, mask)
+    catch err
+      console.error "[qwen3_5.full] SDPA THREW: #{err?.message ? err} — shapes above are the offenders"
+      throw err
     out = out.transpose(0, 2, 1, 3)                            # [B, L, H, hD]
     if @gated
       out = mx.multiply(out, mx.sigmoid(gate))                 # gate is [B, L, H, hD]
@@ -345,37 +350,50 @@ class LinearAttention extends nn.Module
       broad.reshape(B, @nValueHeads, dim)
 
     loopT0 = profNow()
-    outs = []
-    for t in [0...L]
-      qT_kh   = qSl[t].reshape     B, @nHeads,      @keyDim         # per-K-head
-      kT_kh   = kSl[t].reshape     B, @nHeads,      @keyDim
-      qT      = kToV.call this, qT_kh, @keyDim                     # → per-V-head
-      kT      = kToV.call this, kT_kh, @keyDim
-      vT      = vSl[t].reshape     B, @nValueHeads, @valueDim
-      betaT   = betaSl[t].reshape  B, @nValueHeads
-      decayT  = decaySl[t].reshape B, @nValueHeads
+    # PREFILL vs DECODE split.
+    # Prefill (L>1) needs the mx.tidy wrap: 500-token prefill × 18
+    # DeltaNet layers otherwise accumulates ~30 GB of orphan graph
+    # nodes and locks the machine. mx.tidy disposes all intermediates
+    # (kCol/pred/err/delta/dExpV/kExpK/dExp/prior state tensors)
+    # that aren't reachable via its return value.
+    # Decode (L=1) has ONE iteration — no orphan accumulation possible,
+    # and mx.tidy forces a GPU→CPU sync per layer per token. On a
+    # 32-layer model generating 200 tokens that's 6,400 sync barriers,
+    # which is what made yesterday's q35_4 chat_llm take 1130 s to
+    # produce 250 chars (~200× the expected wall clock). Skip tidy on
+    # decode; let the graph stay lazy until llm.js's outer sampling
+    # eval fires.
+    runLoop = =>
+      outs = []
+      s = state
+      for t in [0...L]
+        qT_kh   = qSl[t].reshape     B, @nHeads,      @keyDim
+        kT_kh   = kSl[t].reshape     B, @nHeads,      @keyDim
+        qT      = kToV.call this, qT_kh, @keyDim
+        kT      = kToV.call this, kT_kh, @keyDim
+        vT      = vSl[t].reshape     B, @nValueHeads, @valueDim
+        betaT   = betaSl[t].reshape  B, @nValueHeads
+        decayT  = decaySl[t].reshape B, @nValueHeads
 
-      # Decay: S ← decay_t · S    (broadcast [B, nVH, 1, 1] over [..., vHD, kHD])
-      dExp = decayT.reshape B, @nValueHeads, 1, 1
-      state = mx.multiply state, dExp
+        dExp = decayT.reshape B, @nValueHeads, 1, 1
+        s = mx.multiply s, dExp
 
-      # Delta rule:
-      #   pred  = S · k_t
-      #   delta = β_t · (v_t − pred)
-      #   S    += delta ⊗ k_t
-      kCol  = mx.expandDims kT, -1                                   # [B, nVH, kHD, 1]
-      pred  = mx.matmul(state, kCol).reshape(B, @nValueHeads, @valueDim)
-      err   = mx.subtract vT, pred                                   # [B, nVH, vHD]
-      delta = mx.multiply err, betaT.reshape(B, @nValueHeads, 1)
-      dExpV = mx.expandDims delta, -1                                # [B, nVH, vHD, 1]
-      kExpK = mx.expandDims kT,    -2                                # [B, nVH, 1,   kHD]
-      state = mx.add state, mx.multiply(dExpV, kExpK)
+        kCol  = mx.expandDims kT, -1
+        pred  = mx.matmul(s, kCol).reshape(B, @nValueHeads, @valueDim)
+        err   = mx.subtract vT, pred
+        delta = mx.multiply err, betaT.reshape(B, @nValueHeads, 1)
+        dExpV = mx.expandDims delta, -1
+        kExpK = mx.expandDims kT,    -2
+        s = mx.add s, mx.multiply(dExpV, kExpK)
 
-      # Readout: out_t = S · q_t
-      qCol = mx.expandDims qT, -1                                    # [B, nVH, kHD, 1]
-      outT = mx.matmul(state, qCol).reshape(B, @nValueHeads, @valueDim)
-      outs.push outT
+        qCol = mx.expandDims qT, -1
+        outT = mx.matmul(s, qCol).reshape(B, @nValueHeads, @valueDim)
+        outs.push outT
+      [s, outs]
 
+    result = if L > 1 then mx.tidy(runLoop) else runLoop()
+    state = result[0]
+    outs  = result[1]
     # Persist final S back onto the cache slot.
     cache.deltaState = state
 
@@ -405,11 +423,19 @@ class LinearAttention extends nn.Module
     out = out.reshape B, L, @nValueHeads * @valueDim
     result = profStep 'la.outProj',  => @outProj.forward out
 
-    # (7) Prime the sibling KVCache with a 1-token zero pair so the
-    #     framework's `state` getter has something to eval. The tensor
-    #     is discarded; only the assignment inside cache matters.
+    # (7) Prime the sibling KVCache with an L-token zero pair. MUST
+    #     match L, not 1: `createAttentionMask` in @frost-beta/llm
+    #     reads `cache[0].offset` to compute the mask's key-length
+    #     dimension. If DeltaNet primes with L=1 while full-attention
+    #     layers grow their slots by the real L, cache[0].offset lags
+    #     cache[fullAttn].offset. On chunked prefill (prompts > 512
+    #     tokens) the mask is then built for the wrong context length
+    #     — mask=[T_chunk, cache[0].offset+T_chunk] vs full-attn keys
+    #     of [B, kvH, cache[fullAttn].offset+T_chunk, hD] — broadcast
+    #     fails inside SDPA. The tensor itself is discarded; only the
+    #     offset bookkeeping matters.
     if cache?
-      fake = mx.zeros [B, @_fakeNKVHeads, 1, @_fakeHeadDim], x.dtype
+      fake = mx.zeros [B, @_fakeNKVHeads, L, @_fakeHeadDim], x.dtype
       cache.updateAndFetch(fake, fake)
 
     result
@@ -464,12 +490,24 @@ class LanguageModelInner extends nn.Module
     tFullSum = 0
     tLinSum  = 0
     tMlpSum  = 0
+    # DeltaNet forward is wrapped in mx.tidy internally (see line ~350),
+    # so per-layer intermediates get disposed cleanly. We still log
+    # per-layer memory during prefill so a regression is obvious.
+    _outerBaseline = (mx.getActiveMemory?() ? 0) / (1024*1024)
+    # Cross-layer memory ceiling for the safety brake. 8 GB default is
+    # chosen so a 1000-token prefill on Qwen3.5-4B completes on a 16 GB
+    # host with typical background use (~4-6 GB free at rest). The old
+    # 4 GB value was calibrated for a laptop that also had Chrome/
+    # VSCode/etc. eating RAM; it aborted valid workloads mid-forward
+    # (see storacle 1040-token trip on 2026-08-28 at layer 26 with
+    # spike=4148 MB — 51 MB over the old ceiling). If you're on a
+    # smaller host, set QWEN3_5_LAYER_CEIL_MB env explicitly to lower.
+    _outerCeilMB = Number(process.env.QWEN3_5_LAYER_CEIL_MB ? 8192)
     for layer, i in @layers
       cSlot = if cache then cache[i] else undefined
       if profShouldLog()
         t0 = profNow()
         h  = layer.forward(h, mask, cSlot)
-        mx.eval h if PROFILE_DEEP     # force per-layer materialization only in deep mode
         dt = profNow() - t0
         if layer.selfAttn?
           tFullSum += dt
@@ -477,6 +515,13 @@ class LanguageModelInner extends nn.Module
           tLinSum += dt
       else
         h = layer.forward(h, mask, cSlot)
+        if h.shape[1] > 1
+          mx.eval h
+          _am = (mx.getActiveMemory?() ? 0) / (1024*1024)
+          _spike = _am - _outerBaseline
+          console.error "[qwen3_5.layer] i=#{i} kind=#{if layer.selfAttn? then 'full' else 'linear'} L=#{h.shape[1]} activeMB=#{_am.toFixed(1)} spikeFromBaseMB=#{_spike.toFixed(1)}"
+          if _spike > _outerCeilMB
+            throw new Error "[qwen3_5.forward] CROSS-LAYER SAFETY ABORT after layer i=#{i}: activeMB=#{_am.toFixed(1)} spike=#{_spike.toFixed(1)} > ceiling #{_outerCeilMB} MB."
     if profShouldLog()
       nFull = 0; nLin = 0
       nFull++ for layer in @layers when layer.selfAttn?
@@ -579,9 +624,22 @@ class Model extends BaseModel
       # RMSNorm convention; observed mean ≈ 0.95). Also excludes
       # `model.language_model.norm.weight` — observed mean = 3.3, i.e.
       # already trained WITHOUT the +1 fold convention.
+      # NOTE 2026-08-27: previously excluded model.language_model.norm.weight
+      # based on an empirical test that predated all the other fixes in this
+      # session (mx.tidy, mask offset, chunked-prefill prime-with-L). HF
+      # reference confirms the final norm IS a Qwen3NextRMSNorm and uses
+      # (1 + w) * x. Folding it now; if this regresses short-prompt output
+      # the exclusion can come back.
       if key.endsWith('.weight') and key.indexOf('layernorm') >= 0 or
          key.endsWith('.q_norm.weight') or
-         key.endsWith('.k_norm.weight')
+         key.endsWith('.k_norm.weight') or
+         key is 'model.language_model.norm.weight'
+        # Plain scalar add is sufficient — the newer node-mlx handles
+        # the dtype coercion internally, and using `w.dtype` as an
+        # argument to mx.array() hits a Dtype-getter regression that
+        # rejects the returned Dtype object. Load order (llm before
+        # mlx at top of session_api) is required for this to work at
+        # all — see the LOAD ORDER note there.
         weights[key] = mx.add(weights[key], 1.0)
         normFolded++
     console.log "[qwen3_5.sanitize] dropped #{dropped} unused (mtp/visual), renamed #{renamed} (A_log→a_log), transposed #{convTransposed} conv1d, folded +1 into #{normFolded} zero-centered norms"

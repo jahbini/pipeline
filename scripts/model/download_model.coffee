@@ -219,16 +219,32 @@ gitPublicArgs = [
     hfModelId = resolveRequestedModelId hfModelIdRaw, provenance
     repoUrl   = "https://huggingface.co/#{hfModelId}"
 
-    if present and hasWeights
-      unless provenance?
+    if present and hasWeights and not provenance?
+      # No provenance → a prior download crashed mid-stream (git-lfs
+      # aborted, disk full, network drop, etc.). Weights we see are
+      # unverified; the safe recovery is a clean re-download.
+      # Provenance is only written by writeProvenance() AFTER a
+      # complete successful download, so its absence is a reliable
+      # "did not finish" signal.
+      console.error """
+      [init] Existing model dir has weights but no provenance:
+      #{provenancePathFor(targetDir)}
+      Treating as a crashed prior download. Wiping and re-downloading.
+      """
+      try
+        fs.rmSync targetDir, { recursive: true, force: true }
+        console.log "[init] Removed #{targetDir}"
+      catch err
         throw new Error """
-        [init] Existing model directory has weights but no provenance:
-        #{provenancePathFor(targetDir)}
-
-        Verify the model manually and either remove the directory or add
-        matching provenance for #{hfModelId}.
+        [init] Auto-cleanup failed for #{targetDir}: #{err?.message ? err}
+        Remove it manually and re-run.
         """
+      # State is now empty; fall through to fresh clone.
+      present    = false
+      weightFile = null
+      hasWeights = false
 
+    if present and hasWeights
       if provenance.model_id isnt hfModelId
         throw new Error """
         [init] Existing model directory was recorded for:

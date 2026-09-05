@@ -16,6 +16,18 @@
 # ./models/{model_type}.coffee — session_api stays generic.
 
 path = require 'path'
+
+# --- LOAD ORDER MATTERS -----------------------------------------------------
+# On the robert-johansson node-mlx build (2026-08-28), requiring
+# @frost-beta/mlx BEFORE @frost-beta/llm poisons every subsequent
+# loadWeights() call — all tensor dtypes come back reported as `bool`
+# regardless of what the safetensors file actually holds. The symptom
+# is "Unsupported array type" on any op involving a loaded weight.
+# Requiring llm first works around it. Kept as an early no-op import
+# so the initialization order is deterministic. Do NOT reorder.
+require '@frost-beta/llm'
+require '@frost-beta/llm/dist/fs.js'
+
 {core: mx, nn} = require '@frost-beta/mlx'
 
 # --- version-skew shims -----------------------------------------------------
@@ -25,6 +37,58 @@ path = require 'path'
 mx.metal.clearCache      ?= mx.clearCache
 mx.metal.getPeakMemory   ?= mx.getPeakMemory
 mx.metal.getActiveMemory ?= mx.getActiveMemory
+
+# Some model classes (qwen3_5's Gated DeltaNet) attach ad-hoc fields to
+# per-layer cache slots (`deltaState`, `convState`) to survive mx.tidy.
+# `mx.dispose(cache)` walks the standard fields only, so those custom
+# tensors are orphaned on every embed/generate cycle — unified memory
+# grows unbounded until the OS starts swap-thrashing. Walk them here
+# before releasing the array.
+DELTA_EXTRAS = ['deltaState', 'convState']
+memMB = -> (mx.getActiveMemory?() ? 0) / (1024*1024)
+peakMB = -> (mx.getPeakMemory?() ? 0) / (1024*1024)
+
+# Safety brake — the DeltaNet path can bloat unified memory into swap
+# territory in seconds during a long prefill, locking the whole machine.
+# When active MLX memory crosses this ceiling, throw before the OS starts
+# thrashing. Tunable via env, but has a hard default so a bare `pipe-run`
+# still fails fast instead of freezing the laptop.
+MEM_CEIL_MB = Number(process.env.SESSION_API_MEM_CEIL_MB ? 10240)
+# Baseline peak captured at first assertion — the model-load peak is
+# ~1 GB and doesn't count against per-call budget. We compare
+# (currentPeak - baselinePeak) against the ceiling so a run that spikes
+# 5 GB of transient forward-pass allocations still aborts, even if
+# activeMem has already decayed by the time we sample.
+PEAK_BASELINE_MB = null
+assertMemCeiling = (where) ->
+  active = memMB()
+  peak = peakMB()
+  PEAK_BASELINE_MB ?= peak
+  spike = peak - PEAK_BASELINE_MB
+  if active > MEM_CEIL_MB or spike > MEM_CEIL_MB
+    throw new Error "[session_api] SAFETY ABORT at #{where}: activeMemMB=#{active.toFixed(1)} peakSpikeMB=#{spike.toFixed(1)} > ceiling #{MEM_CEIL_MB} — run bailed to prevent OS swap-thrash. Raise SESSION_API_MEM_CEIL_MB if you know this host can take it."
+  active
+
+disposeKvCache = (cache, where = '?') ->
+  before = memMB()
+  entries = 0
+  freed = 0
+  arrayLike = cache? and (Array.isArray(cache) or typeof cache?.length is 'number')
+  if arrayLike
+    for i in [0...cache.length]
+      entry = cache[i]
+      continue unless entry? and typeof entry is 'object'
+      entries += 1
+      for field in DELTA_EXTRAS
+        t = entry[field]
+        if t?
+          try mx.dispose?(t) catch _
+          entry[field] = null
+          freed += 1
+  try mx.dispose?(cache) catch _
+  after = memMB()
+  console.error "[session_api] disposeKvCache(#{where}) entries=#{entries} extrasFreed=#{freed} activeMemMB #{before.toFixed(1)}→#{after.toFixed(1)} (peak=#{peakMB().toFixed(1)}) cacheType=#{typeof cache} isArr=#{Array.isArray(cache)}"
+  return
 
 {Tokenizer, LLM} = require '@frost-beta/llm'
 {loadWeights, readJsonSync} = require '@frost-beta/llm/dist/fs.js'
@@ -92,6 +156,23 @@ createSession = (opts = {}) ->
   modelDir = opts.modelDir ? throw new Error 'createSession: modelDir required'
   modelDir = path.resolve modelDir
   cacheLimitMB = opts.cacheLimitMB ? 512
+
+  # Quantized fallback: recipes pin modelDir to `<repo>-mlx4/` but
+  # quantize can fail (Metal GPU timeout on some models). For small
+  # models the unquantized `<repo>/` is small enough to load raw.
+  # If the requested -mlx4 dir doesn't exist but the base dir does,
+  # use base and log a warning. Only fires when the -mlx4 suffix is
+  # actually present in the requested path.
+  unless fs.existsSync(modelDir)
+    if modelDir.endsWith('-mlx4')
+      raw = modelDir.slice(0, -'-mlx4'.length)
+      if fs.existsSync(raw) and fs.existsSync(path.join(raw, 'config.json'))
+        console.error "[session_api] quantized #{modelDir} missing; falling back to raw #{raw}"
+        modelDir = raw
+      else
+        throw new Error "createSession: modelDir #{modelDir} missing (also tried raw #{raw})"
+    else
+      throw new Error "createSession: modelDir #{modelDir} missing"
 
   # Load config; the model_type field drives dispatch.
   config = readJsonSync path.join(modelDir, 'config.json')
@@ -180,13 +261,16 @@ createSession = (opts = {}) ->
       # attention state from the previous prompt. Symptom: later
       # groups' outputs referenced content from earlier groups even
       # though prompts were rendered per-group.
-      mx.dispose?(llm.kvCache) if llm.kvCache
+      disposeKvCache(llm.kvCache, 'generate:pre')
       llm.kvCache = null
+      assertMemCeiling 'generate:pre'
 
       prompt = if gopts.raw then userText else formatChatML(userText, systemPrompt)
       promptEmbeds = await llm.encode(prompt)
       mx.eval promptEmbeds
       promptTokens = promptEmbeds.shape[1]
+      console.error "[session_api] generate promptTokens=#{promptTokens} activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
+      assertMemCeiling 'generate:afterEncode'
 
       # Stop the generation loop early if the model emits any of these
       # end-of-text markers. Otherwise it burns the rest of maxTokens
@@ -301,18 +385,23 @@ createSession = (opts = {}) ->
       systemPrompt = gopts.systemPrompt ? null
       prompt = if gopts.raw then userText else formatChatML(userText, systemPrompt)
 
-      mx.dispose?(llm.kvCache) if llm.kvCache
+      disposeKvCache(llm.kvCache, 'embed:pre')
       llm.kvCache = null
+      assertMemCeiling 'embed:pre'
 
       promptEmbeds = await llm.encode(prompt)
       mx.eval promptEmbeds
       promptTokens = promptEmbeds.shape[1]
+      console.error "[session_api] embed promptTokens=#{promptTokens} activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
+      assertMemCeiling 'embed:afterEncode'
 
       # Consume exactly one iteration so prefill happens and llm.kvCache
       # gets populated via the library's normal path. The sampled token
       # itself is discarded; we only care about the KV state it produced.
       for await pieces from llm.generate(promptEmbeds, {maxTokens: 1, topP: 1.0, temperature: 0.0})
         break
+      console.error "[session_api] embed post-prefill activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
+      assertMemCeiling 'embed:afterPrefill'
 
       cache = llm.kvCache
       throw new Error "embed: kvCache empty after prefill" unless cache?.length > 0
@@ -341,7 +430,7 @@ createSession = (opts = {}) ->
       out = new Float32Array(typed.length)
       out.set(typed)
 
-      mx.dispose?(llm.kvCache) if llm.kvCache
+      disposeKvCache(llm.kvCache, 'embed:post')
       llm.kvCache = null
       mx.clearCache?()
 
@@ -353,7 +442,7 @@ createSession = (opts = {}) ->
 
     dispose: ->
       # Release the persistent KV cache the LLM instance may hold.
-      mx.dispose?(llm.kvCache) if llm.kvCache
+      disposeKvCache(llm.kvCache, 'session:dispose')
       llm.kvCache = null
       mx.clearCache?()
 

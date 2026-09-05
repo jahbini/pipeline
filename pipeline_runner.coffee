@@ -1898,6 +1898,31 @@ main = ->
         shutdown: extra.shutdown ? null
     catch err
       console.error "[runs] could not finalize run #{runId} in sqlite:", String(err?.message ? err)
+
+    # Structural per-pipe recipe manifest — one row per recipe,
+    # authoritative "did we finish this?". Consumed by hf_queue_gen_ite
+    # (skip-if-done) and the UI panel (per-pipe recipe progress).
+    # Replaces the old scattered SSH probes for -mlx4 dir, kag counts,
+    # adapter file, etc. Only recipes that reach a terminal exit here
+    # get recorded — a Metal SIGABRT that kills the process leaves no
+    # entry, which is honest.
+    try
+      manifestPath = path.join(CWD, 'recipe_manifest.json')
+      manifest = {}
+      if fs.existsSync manifestPath
+        try manifest = JSON.parse fs.readFileSync(manifestPath, 'utf8') catch then manifest = {}
+      manifest[pipelineName] =
+        status:        status                          # 'done' | 'failed' | 'shutdown'
+        run_id:        runId
+        started_at:    startedAt
+        completed_at:  finishedAt
+        duration_sec:  Math.round((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000)
+        logdir:        process.env.LOGDIR ? null
+        shutdown_by:   extra.shutdown?.by ? null
+        shutdown_reason: extra.shutdown?.reason ? null
+      fs.writeFileSync manifestPath, JSON.stringify(manifest, null, 2), 'utf8'
+    catch err
+      console.error "[recipe_manifest] failed to write #{manifestPath ? '(unknown)'}: #{String(err?.message ? err)}"
   if experiment.run?.model and experiment.run?.loraLand
     modelDirName = experiment.run.model.replace /\//g, '--'
     targetDir    = path.resolve experiment.run.loraLand, modelDirName
@@ -2071,11 +2096,53 @@ main = ->
     S.clearRestartHere(chosen)  # harmless if file now gone; will just no-op
 
   # ---------------- STARTUP: restore done/failed from state (only if NOT in skipRestore) ----------------
+  # Sweep any step whose state file says `status: "running"` — that
+  # can only happen if the prior run's process died without executing
+  # its `catch`/finalize (typically a native SIGABRT, e.g. Metal GPU
+  # timeout during quantize). Overwrite with a truthful `crashed`
+  # status so the UI stops claiming the step is still active and so
+  # downstream tools see reality. The DAG scheduler falls through the
+  # same `else` branch below either way and will re-run the step.
+  for n in order when not skipRestore.has(n)
+    st = S.read(n)
+    if st?.status is 'running'
+      st.status = 'crashed'
+      st.finished_at ?= new Date().toISOString()
+      st.error ?= 'process died before finalize (likely native crash such as Metal SIGABRT)'
+      S.write n, st
+      console.log "🧹 startup: marked stale running state as crashed: #{n}"
+
+  # Also clean up stale rows in the runs table — any 'running' row
+  # with no finished_at is a crashed run from a prior process that
+  # died without executing finalizeRunStatus. Same reasoning as the
+  # step-state sweep above. Best-effort: sqlite may not exist yet
+  # on a freshly-provisioned pipe.
+  try
+    dbPath = path.join(CWD, 'runtime.sqlite')
+    if fs.existsSync(dbPath)
+      { DatabaseSync } = require 'node:sqlite'
+      dbSweep = new DatabaseSync(dbPath)
+      # Everything but the currently-starting run (this one) that's
+      # still marked `running` with no finished_at is stale.
+      updated = dbSweep.prepare("""
+        UPDATE runs
+           SET status='crashed',
+               finished_at=?
+         WHERE status='running'
+           AND finished_at IS NULL
+           AND run_id <> ?
+      """).run(new Date().toISOString(), runId)
+      dbSweep.close()
+      if updated?.changes > 0
+        console.log "🧹 startup: marked #{updated.changes} stale 'running' run(s) in runs table as crashed"
+  catch err
+    console.error "[startup-sweep] runs table cleanup failed: #{String(err?.message ? err)}"
+
   for n in order when not skipRestore.has(n)
     st = S.read(n)
     if st?.status is 'done' and st?.done is true and st?.dirty isnt true
       M.saveThis "done:#{n}", true
-    else if st?.status is 'failed'
+    else if st?.status in ['failed', 'crashed']
       M.saveThis "done:#{n}", false
     else
       M.theLowdown "done:#{n}"  # leave undefined

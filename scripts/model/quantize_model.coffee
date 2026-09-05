@@ -107,16 +107,68 @@ path = require 'path'
       console.log "[#{S.stepName}] removing prior quantized dir #{dstAbs} (missing/mismatched)"
       fs.rmSync dstAbs, recursive: true, force: true
 
-    console.log "[#{S.stepName}] quantizing #{srcAbs} → #{dstAbs} (#{qBits}-bit, groupSize=#{groupSize})"
-    result = await S.callLLM
-      op:        'quantize'
-      sourceDir: srcAbs
-      targetDir: dstAbs
-      bits:      qBits
-      groupSize: groupSize
+    # Pre-emptive fallback: symlink dst → src BEFORE attempting
+    # quantize. If quantize crashes (Metal GPU timeout, OOM,
+    # SIGABRT that kills the runner outright), downstream steps
+    # still find a usable model_dir at ${dst} — just pointing at
+    # raw weights. session_api handles the raw path fine (it
+    # loads fp16 safetensors natively). On successful quantize we
+    # replace the symlink with the real quantized dir.
+    fs.mkdirSync path.dirname(dstAbs), recursive: true
+    fallbackTarget = path.relative(path.dirname(dstAbs), srcAbs) or srcAbs
+    try
+      fs.rmSync dstAbs, recursive: true, force: true
+      fs.symlinkSync fallbackTarget, dstAbs, 'dir'
+      console.log "[#{S.stepName}] pre-quantize fallback: symlinked #{dstAbs} -> #{fallbackTarget}"
+    catch err
+      console.error "[#{S.stepName}] could not stage fallback symlink: #{err?.message ? err}"
 
-    gb = (result?.outputBytes ? 0) / 1024 / 1024 / 1024
-    console.log "[#{S.stepName}] complete: #{result?.tensorsQuantized ? '?'} tensors quantized, #{result?.tensorsCopied ? '?'} copied verbatim, #{gb.toFixed 2} GB written"
+    # Quantize into a TEMP dir first. Atomically swap on success.
+    # Rationale: a Metal SIGABRT (kIOGPUCommandBufferCallbackError-
+    # Timeout) kills the runner PROCESS OUTRIGHT — no CoffeeScript
+    # `catch` can run, no restore logic executes. If we quantized
+    # directly into `dstAbs`, a crash would leave an empty or
+    # partial `dstAbs` with no symlink fallback, breaking all
+    # downstream loads with "config.json not found".
+    #
+    # By writing into `dstAbs.tmp` and only mv'ing over `dstAbs`
+    # on success, a Metal abort leaves the pre-staged symlink at
+    # `dstAbs` completely untouched — downstream steps continue
+    # with raw fp16 weights via session_api's fallback.
+    tmpAbs = "#{dstAbs}.tmp-#{process.pid}"
+    console.log "[#{S.stepName}] quantizing #{srcAbs} → #{tmpAbs} (#{qBits}-bit, groupSize=#{groupSize})"
+    try
+      # Wipe any stale tmp from a prior aborted run.
+      try fs.rmSync tmpAbs, recursive: true, force: true catch
+      result = await S.callLLM
+        op:        'quantize'
+        sourceDir: srcAbs
+        targetDir: tmpAbs
+        bits:      qBits
+        groupSize: groupSize
+      gb = (result?.outputBytes ? 0) / 1024 / 1024 / 1024
+      console.log "[#{S.stepName}] complete: #{result?.tensorsQuantized ? '?'} tensors quantized, #{result?.tensorsCopied ? '?'} copied verbatim, #{gb.toFixed 2} GB written"
+      # Success — atomically replace the pre-staged symlink.
+      try fs.rmSync dstAbs, recursive: true, force: true catch
+      fs.renameSync tmpAbs, dstAbs
+      console.log "[#{S.stepName}] swapped #{tmpAbs} → #{dstAbs} (fallback symlink replaced with real quantized dir)"
+    catch err
+      # Cleanup tmp then FAIL the step honestly. Older code called
+      # S.done() here too — that hid the failure from the runner,
+      # the UI, and puppeteer's classifier. The error still went to
+      # the log but nothing acted on it. Now the failure is
+      # first-class: step-state shows `failed`, the panel shows the
+      # error, puppeteer's classifier picks it up as `oom_quantize`
+      # and schedules the retry.
+      #
+      # The pre-staged fallback symlink at `dstAbs -> raw` REMAINS
+      # in place — so downstream RECIPES (oracle_ite, reembed_clean,
+      # train_lora — none of which depend on quantize_model in the
+      # DAG) continue to load raw fp16 weights via session_api's
+      # fallback. Only THIS step is failed.
+      try fs.rmSync tmpAbs, recursive: true, force: true catch
+      console.error "[#{S.stepName}] quantize failed (#{err?.message ? err}); pre-staged symlink at #{dstAbs} -> #{fallbackTarget} remains in place so downstream RECIPES still see usable weights"
+      throw err
 
     S.done()
     return
