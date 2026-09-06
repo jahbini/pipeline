@@ -110,46 +110,91 @@ quantizeModelDir = (sourceDir, targetDir, opts = {}) ->
   nCopy = 0
   seen = 0
   pending = []
-  EVAL_BATCH = 32     # tensors per Metal command buffer — small enough
-                      # to avoid kIOGPUCommandBufferCallbackErrorTimeout
-                      # on a 4B-param model, large enough to amortize
-                      # per-buffer overhead.
+  pendingBytes = 0
+  # 2026-09-07: batch by BYTES not by tensor count. The old
+  # tensor-count ceiling was tuned for 4B models; on 8B/27B each
+  # tensor is 4-9x larger, and 32 of them per Metal command buffer
+  # blows past the driver's kIOGPUCommandBufferCallbackErrorTimeout
+  # watchdog (fires ~a few seconds after submission, timer-bound not
+  # compute-bound). Every 8B+ pipe was hitting this. Byte budget:
+  # start conservative at 32 MB per submission; override via
+  # env MLX_QUANTIZE_MAX_BYTES for per-machine tuning without a
+  # code change. EVAL_MAX_COUNT keeps a belt-and-suspenders ceiling.
+  EVAL_MAX_BYTES = Number(process.env.MLX_QUANTIZE_MAX_BYTES ? 32 * 1024 * 1024)
+  EVAL_MAX_COUNT = Number(process.env.MLX_QUANTIZE_MAX_COUNT ? 32)
   PROGRESS_EVERY = 50
   batchIdx = 0
+  # dtype-agnostic worst-case bytes (fp32 upper bound — quantized
+  # residuals still live in float form until eval flushes).
+  byteSize = (arr) ->
+    return 0 unless arr?.shape?
+    n = 1
+    n *= d for d in arr.shape
+    4 * n
   flushPending = ->
     return unless pending.length
     batchIdx += 1
     n = pending.length
-    logger "  eval batch ##{batchIdx} — #{n} pending arrays (about to flush to Metal)"
+    mb = Math.round(pendingBytes / 1024 / 1024)
+    logger "  eval batch ##{batchIdx} — #{n} arrays, ~#{mb}MB (about to flush to Metal)"
     tFlush = Date.now()
     mx.eval pending
     logger "  eval batch ##{batchIdx} done in #{Date.now()-tFlush}ms"
     pending.length = 0
+    pendingBytes = 0
+  pushArr = (arr) ->
+    b = byteSize arr
+    # If this single array alone would blow the budget and we already
+    # have work queued, flush first so this array gets its own buffer.
+    if b >= EVAL_MAX_BYTES and pending.length
+      flushPending()
+    pending.push arr
+    pendingBytes += b
+    if pending.length >= EVAL_MAX_COUNT or pendingBytes >= EVAL_MAX_BYTES
+      flushPending()
+  logger "eval-batching: MAX_BYTES=#{Math.round(EVAL_MAX_BYTES/1024/1024)}MB MAX_COUNT=#{EVAL_MAX_COUNT}"
   for name, arr of weights
     seen += 1
     shapeStr = JSON.stringify(arr?.shape ? [])
     if isQuantizeCandidate(name, arr)
-      # Announce BEFORE the potentially-crashing quantize call.
-      if seen % PROGRESS_EVERY is 0 or arr?.shape?[0] * (arr?.shape?[1] ? 1) > 50_000_000
-        logger "  [#{seen}/#{totalTensors}] quantizing #{name} shape=#{shapeStr}"
-      try
-        [wq, scales, biases] = mx.quantize arr, groupSize, bits
-      catch err
-        logger "  FAILED at #{name} shape=#{shapeStr}: #{err?.message ? err}"
-        throw err
-      base = name[...-'.weight'.length]
-      out["#{base}.weight"] = wq
-      out["#{base}.scales"] = scales
-      out["#{base}.biases"] = biases
-      pending.push wq, scales, biases
-      nQuant += 1
+      # 2026-09-07: some tensors (chiefly lm_head: vocab × hidden) are
+      # single arrays large enough that even a solo Metal command
+      # buffer for mx.quantize overruns kIOGPUCommandBufferCallbackError-
+      # Timeout on the mini's GPU (e.g. lm_head[151936,4096] ≈ 297MB
+      # fp32 → ~5s+ Metal wall-clock). Copy such tensors verbatim
+      # (fp16) instead of quantizing them; we lose ~600MB of size
+      # savings on that single tensor but the rest of the model
+      # still quantizes fine. Env override: MLX_QUANTIZE_MAX_PARAMS
+      # (default 300M params).
+      totalParams = (arr?.shape ? []).reduce ((a,b) -> a*b), 1
+      MAX_QUANT_PARAMS = Number(process.env.MLX_QUANTIZE_MAX_PARAMS ? 300_000_000)
+      if totalParams > MAX_QUANT_PARAMS
+        logger "  [#{seen}/#{totalTensors}] SKIP-QUANT (too large for one Metal buffer: #{totalParams} params) #{name} shape=#{shapeStr}"
+        out[name] = arr
+        pushArr arr
+        nCopy += 1
+      else
+        # Announce BEFORE the potentially-crashing quantize call.
+        if seen % PROGRESS_EVERY is 0 or arr?.shape?[0] * (arr?.shape?[1] ? 1) > 50_000_000
+          logger "  [#{seen}/#{totalTensors}] quantizing #{name} shape=#{shapeStr}"
+        try
+          [wq, scales, biases] = mx.quantize arr, groupSize, bits
+        catch err
+          logger "  FAILED at #{name} shape=#{shapeStr}: #{err?.message ? err}"
+          throw err
+        base = name[...-'.weight'.length]
+        out["#{base}.weight"] = wq
+        out["#{base}.scales"] = scales
+        out["#{base}.biases"] = biases
+        pushArr wq
+        pushArr scales
+        pushArr biases
+        nQuant += 1
     else
       logger "  [#{seen}/#{totalTensors}] copy #{name} shape=#{shapeStr}" if seen % PROGRESS_EVERY is 0
       out[name] = arr
-      pending.push arr
+      pushArr arr
       nCopy += 1
-    if pending.length >= EVAL_BATCH
-      flushPending()
   flushPending()
   logger "  quantized #{nQuant} tensors, copied #{nCopy} verbatim (#{Date.now()-t1}ms)"
 
