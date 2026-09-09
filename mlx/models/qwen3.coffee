@@ -118,5 +118,16 @@ class Model extends BaseModel
 
   getDecoderKVCacheOptions: -> {nLayers: @model.layers.length}
 
+  # Drop lm_head.* from the checkpoint when tie_word_embeddings=true.
+  # Some HF Qwen3 checkpoints (0.6B, 1.7B) ship the tied lm_head anyway —
+  # sometimes just lm_head.weight, sometimes the quantized triple
+  # lm_head.weight + .scales + .biases. In either case we don't declare
+  # an lmHead module (embed_tokens.asLinear does the tying), so strict-
+  # load must not see those keys. Case B in GPT/hospital.md.
+  sanitize: (weights) ->
+    return unless @args.tieWordEmbeddings
+    delete weights[k] for k of weights when k is 'lm_head.weight' or k.startsWith('lm_head.')
+    return
+
 exports.Model = Model
 exports.modelArgs = modelArgs

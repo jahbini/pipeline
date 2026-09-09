@@ -42,3 +42,20 @@ Known pitfalls:
 - a converted-only `build/model4` can be much larger and can OOM inference
 - multimodal Gemma 4 checkpoints such as `google/gemma-4-E2B-it` are not small on this local conversion path; local HF-to-MLX conversion can fail before quantization completes
 - if inference recipes start redownloading or requantizing, that is architecture drift
+
+Determinism (verified 2026-09-07):
+- `quantize_model` produces **bit-identical** output on repeat runs for
+  the same source weights + same quant settings (bits=4, group_size=64).
+  Verified on `Qwen/Qwen3.5-4B`: mlx4 built Aug-26 with mlx-lm 0.28.3
+  and mlx-lm 0.31.2 have identical SHA-256
+  (`73da816f506a347a5713953f9ff8d695c5ffe53378b509cb1bc7a790a64a5a3d`,
+  5,487,481,485 bytes, same file list).
+- Implication: a hospital pipe's failure is never explained by "the
+  quant is stale" — if the safetensors bytes are on disk, they are what
+  a fresh `quantize_model` would produce. Don't waste a Metal-GPU cycle
+  requantizing when debugging load failures; the bug is in the model
+  wrapper, the checkpoint layout, or the venv, not the weights.
+- To force `quantize_model` to actually re-run (not short-circuit on
+  cached `state/step-quantize_model.json`), delete that step file
+  before relaunching. The runner only checks the step's cached "done"
+  status, not the presence of the target directory.

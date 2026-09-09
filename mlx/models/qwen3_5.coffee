@@ -172,7 +172,11 @@ class FullAttention extends nn.Module
     else
       queries = @rope.forward(queries)
       keys    = @rope.forward(keys)
-    console.error "[qwen3_5.full] preSDPA q=#{JSON.stringify queries.shape} k=#{JSON.stringify keys.shape} v=#{JSON.stringify values.shape} mask=#{if mask? then JSON.stringify(mask.shape) else 'null'} cache.offset=#{cache?.offset}"
+    # Prefill-shape trace. Fires on every full-attn forward, so gate it
+    # behind QWEN3_5_TRACE=1 to keep oracle_ite error logs from blowing
+    # up to megabytes on hybrid models.
+    if process.env.QWEN3_5_TRACE?
+      console.error "[qwen3_5.full] preSDPA q=#{JSON.stringify queries.shape} k=#{JSON.stringify keys.shape} v=#{JSON.stringify values.shape} mask=#{if mask? then JSON.stringify(mask.shape) else 'null'} cache.offset=#{cache?.offset}"
     try
       out = mx.fast.scaledDotProductAttention(queries, keys, values, @scale, mask)
     catch err
@@ -519,7 +523,12 @@ class LanguageModelInner extends nn.Module
           mx.eval h
           _am = (mx.getActiveMemory?() ? 0) / (1024*1024)
           _spike = _am - _outerBaseline
-          console.error "[qwen3_5.layer] i=#{i} kind=#{if layer.selfAttn? then 'full' else 'linear'} L=#{h.shape[1]} activeMB=#{_am.toFixed(1)} spikeFromBaseMB=#{_spike.toFixed(1)}"
+          # Per-layer memory trace: gated behind QWEN3_5_TRACE=1 so the
+          # 32×prefill×N-generations flood doesn't bloat oracle_ite error
+          # logs into megabytes. The safety-abort check below stays
+          # unconditional — that's real correctness, not diagnostics.
+          if process.env.QWEN3_5_TRACE?
+            console.error "[qwen3_5.layer] i=#{i} kind=#{if layer.selfAttn? then 'full' else 'linear'} L=#{h.shape[1]} activeMB=#{_am.toFixed(1)} spikeFromBaseMB=#{_spike.toFixed(1)}"
           if _spike > _outerCeilMB
             throw new Error "[qwen3_5.forward] CROSS-LAYER SAFETY ABORT after layer i=#{i}: activeMB=#{_am.toFixed(1)} spike=#{_spike.toFixed(1)} > ceiling #{_outerCeilMB} MB."
     if profShouldLog()

@@ -116,3 +116,34 @@ Everything above survives a reboot:
 - `/private/tmp/claude-*` scratchpads — don't rely on scripts stored there
 - The running ui_server + pipeline_runner processes — restart them manually
 - pnpm caches — nothing to preserve
+
+## Rebuilding a broken venv (2026-09-07 incident)
+
+If `~/pipeline/.venv/bin/pip` errors with
+
+```
+bad interpreter: <some old path>/.venv/bin/python3: No such file or directory
+```
+
+the venv was created against an interpreter that has since been deleted.
+Every entry-point script in `.venv/bin/` is orphaned — you can't
+`pip install --upgrade` your way out; pip itself is broken.
+
+Rebuild from scratch (matches what `pipeline-demo` / `pipeline-pipes`
+installers would do):
+
+```sh
+ssh theaiguy@mac-mini.local '
+  cd /Users/theaiguy/pipeline
+  mv .venv .venv.broken.$(date +%s)   # keep for postmortem, delete later
+  /opt/homebrew/bin/python3 -m venv .venv
+  .venv/bin/pip install --upgrade pip setuptools wheel
+  .venv/bin/pip install -r requirements.txt
+'
+```
+
+`requirements.txt` pins `mlx==0.31.1 / mlx-lm==0.31.2 / mlx-metal==0.31.1`
+(three packages, checked by `validatePythonEnvironment` at runner
+startup — see `GPT/pipeline_runner.md` § "Python / MLX env — validate,
+never fix"). The runner will not attempt any repair; it only errors
+loudly with the paths it tried.
