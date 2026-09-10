@@ -601,7 +601,7 @@ logGroupOutcome = (label, raw, filtered) ->
 
           for chunk, cIdx in retryChunks
             chunkPrompt = renderPrompt promptText, chunk.text
-            attempt2 = await runOracleOnce S, modelDir, chunkPrompt, adapterPath, llmConfig, true
+            attempt2 = await runOracleOnce S, modelDir, chunkPrompt, adapterPath, llmConfig #, true
             logGroupOutcome "#{storyID} · group #{group.group_index} · retry chunk #{cIdx+1}/#{retryChunks.length}", attempt2.raw, attempt2.filtered
             usable = isUsableEmotionList(attempt2.filtered)
             retryAttempts.push
