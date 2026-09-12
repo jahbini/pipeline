@@ -30,6 +30,49 @@ require '@frost-beta/llm/dist/fs.js'
 
 {core: mx, nn} = require '@frost-beta/mlx'
 
+# 2026-09-12: monkey-patch the library's `sample` function so we can:
+#   (a) apply presence_penalty to logits before token selection
+#   (b) accumulate a per-call set of seen token ids
+# We keep the ORIGINAL sample and delegate to it after mutating logits.
+# State passed via module-scope refs, cleared before/after each generate.
+# Node is single-threaded, so cross-call bleed via these refs is impossible
+# as long as each generate() sets its own state.
+_baseModule = require '@frost-beta/llm/dist/base.js'
+_origSample = _baseModule.sample
+_penaltyCtx =
+  presencePenalty: 0
+  seenTokens: null   # Set<number> — populated per-generate; null = disabled
+
+_applyPresencePenalty = (logits) ->
+  # logits shape: [batch=1, vocab_size]. Move to JS, subtract penalty
+  # at each seen-token index, ship back. ~150k floats per token step —
+  # cheap enough at token-generation rates and simpler than
+  # constructing an MLX scatter-subtract.
+  return logits unless _penaltyCtx.seenTokens? and _penaltyCtx.seenTokens.size > 0 and _penaltyCtx.presencePenalty > 0
+  arr = logits.tolist()   # [[num, num, ...]]
+  row = arr[0]
+  penalty = _penaltyCtx.presencePenalty
+  for id from _penaltyCtx.seenTokens
+    row[id] = row[id] - penalty if id >= 0 and id < row.length
+  mx.array [row], mx.float32
+
+_baseModule.sample = (logits, topP, temperature) ->
+  patched = _applyPresencePenalty(logits)
+  result = _origSample.call(_baseModule, patched, topP, temperature)
+  # result is [tokenTensor, prob]. Extract token id to add to seen set.
+  if _penaltyCtx.seenTokens?
+    try
+      tokenTensor = result[0]
+      mx.eval tokenTensor
+      # tolist returns a scalar for 0-d arrays (which sample yields per batch=1)
+      tid = tokenTensor.tolist?()
+      tid = tid[0] if Array.isArray(tid)
+      if typeof tid is 'number' and tid >= 0
+        _penaltyCtx.seenTokens.add tid
+    catch
+      # swallow — a stale eval issue mustn't crash generation
+  result
+
 # --- version-skew shims -----------------------------------------------------
 # llm.js 0.4.1 was written against a pre-0.4 node-mlx that put memory helpers
 # under mx.metal. In 0.4.0 they were promoted to top-level. Bridge before we
@@ -265,7 +308,24 @@ createSession = (opts = {}) ->
       llm.kvCache = null
       assertMemCeiling 'generate:pre'
 
-      prompt = if gopts.raw then userText else formatChatML(userText, systemPrompt)
+      # 2026-09-12: no_thinking prompt-prefix. When true AND raw=true,
+      # feed the model a completed empty think block so Qwen3-family
+      # models skip the reasoning phase and start on the answer. The
+      # library's chat template handles this via enable_thinking; we
+      # bypass it for raw prompts.
+      noThinking = gopts.noThinking is true or gopts.no_thinking is true or gopts.enable_thinking is false
+      effectiveText =
+        if noThinking and gopts.raw
+          "<think>\n\n</think>\n\n" + String(userText ? '')
+        else
+          userText
+
+      # 2026-09-12: set the per-call presence_penalty context so the
+      # monkey-patched sample() applies penalty to seen tokens.
+      _penaltyCtx.presencePenalty = Number(gopts.presencePenalty ? gopts.presence_penalty ? 0)
+      _penaltyCtx.seenTokens = if _penaltyCtx.presencePenalty > 0 then new Set() else null
+
+      prompt = if gopts.raw then effectiveText else formatChatML(effectiveText, systemPrompt)
       promptEmbeds = await llm.encode(prompt)
       mx.eval promptEmbeds
       promptTokens = promptEmbeds.shape[1]
@@ -345,6 +405,12 @@ createSession = (opts = {}) ->
         stopMarkerHit = hit
         break
       tEnd = Date.now()
+
+      # 2026-09-12: clear presence_penalty context now that this
+      # generation is done, so the next call starts with a clean slate.
+      seenCount = _penaltyCtx.seenTokens?.size ? 0
+      _penaltyCtx.presencePenalty = 0
+      _penaltyCtx.seenTokens = null
 
       elapsed = (tEnd - tStart) / 1000
       ttftSec = if firstTokenAt then (firstTokenAt - tStart) / 1000 else elapsed

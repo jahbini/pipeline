@@ -51,6 +51,16 @@ generateOp = (params) ->
     topP:         params.topP         ? 0.8
     systemPrompt: params.systemPrompt ? null
     raw:          params.raw          ? false
+    # Presence penalty (2026-09-12) — logit adjustment applied to
+    # previously-emitted tokens. OpenAI-style: logits[t] -= penalty
+    # for every token t already in the generation. Values 0..2.
+    presencePenalty: params.presence_penalty ? params.presencePenalty ? 0
+    # No-thinking (2026-09-12) — for Qwen3-family models. When true
+    # AND raw=true, prepends `<think>\n\n</think>\n\n` to the prompt
+    # so the model sees a completed empty think phase and skips into
+    # the answer. Accepts both `no_thinking:true` and the yaml-friendly
+    # `enable_thinking:false`.
+    noThinking: params.no_thinking ? params.noThinking ? (params.enable_thinking is false)
 
 trainOp = (params) ->
   # trainLoRA already takes camelCase opts (modelDir, dataDir, adapterPath,

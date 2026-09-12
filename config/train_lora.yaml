@@ -67,8 +67,10 @@ build_lora_dataset_ite:
   depends_on: [select_lora_stories_ite]
   needs: [selected_story_ids]
   makes: [train_rows, valid_rows, test_rows]
-  # Natural-EOS rows that fit under maxSeqLength (no truncation).
-  max_total_tokens: 400
+  # 2026-09-12: whole-story-per-row (was per-group fragments at 400).
+  # 2048 covers 99% of Jim's stories (2 outliers > 2k tok are skipped
+  # with a log). Raise further if you want to catch the giants.
+  max_total_tokens: 2048
 
 run_lora_train_ite:
   run: lora_ite/run_lora_train_ite.coffee
@@ -82,7 +84,11 @@ run_lora_train_ite:
   llm:
     batchSize: 1
     iters: 300
-    maxSeqLength: 640
+    # 2026-09-12: bumped 640 → 2048 to match the whole-story training
+    # rows emitted by build_lora_dataset_ite. Memory cost scales with
+    # this — bigger context = more VRAM per training step. On 4B+
+    # models on the mini you may need to lower iters or batch_size.
+    maxSeqLength: 2048
     learningRate: 0.00001
     loraRank: 8
     loraAlpha: 16

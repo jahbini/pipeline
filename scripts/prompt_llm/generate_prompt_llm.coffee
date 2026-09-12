@@ -89,14 +89,13 @@ retrievePassages = (L, userPrompt, modelDir, topK) ->
   qEmb = (await L.callLLM {op: 'embed', modelDir: modelDir, prompt: userPrompt, raw: true})?.embedding
   throw new Error "[#{L.stepName}] query embed returned nothing" unless qEmb?
 
-  # 2. Load chunk embeddings — prefer the CLEAN re-embeddings
-  #    (build/chunk_embeddings_clean.jsonl from reembed_clean) over the
-  #    content-diluted kag_embeddings.
-  cleanFile = L.param 'clean_embeddings_file', 'build/chunk_embeddings_clean.jsonl'
-  rows = null
-  if fs.existsSync cleanFile
-    rows = (JSON.parse(line) for line in String(fs.readFileSync(cleanFile, 'utf8')).split(/\r?\n/) when line.trim().length)
-    console.log "[#{L.stepName}] using CLEAN re-embeddings (#{rows.length}) from #{cleanFile}"
+  # 2. Load chunk embeddings — prefer the CLEAN re-embeddings from
+  #    `kag_embeddings_clean` (populated by reembed_clean) over the
+  #    content-diluted `kag_embeddings` (populated by oracle). Both
+  #    live in sqlite as of 2026-09-11 — no filesystem JSONL involved.
+  rows = L.theLowdown('kagAllCleanEmbeddings.jsonl')?.value ? []
+  if rows?.length
+    console.log "[#{L.stepName}] using CLEAN re-embeddings (#{rows.length}) from kag_embeddings_clean"
   else
     rows = L.theLowdown('kagAllEmbeddings.jsonl')?.value ? []
     console.log "[#{L.stepName}] clean embeddings not found — using kag_embeddings (#{rows.length}); run reembed_clean for real retrieval"

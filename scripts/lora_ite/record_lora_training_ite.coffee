@@ -20,6 +20,16 @@
 
     L.saveThis "loraTrainingRun{#{runRecord.run_id}}.json", runRecord
 
+    # Bust the Memo cache on the usage view before re-reading it.
+    # `select_lora_stories_ite` reads `loraStoryUsage.jsonl` at the
+    # start of the recipe (before any training has happened), and
+    # Memo caches that pre-training snapshot. Without this forget,
+    # the count below is always 0 in a composed recipe like
+    # elementary.yaml — even after `loraTrainingRun{id}` above
+    # populated `lora_training_run_stories`. Same bug pattern as
+    # seed_story_sqlite's stale `allStories.jsonl` cache. Fixed
+    # 2026-09-11.
+    L.forget? 'loraStoryUsage.jsonl'
     usageEntry = L.theLowdown 'loraStoryUsage.jsonl'
     usageRows = usageEntry?.value
     if usageRows is undefined

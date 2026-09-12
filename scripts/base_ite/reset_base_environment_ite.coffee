@@ -28,9 +28,43 @@ removePath = (baseDir, relativePath) ->
   action: (S) ->
     baseDir = process.cwd()
 
-    S.saveThis 'sqliteResetAll.json',
-      mode: 'full'
-      reset_at: new Date().toISOString()
+    # Guard: only truncate sqlite when it's truly empty or absent.
+    # Prior behavior fired sqliteResetAll unconditionally, so re-running
+    # this step (e.g. because the step-state-done gate doesn't apply to
+    # steps with empty `makes:`, or because the human relaunches) blew
+    # away every previously-oracled kag_entries row and every trained
+    # adapter's ancestry. The correct semantics for "reset" is:
+    # "prepare a fresh pipe" — a pipe with populated stories +
+    # kag_entries is already prepared. Don't destroy real work.
+    # (2026-09-11 fix.)
+    sqliteAlive = false
+    sqliteHasWork = false
+    try
+      { DatabaseSync } = require 'node:sqlite'
+      dbPath = path.join(baseDir, 'runtime.sqlite')
+      if fs.existsSync(dbPath)
+        db = new DatabaseSync(dbPath)
+        sqliteAlive = true
+        # "Has real work" = any story is present. Any prior seed run
+        # populated `stories`; oracle rows in `kag_entries` are a
+        # stronger signal but not required. If stories exist we
+        # preserve the DB — kag rows just accrue on the next run.
+        try
+          row = db.prepare("SELECT COUNT(*) AS c FROM stories").get()
+          sqliteHasWork = Number(row?.c ? 0) > 0
+        catch
+          sqliteHasWork = false
+        try db.close() catch then null
+    catch
+      sqliteAlive = false
+
+    if sqliteAlive and sqliteHasWork
+      console.log "[reset_base_environment_ite] sqlite has populated stories — preserving DB (skipping sqliteResetAll)"
+    else
+      console.log "[reset_base_environment_ite] sqlite empty or absent — firing sqliteResetAll"
+      S.saveThis 'sqliteResetAll.json',
+        mode: 'full'
+        reset_at: new Date().toISOString()
 
     # Do NOT wipe build/model or build/model4. Those are the outputs of
     # download_model + quantize_model — both are idempotent (download is

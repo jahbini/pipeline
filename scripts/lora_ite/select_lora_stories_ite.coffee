@@ -103,14 +103,15 @@ shuffleUsageTies = (rows) ->
       updated_at: new Date().toISOString()
 
     if selectedStoryIDs.length is 0
+      # 2026-09-12: no `pipeline:shutdown` emission. When lora selection
+      # drains inside a composite recipe (elementary), shutting down the
+      # whole pipeline halts the outer recipe mid-flight. Just report
+      # `done` with empty selection; the recipe's downstream steps see
+      # zero rows and no-op, and queue_run_ite decides what runs next.
       nextCycleState.ready_for_reset = true
       nextCycleState.completed_at = new Date().toISOString()
       L.make 'lora_cycle_state', nextCycleState
       L.make 'lora_remaining_count', 0
-      L.saveThis 'pipeline:shutdown',
-        by: L.stepName
-        reason: 'no remaining SQLite-backed stories are available for LoRA training'
-        timestamp: new Date().toISOString()
       L.make 'selected_story_ids', []
       L.done()
       return
@@ -118,5 +119,16 @@ shuffleUsageTies = (rows) ->
     L.make 'lora_cycle_state', nextCycleState
     L.make 'lora_remaining_count', remainingCount
     L.make 'selected_story_ids', selectedStoryIDs
+    # Step-scoped iterate hint for long recipes. Note: train_lora is
+    # a multi-step recipe (select → build → train → record), and
+    # iterating THIS step alone isn't the right shape — we want the
+    # OUTER queue_run_ite to re-fire the whole recipe so training
+    # actually happens. So this hint is a no-op inside a bare
+    # train_lora recipe (no next batch of stories is trained until
+    # the current cycle completes) but useful only if train_lora is
+    # embedded in a longer recipe where the caller wants the select
+    # step to run again after a cycle. Kept for symmetry.
+    if remainingCount > 0
+      L.iterate?("#{remainingCount} stories still pending for lora selection") if false  # disabled — see comment
     L.done()
     return

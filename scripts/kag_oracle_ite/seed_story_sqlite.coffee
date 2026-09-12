@@ -96,6 +96,14 @@ safe = (title) ->
       storyIDs.push story.story_id
 
     console.log "[seed_story_sqlite] stories seeded:", storyIDs.length
+    # We READ `allStories.jsonl` at the top of this step (line 46) —
+    # BEFORE seeding — and got the pre-seed value (usually empty).
+    # Memo cached that. In a single-recipe launch this doesn't matter
+    # (process exits after this step's recipe). In a composed recipe
+    # like elementary.yaml, downstream steps (reembed_chunks_clean)
+    # would pick up the stale empty cache. Forget it so the next
+    # theLowdown re-queries sqlite (now populated).
+    S.forget? 'allStories.jsonl'
     S.make 'story_seed_ids', storyIDs
     S.done()
     return

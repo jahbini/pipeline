@@ -514,6 +514,16 @@ ensureSingleInstance = ->
       continue if pid is process.pid
       continue unless command.includes('pipeline_runner.coffee')
       continue unless command.includes(scriptPath) or command.includes(path.basename(scriptPath))
+      # 2026-09-12 self-match fix — the EXECUTABLE (first token of the
+      # command line) must be `coffee` or `node`. A bash/zsh -c pipe
+      # that MENTIONS "pipeline_runner.coffee" in its arguments (e.g.
+      # a puppeteer SSH probe running `pgrep -f pipeline_runner.coffee`
+      # or a shell script containing `pkill -f coffee.*pipeline_runner`)
+      # does NOT count as another instance. We check the executable
+      # basename, not substring existence.
+      firstToken = command.split(/\s+/)[0] ? ''
+      exeBase = firstToken.split('/').pop()
+      continue unless exeBase is 'coffee' or exeBase is 'node'
       others.push
         pid: pid
         command: command
@@ -1516,7 +1526,16 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
         cur = memo.theLowdown(paramsKey)?.value ? {}
         cur.tools_resolved = toolsState.resolved
         memo.saveThis paramsKey, cur
-      memo.saveThis "done:#{stepName}", true
+      # Step-scoped iterate (2026-09-11). When the step called L.iterate()
+      # this invocation, it wants another go — do NOT mark the step as
+      # done yet, or downstream steps' `waitFor("done:#{n}")` would fire
+      # early and start on stale/incomplete outputs. runStep's iterate
+      # loop will re-invoke action; on the batch that actually drains,
+      # L.iterate is NOT called, and this L.done() correctly marks
+      # done:#{stepName} = true.
+      iterateFlag = memo.theLowdown("step:iterate:#{stepName}")?.value
+      unless iterateFlag?
+        memo.saveThis "done:#{stepName}", true
       true
 
     fail: (err) ->
@@ -1534,7 +1553,44 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
         unless declared
           flushWatchdog "#{key} L.saveThis from step #{stepName} (NOT in this step's makes — compat-shim write)"
       value
+    # Step-scoped iterate signal (2026-09-11). A step that processes a
+    # bounded batch per invocation calls `L.iterate("N pending")` before
+    # `L.done()` to tell the runner "re-invoke me until I don't call
+    # this anymore". Contrast with `pipeline:shutdown` which halts the
+    # WHOLE recipe. Runner reads `step:iterate:<stepName>` after each
+    # invocation; if present, it clears the flag and re-runs the step.
+    # Capped at a safe upper bound so a broken step can't loop forever.
+    #
+    # `invalidate:` names Memo keys to forget before re-invoke. Needed
+    # for request-key artifacts (like `storiesMissingKag.jsonl` from
+    # meta/sqlite.coffee) whose values are cached — otherwise the next
+    # iteration re-reads the SAME stale value and processes the same
+    # rows again. Only keys the step depends on need naming — internal
+    # state stays cached.
+    iterate: (reason = 'batch drained, more work pending', opts = null) ->
+      invalidateList =
+        if Array.isArray(opts)              then opts
+        else if opts?.invalidate?            then opts.invalidate
+        else                                  []
+      info =
+        by:         stepName
+        reason:     String(reason)
+        timestamp:  new Date().toISOString()
+        invalidate: invalidateList
+      memo.saveThis "step:iterate:#{stepName}", info
+      ui type:'step', phase:'iterate_requested', reason:info.reason
+      info
     theLowdown: (key) -> memo.theLowdown key
+    # Drop a Memo cache entry so the next theLowdown re-runs the meta
+    # rule (fresh read). Necessary for sqlite request keys that were
+    # queried BEFORE this step wrote its rows — otherwise later steps
+    # in the same recipe pick up the stale empty result. Discovered
+    # 2026-09-11 when seed_story_sqlite's pre-seed read of
+    # allStories.jsonl poisoned reembed_chunks_clean in elementary.yaml.
+    forget: (key) ->
+      try delete memo.MM[key] catch then null
+      ui type:'memo', phase:'forget', key:key
+      key
     waitFor: (keys, andDo) -> memo.waitFor keys, andDo
     addMetaRule: (name, regex, handler) -> memo.addMetaRule name, regex, handler
     callMLX: (cmdType, payload, dbug) ->
@@ -1548,7 +1604,7 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
 
   ledger
 
-runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecorder = null) ->
+runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecorder = null, persistStepOutputs = null) ->
   new Promise (res, rej) ->
     active.count += 1
     active.names ?= new Set()
@@ -1618,14 +1674,57 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
       unless step?.action?
         finish(false, "Missing @step.action in #{script}")
         return
-      try
-        L = createStepLedger(M, n, resolveArtifact, artifactSpecFor, uiRecorder)
-        pp=Promise.resolve(step.action(L,n,M))
-        pp.then -> finish(true)
-        pp.catch (e)-> finish(false, e.message)
-      catch e 
-        finish(false,e)
-        throw e        
+      # Step-scoped iterate (2026-09-11). Loop the step in-process
+      # while it keeps signaling `L.iterate(reason)`. Bounded so a
+      # broken step can't run forever. `pipeline:shutdown` still
+      # short-circuits the loop (recipe-wide halt).
+      MAX_STEP_ITERATIONS = 500
+      L = createStepLedger(M, n, resolveArtifact, artifactSpecFor, uiRecorder)
+      iteration = 0
+      runOnce = ->
+        iteration += 1
+        try
+          pp = Promise.resolve(step.action(L, n, M))
+          pp.then ->
+            # Recipe-wide shutdown request short-circuits any iterate.
+            if M.theLowdown("pipeline:shutdown")?.value?
+              finish(true)
+              return
+            iterateInfo = M.theLowdown("step:iterate:#{n}")?.value
+            if iterateInfo?
+              # Clear the flag so the next iteration must re-request.
+              M.saveThis "step:iterate:#{n}", null
+              # Forget request-key artifacts named by the step. Deleting
+              # from M.MM forces theLowdown to trigger the meta rule's
+              # read handler on the next lookup — request keys like
+              # `storiesMissingKag.jsonl` will then re-query sqlite
+              # (which now includes rows written by the just-completed
+              # batch).
+              if Array.isArray(iterateInfo.invalidate)
+                for k in iterateInfo.invalidate
+                  try delete M.MM[k] catch then null
+              if iteration >= MAX_STEP_ITERATIONS
+                console.error "! step #{n} hit MAX_STEP_ITERATIONS=#{MAX_STEP_ITERATIONS}; treating as failure to prevent infinite loop (last reason: #{iterateInfo.reason})"
+                finish(false, "step iterate cap hit (#{iteration} iterations)")
+                return
+              # Persist this batch's declared outputs to disk BEFORE the
+              # next iteration so mid-run progress (oracle_remaining_count,
+              # reembed_remaining_count, etc.) is visible to the puppeteer
+              # probe + UI.
+              if persistStepOutputs?
+                try
+                  await persistStepOutputs()
+                catch persistErr
+                  console.error "  ! persist-outputs mid-iterate failed for #{n}: #{persistErr?.message ? persistErr}"
+              console.log "  ↻ step #{n} iterate ##{iteration}: #{iterateInfo.reason}"
+              runOnce()
+              return
+            finish(true)
+          pp.catch (e) -> finish(false, e.message)
+        catch e
+          finish(false, e)
+          throw e
+      runOnce()
       return
 
     # legacy spawn (only for non-newstyle)
@@ -2172,7 +2271,7 @@ main = ->
         try U.event type:'step', phase:'scheduled', step:n catch then null
         artifactSpecLookup = (artifactKey) -> artifacts[artifactKey]
         Promise.resolve(wireInputsForStep(n))
-          .then -> runStep(n, steps[n], experiment, M, S, active, resolveArtifact, artifactSpecLookup, U)
+          .then -> runStep(n, steps[n], experiment, M, S, active, resolveArtifact, artifactSpecLookup, U, -> collectOutputsForStep(n))
           .then -> collectOutputsForStep(n)
           .catch (e) ->
             console.error "! Step #{n} error:", e.message

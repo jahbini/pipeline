@@ -118,7 +118,7 @@ Retired 2026-07-24: `S.tools.tmp_file` (mint/remove tmp safetensors
 paths) and `S.tools.cache_embedding`'s safetensors-reader helpers.
 Both died when oracle and eval moved to `L.callLLM({op:'embed'})` —
 no temp file to mint, no safetensors file to read. See
-`GPT/eval_ite/embedding_blob.md`.
+`GPT/tools/embedding_blob.md`.
 
 No remaining step-script fs/sql-direct-access violations. The last one
 (`scripts/diary_ite/collect_diary_kag_ite.coffee` opening
@@ -165,7 +165,7 @@ Established 2026-06-26. Initial migration (cache_embedding into
 The `cache_embedding` tool was later (2026-07-24) trimmed to just
 the SQLite-blob + cosine helpers and renamed `embedding_blob` — the
 safetensors-reader chain it originally carried died with the port to
-in-process `L.callLLM({op:'embed'})`. See `GPT/eval_ite/embedding_blob.md`.
+in-process `L.callLLM({op:'embed'})`. See `GPT/tools/embedding_blob.md`.
 The companion `fs` stinginess rule still flags violations — see that
 section.
 

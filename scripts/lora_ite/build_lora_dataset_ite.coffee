@@ -38,63 +38,11 @@ splitParagraphs = (text) ->
     paragraphs.push cleanPara
   paragraphs
 
-buildStoryGroups = (paragraphs) ->
-  return [] unless Array.isArray(paragraphs)
-  return [] unless paragraphs.length
-  if paragraphs.length < 5
-    return [paragraphs.slice()]
-  groups = []
-  total = paragraphs.length
-  baseSize = Math.floor(total / 5)
-  remainder = total % 5
-  startIndex = 0
-  for groupIndex in [0...5]
-    groupSize = baseSize
-    groupSize += 1 if groupIndex < remainder
-    selected = paragraphs.slice startIndex, startIndex + groupSize
-    groups.push selected
-    startIndex += groupSize
-  groups
-
-buildFragmentParagraphs = (paragraphs) ->
-  rval = []
-  return rval unless Array.isArray(paragraphs)
-  return rval if paragraphs.length is 0
-  firstPara = paragraphs[0] ? ''
-  if firstPara.trim().length > 0
-    rval.push firstPara.trim()
-  currentText = rval.join "\n\n"
-  currentLen = currentText.length
-  if currentLen < 300 and paragraphs.length > 2
-    secondPara = paragraphs[1] ? ''
-    if secondPara.trim().length > 0
-      rval.push secondPara.trim()
-  rval
-
-splitSingleParagraphTrainingText = (paragraph) ->
-  text = String(paragraph ? '').trim()
-  return null unless text.length >= 120
-  sentences = text.split /(?<=[.!?])\s+/
-    .map (sentence) -> String(sentence ? '').trim()
-    .filter (sentence) -> sentence.length > 0
-  if sentences.length >= 2
-    promptSentences = 1
-    if sentences.length >= 4
-      promptSentences = Math.max 1, Math.floor(sentences.length / 3)
-    prompt = sentences.slice(0, promptSentences).join " "
-    completion = sentences.slice(promptSentences).join " "
-    if prompt.length > 0 and completion.length > 0
-      return prompt: prompt + "\n\n", completion: completion
-  words = text.split /\s+/
-    .map (word) -> String(word ? '').trim()
-    .filter (word) -> word.length > 0
-  return null unless words.length >= 24
-  splitAt = Math.max 8, Math.floor(words.length * 0.35)
-  return null if splitAt >= words.length
-  prompt = words.slice(0, splitAt).join " "
-  completion = words.slice(splitAt).join " "
-  return null unless prompt.length > 0 and completion.length > 0
-  prompt: prompt + "\n\n", completion: completion
+# (2026-09-12: removed buildStoryGroups / buildFragmentParagraphs /
+# splitSingleParagraphTrainingText. They served the old
+# per-paragraph-group training design; the rewritten step emits ONE
+# row per whole story — `{prompt: simple_text, completion: jim_story}`
+# — with no fragment splitting.)
 
 # Deterministic per-story split. Sort story ids, then bucket by index:
 # 0..7 → train, 8 → valid, 9 → test. No RNG state; identical stories in
@@ -151,8 +99,26 @@ splitStoryIds = (storyIds, trainOut = 8, validOut = 1, testOut = 1) ->
       rowsWritten += 1
       return
 
-    MAX_TOTAL_TOKENS = Number(L.param('max_total_tokens', 1024))
+    # 2026-09-12 REDESIGN #2 — style-transfer training rows.
+    #
+    # Row shape:
+    #   prompt     = the story's PLAIN-LANGUAGE RETELLING (from
+    #                story_simplifications; populated by
+    #                simplify_stories_ite before this step runs)
+    #   completion = Jim's WHOLE original story
+    #
+    # This teaches the LoRA: "given plain content, produce Jim's voice."
+    # A story with no simplification row yet is skipped (with a log)
+    # — simplify_stories_ite must run first (guaranteed by the
+    # elementary DAG's depends_on chain).
+    #
+    # Stories where prompt+completion exceed max_total_tokens are
+    # logged and skipped. Bump the budget in the recipe if you want
+    # more coverage.
+    MAX_TOTAL_TOKENS = Number(L.param('max_total_tokens', 2048))
     SAFETY_TOKENS = 64
+    skippedTooLong = 0
+    skippedNoSimp = 0
 
     for storyID in selectedStoryIDs
       continue unless storyID?
@@ -170,100 +136,43 @@ splitStoryIds = (storyIds, trainOut = 8, validOut = 1, testOut = 1) ->
       fullStoryText = String(story.text ? '').trim()
       continue unless fullStoryText.length > 0
 
-      paragraphs = splitParagraphs fullStoryText
-      continue unless paragraphs.length > 0
+      # Read the plain-language retelling from sqlite. If none exists
+      # yet, skip this story — simplify_stories_ite must run first.
+      simpEntry = L.theLowdown "storySimplification{#{storyID}}.json"
+      simpRow = simpEntry?.value
+      simpleText = String(simpRow?.simple_text ? '').trim()
+      unless simpleText.length
+        console.log "[#{L.stepName}] skip #{storyID}: no story_simplifications row yet (run simplify_stories_ite first)"
+        skippedNoSimp += 1
+        continue
 
-      storyGroups = buildStoryGroups paragraphs
+      prompt = simpleText + "\n\n"
+      row = prompt + fullStoryText
+      rowTokens = estimateTokens row
 
-      for groupParagraphs in storyGroups
-        continue unless Array.isArray(groupParagraphs)
-        continue unless groupParagraphs.length > 0
+      if rowTokens + SAFETY_TOKENS > MAX_TOTAL_TOKENS
+        console.log "[#{L.stepName}] skip #{storyID}: row is #{rowTokens} tok — exceeds max_total_tokens=#{MAX_TOTAL_TOKENS}"
+        skippedTooLong += 1
+        continue
 
-        fragmentParagraphs = buildFragmentParagraphs groupParagraphs
-        continue unless fragmentParagraphs.length > 0
-
-        fragmentText = fragmentParagraphs.join "\n\n"
-        prompt = fragmentText.trim() + "\n\n"
-        promptTokens = estimateTokens prompt
-
-        completionStartIndex = fragmentParagraphs.length
-        completionParagraphs = groupParagraphs.slice completionStartIndex
-
-        if completionParagraphs.length is 0
-          if groupParagraphs.length is 1
-            fallback = splitSingleParagraphTrainingText groupParagraphs[0]
-            if fallback?
-              emit storyID, fallback.prompt + fallback.completion
-              fallbackRowsWritten += 1
-          continue
-
-        maxCompletionTokens = MAX_TOTAL_TOKENS - promptTokens - SAFETY_TOKENS
-        if maxCompletionTokens < 80
-          console.log "[#{L.stepName}] skip group in #{storyID}: prompt too large (#{promptTokens} tok) for budget #{MAX_TOTAL_TOKENS}"
-          continue
-
-        chunkParagraphs = []
-        chunkTokens = 0
-
-        flushChunk = ->
-          return unless chunkParagraphs.length > 0
-          completionText = chunkParagraphs.join "\n\n"
-          emit storyID, prompt + completionText
-          chunkParagraphs = []
-          chunkTokens = 0
-          return
-
-        for para, idx in completionParagraphs
-          paraTokens = estimateTokens para
-          proposedTokens = chunkTokens + paraTokens
-
-          if chunkParagraphs.length > 0 and proposedTokens > maxCompletionTokens
-            flushChunk()
-
-          if paraTokens > maxCompletionTokens
-            sentences = para.split /(?<=[.!?])\s+/
-            sentenceChunk = []
-            sentenceTokens = 0
-
-            for sentence in sentences
-              cleanSentence = String(sentence ? '').trim()
-              continue unless cleanSentence.length > 0
-
-              sentTokens = estimateTokens cleanSentence
-              proposedSentenceTokens = sentenceTokens + sentTokens
-
-              if sentenceChunk.length > 0 and proposedSentenceTokens > maxCompletionTokens
-                emit storyID, prompt + sentenceChunk.join(" ")
-                sentenceChunk = []
-                sentenceTokens = 0
-
-              sentenceChunk.push cleanSentence
-              sentenceTokens += sentTokens
-
-            if sentenceChunk.length > 0
-              emit storyID, prompt + sentenceChunk.join(" ")
-
-            continue
-
-          chunkParagraphs.push para
-          chunkTokens += paraTokens
-
-        flushChunk() if chunkParagraphs.length > 0
-
+      emit storyID, row
       storiesProcessed += 1
       processedStoryIds.push storyID if rowsByStory[storyID]?
+
+    console.log "[#{L.stepName}] skipped no-simplification: #{skippedNoSimp}"
+    console.log "[#{L.stepName}] skipped over-budget stories: #{skippedTooLong}"
 
     console.log "[build_lora_dataset_ite] stories processed:", storiesProcessed
     console.log "[build_lora_dataset_ite] rows written:", rowsWritten
     console.log "[build_lora_dataset_ite] single-paragraph fallback rows:", fallbackRowsWritten
 
     if rowsWritten is 0
-      shutdownAt = new Date().toISOString()
-      console.log "[build_lora_dataset_ite] selected stories produced no trainable rows; shutting down pipeline cleanly"
-      L.saveThis 'pipeline:shutdown',
-        by: L.stepName
-        reason: 'selected stories produced no LoRA training rows'
-        timestamp: shutdownAt
+      # 2026-09-12: no `pipeline:shutdown` emission. Composite recipes
+      # (elementary) chain build_lora_dataset → train_lora → record via
+      # depends_on. A shutdown here would halt the whole recipe; instead
+      # emit empty row-sets so downstream steps see zero work and
+      # exit cleanly, and let queue_run_ite pick the next entry.
+      console.log "[build_lora_dataset_ite] selected stories produced no trainable rows — emitting empty row sets"
       L.make 'train_rows', []
       L.make 'valid_rows', []
       L.make 'test_rows', []

@@ -44,13 +44,35 @@ storacle:
   needs: []
   makes: [storacle_raw, storacle_meta, storacle_text]
   quantized_model_dir: ${MODELS}/${run.model}-mlx4
-  # Story picker: dropdown of every story in the pipe's runtime.sqlite.
-  # See ui_server.coffee's `db/story_titles` dropdown source handler.
+
+  # Story picker — dropdown of every story in this pipe's sqlite.
   story_id: [ UI_dropdown, db/story_titles, "" ]
-  # Prompt template. MUST contain the literal placeholder `{{{STORY}}}`
-  # exactly as three-brace-STORY-three-brace — the step splits on that
-  # marker and joins with the chosen story's text.
+
+  # Prompt template. MUST contain at least one of these placeholders:
+  #   {{{STORY}}}          → substituted with the full raw story text
+  #   {{{LEAD_FRAGMENT}}}  → substituted with the exact lead paragraphs
+  #                           that build_lora_dataset_ite fed to LoRA
+  #                           training for this story (first paragraph,
+  #                           plus second if the first is <300 chars)
+  # Both are resolved every run so you can mix them freely.
   prompt_text: [ UI_textarea, "" ]
+
+  # Adapter picker — dropdown of adapters known to the writer's UI
+  # (same source `prompt_llm` uses). Sentinel values that mean "no
+  # adapter, base model only": empty string, "none", "base", "-".
+  adapter_path: [ UI_dropdown, adapters, "" ]
+
+  # Toggle: prepend a Related-Passages block retrieved via top-K
+  # cosine over kag_embeddings_clean. RAG-lite.
+  use_chunks: [ UI_checkbox, false ]
+
+  # Toggle: prepend the chosen story's kag_entries as an inline
+  # "Story-derived context" block (one line per keyword/headline).
+  use_kag:    [ UI_checkbox, false ]
+
+  # Top-K used when use_chunks=true.
+  rag_top_k: 4
+
   llm:
     maxTokens: 400
     temperature: 0.2

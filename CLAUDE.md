@@ -61,7 +61,7 @@ After a pipeline run completes, the artifacts that drive your advice:
 | `evaluationLatest.json` | most recent scored run (one row, JSON cols parsed) |
 | `evaluationsByPromptHash{<hash>}.jsonl` | **the only honest trend.** All rows sharing one `eval_prompts_hash`, newest first. Use `latest.eval_prompts_hash` from the previous read |
 | `evaluation{<run_id>}.json` | one specific run's row when you need its full details/hyperparams |
-| `trainingHistoryJoinEval.jsonl` | every eval joined to the training in effect when it was scored (temporal join — see `GPT/eval_ite/evaluations_table.md` § "Cross-table join"). Use to attribute scores to training settings |
+| `trainingHistoryJoinEval.jsonl` | every eval joined to the training in effect when it was scored (temporal join — see `GPT/evaluations_table.md` § "Cross-table join"). Use to attribute scores to training settings |
 | `evaluationHistory.jsonl` | all rows regardless of comparability — for "find me runs to inspect," not for numeric reasoning |
 | `runtime.sqlite` `runs` table | metadata for every pipeline launch; join to `evaluations.run_id` |
 | `runtime.sqlite` `_change_log` | what tables/keys changed since `<run_id>`; spot which step touched what |

@@ -74,8 +74,8 @@ defaulting to the current active model (huihui-ai/Huihui-…) via
 because they need model pins that only make sense in this project.
 
 **Pipe** — `pipes/story/scripts/*.coffee` for pipe-specific step
-scripts (build_lora_pairs_ite, resolve_story_parts, etc.) and the
-diary/oracle forks that override shipped behavior.
+scripts (resolve_story_parts, etc.) and the diary/oracle forks that
+override shipped behavior.
 
 ## Related
 

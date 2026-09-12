@@ -1,0 +1,81 @@
+# =====================================================================
+#   newborn.yaml — bootstrap-and-audition recipe for a fresh pipe
+# =====================================================================
+#
+# Puppeteer schedules this on every newly-provisioned pipe (state = 'newborn'):
+#   reset (download + quantize + seed) → storacle (canonical audition).
+#
+# When the recipe finishes, the pipe still has state = 'newborn' and
+# sits in the crib until a human reviews the storacle output and flips
+# the state to `continue` (which puts the pipe on the elementary track).
+# If the audition is poor, the human flips to `rejected` instead.
+#
+# The audition is a single fixed story + fixed prompt so every newborn
+# gets the SAME test — a fair, comparable baseline across candidates.
+#
+# Sub-recipe origins (mirror those in elementary.yaml):
+#   reset.yaml    → reset_base_environment_ite, download_model,
+#                    seed_story_sqlite, quantize_model
+#   storacle.yaml → storacle (one prompt-generation call)
+
+run:
+  output_dir: out
+  data_dir: data
+  training_dir: build/train
+  loraLand: ${MODELS}/${run.model}
+
+artifacts:
+  stories_md:
+    source: data/stories.md
+  story_seed_ids:
+    target: out/story_seed_ids.json
+  storacle_raw:
+    target: out/storacle_raw.txt
+  storacle_meta:
+    target: out/storacle_meta.json
+  storacle_text:
+    target: out/storacle_text.txt
+
+# ------ reset stage ------
+reset_base_environment_ite:
+  run: base_ite/reset_base_environment_ite.coffee
+  depends_on: []
+  needs: []
+  makes: []
+
+download_model:
+  run: model/download_model.coffee
+  depends_on: [reset_base_environment_ite]
+  needs: []
+  makes: []
+  download_dir: ${MODELS}/${run.model}
+
+seed_story_sqlite:
+  run: kag_oracle_ite/seed_story_sqlite.coffee
+  depends_on: [download_model]
+  needs: [stories_md]
+  makes: [story_seed_ids]
+
+quantize_model:
+  run: model/quantize_model.coffee
+  depends_on: [download_model, seed_story_sqlite]
+  needs: []
+  makes: []
+  src_dir:       ${MODELS}/${run.model}
+  quantized_dir: ${MODELS}/${run.model}-mlx4
+  q_bits: 4
+
+# ------ audition stage ------
+storacle:
+  run: storacle/storacle.coffee
+  depends_on: [quantize_model]
+  needs: []
+  makes: [storacle_raw, storacle_meta, storacle_text]
+  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  # Canonical audition — same story + prompt for every newborn, so a
+  # human comparing candidates isn't rating them on different tests.
+  story_id: anna-played-piana-md
+  prompt_text: "Who does Anna love in {{{STORY}}}?"
+  llm:
+    maxTokens: 200
+    temperature: 0.7

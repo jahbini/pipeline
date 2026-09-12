@@ -538,10 +538,13 @@ logGroupOutcome = (label, raw, filtered) ->
     newStoryIds = []
 
     if pending.length is 0
-      S.saveThis 'pipeline:shutdown',
-        by: S.stepName
-        reason: 'all stories have already been passed to the sqlite oracle'
-        timestamp: new Date().toISOString()
+      # 2026-09-12: do NOT emit pipeline:shutdown here. When oracle
+      # ran as a solo recipe (old design), shutdown was the "we're
+      # done" signal. Inside elementary.yaml, shutdown halts the
+      # WHOLE recipe and prevents reembed/train_lora from running.
+      # Just finalize the artifacts and hand off to the DAG — the
+      # next step (reembed) starts naturally.
+      console.log "[oracle_ask_sqlite] pending: 0 — nothing to oracle; handing off to next step"
       S.make 'new_story_ids', newStoryIds
       S.make 'oracle_remaining_count', 0
       S.make 'kag_rejects', rejectRows
@@ -697,5 +700,18 @@ logGroupOutcome = (label, raw, filtered) ->
     S.make 'new_story_ids', newStoryIds
     S.make 'oracle_remaining_count', remainingAfterBatch
     S.make 'kag_rejects', outRejects
+    # Step-scoped iterate (2026-09-11). Inside a long recipe this
+    # tells pipeline_runner "re-invoke me until drained" without
+    # halting downstream steps. Outside (single-recipe queue driver),
+    # queue_run_ite's iterate_until_shutdown handles the same shape
+    # via `pipeline:shutdown` — that only fires when remaining == 0.
+    # `invalidate:` — the pending-stories list is a sqlite request key
+    # that Memo caches; without invalidation the next iteration would
+    # re-read the SAME 169 stories and re-process the same 4.
+    if remainingAfterBatch > 0
+      S.iterate?(
+        "#{remainingAfterBatch} stories still pending for oracle"
+        invalidate: ['storiesMissingKag.jsonl']
+      )
     S.done()
     return
