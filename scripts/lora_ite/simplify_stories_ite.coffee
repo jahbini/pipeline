@@ -67,11 +67,22 @@
 
       prompt = promptTemplate.split('{{{STORY}}}').join(text)
 
+      # 2026-09-13: force no_thinking + a nonzero presence_penalty on
+      # every simplification call. Qwen's default "thinking" mode
+      # dumps chain-of-thought into the output ("Okay, so the user
+      # wants…"), and without a presence penalty the model recurses
+      # on its own summary ("I think that's the final version…" repeated
+      # dozens of times). Both bugs were baked into every existing
+      # `story_simplifications.simple_text` row before this fix.
+      # Recipe-level `llm:` can override these if a specific model
+      # needs different settings.
       llmArgs =
-        op: 'generate'
-        modelDir: modelDir
-        prompt: prompt
-        raw: true
+        op:               'generate'
+        modelDir:         modelDir
+        prompt:           prompt
+        raw:              true
+        no_thinking:      true
+        presence_penalty: 1.5
       for own key, value of llmConfig
         continue unless value?
         continue if key is 'op'

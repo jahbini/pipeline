@@ -130,7 +130,11 @@ disposeKvCache = (cache, where = '?') ->
           freed += 1
   try mx.dispose?(cache) catch _
   after = memMB()
-  console.error "[session_api] disposeKvCache(#{where}) entries=#{entries} extrasFreed=#{freed} activeMemMB #{before.toFixed(1)}→#{after.toFixed(1)} (peak=#{peakMB().toFixed(1)}) cacheType=#{typeof cache} isArr=#{Array.isArray(cache)}"
+  # Memory-instrumentation trace: gated behind SESSION_API_TRACE=1 to
+  # keep per-call chatter out of oracle_ite / storacle / simplify /
+  # prompt_llm .err logs (2026-09-12).
+  if process.env.SESSION_API_TRACE?
+    console.error "[session_api] disposeKvCache(#{where}) entries=#{entries} extrasFreed=#{freed} activeMemMB #{before.toFixed(1)}→#{after.toFixed(1)} (peak=#{peakMB().toFixed(1)}) cacheType=#{typeof cache} isArr=#{Array.isArray(cache)}"
   return
 
 {Tokenizer, LLM} = require '@frost-beta/llm'
@@ -329,7 +333,8 @@ createSession = (opts = {}) ->
       promptEmbeds = await llm.encode(prompt)
       mx.eval promptEmbeds
       promptTokens = promptEmbeds.shape[1]
-      console.error "[session_api] generate promptTokens=#{promptTokens} activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
+      if process.env.SESSION_API_TRACE?
+        console.error "[session_api] generate promptTokens=#{promptTokens} activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
       assertMemCeiling 'generate:afterEncode'
 
       # Stop the generation loop early if the model emits any of these
@@ -458,7 +463,8 @@ createSession = (opts = {}) ->
       promptEmbeds = await llm.encode(prompt)
       mx.eval promptEmbeds
       promptTokens = promptEmbeds.shape[1]
-      console.error "[session_api] embed promptTokens=#{promptTokens} activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
+      if process.env.SESSION_API_TRACE?
+        console.error "[session_api] embed promptTokens=#{promptTokens} activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
       assertMemCeiling 'embed:afterEncode'
 
       # Consume exactly one iteration so prefill happens and llm.kvCache
@@ -466,7 +472,8 @@ createSession = (opts = {}) ->
       # itself is discarded; we only care about the KV state it produced.
       for await pieces from llm.generate(promptEmbeds, {maxTokens: 1, topP: 1.0, temperature: 0.0})
         break
-      console.error "[session_api] embed post-prefill activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
+      if process.env.SESSION_API_TRACE?
+        console.error "[session_api] embed post-prefill activeMemMB=#{memMB().toFixed(1)} (peak=#{peakMB().toFixed(1)})"
       assertMemCeiling 'embed:afterPrefill'
 
       cache = llm.kvCache

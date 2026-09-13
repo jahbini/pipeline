@@ -93,9 +93,15 @@ splitStoryIds = (storyIds, trainOut = 8, validOut = 1, testOut = 1) ->
     fallbackRowsWritten = 0
     storiesProcessed = 0
 
-    emit = (storyID, textOut) ->
+    # 2026-09-13: emit {prompt, completion} — the supervised shape
+    # mlx_lm.lora expects when --mask-prompt is on. The trainer then
+    # computes loss ONLY on completion tokens, which is the whole
+    # point of a style-transfer LoRA (given plain content, produce
+    # Jim's voice). The prior `{text: prompt + completion}` shape
+    # trained on both halves equally and defeated the design.
+    emit = (storyID, promptText, completionText) ->
       rowsByStory[storyID] ?= []
-      rowsByStory[storyID].push text: textOut
+      rowsByStory[storyID].push prompt: promptText, completion: completionText
       rowsWritten += 1
       return
 
@@ -146,16 +152,22 @@ splitStoryIds = (storyIds, trainOut = 8, validOut = 1, testOut = 1) ->
         skippedNoSimp += 1
         continue
 
-      prompt = simpleText + "\n\n"
-      row = prompt + fullStoryText
-      rowTokens = estimateTokens row
+      # Style-transfer pairing:
+      #   prompt     = the plain-language retelling (drives conditioning)
+      #   completion = Jim's original story (what the adapter should learn to produce)
+      # No trailing "\n\n" on the prompt — the trainer joins the two
+      # halves with tokenizer eos/bos glue as configured. Keep the
+      # completion clean; EOS is appended in the collect() pass.
+      promptText     = simpleText
+      completionText = fullStoryText
+      rowTokens = estimateTokens(promptText) + estimateTokens(completionText)
 
       if rowTokens + SAFETY_TOKENS > MAX_TOTAL_TOKENS
         console.log "[#{L.stepName}] skip #{storyID}: row is #{rowTokens} tok — exceeds max_total_tokens=#{MAX_TOTAL_TOKENS}"
         skippedTooLong += 1
         continue
 
-      emit storyID, row
+      emit storyID, promptText, completionText
       storiesProcessed += 1
       processedStoryIds.push storyID if rowsByStory[storyID]?
 
@@ -195,12 +207,16 @@ splitStoryIds = (storyIds, trainOut = 8, validOut = 1, testOut = 1) ->
       if buckets.test.length is 0
         buckets.test.push buckets.train.pop()
 
+    # EOS is appended to the COMPLETION half only — that's what
+    # participates in the loss under --mask-prompt. Prompt tokens are
+    # context; teaching the adapter to produce EOS after the story
+    # is what makes generation stop cleanly at inference time.
     collect = (ids) ->
       out = []
       for id in ids
         continue unless rowsByStory[id]?
         for row in rowsByStory[id]
-          out.push text: "#{row.text}#{eotToken}"
+          out.push prompt: row.prompt, completion: "#{row.completion}#{eotToken}"
       out
 
     trainRows = collect buckets.train

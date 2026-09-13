@@ -273,6 +273,58 @@ module.exports = (M, opts={}) ->
       created_at   TEXT
     );
 
+    -- Peer memory-pressure summary (2026-09-13). One row per
+    -- (pipe, step) observation window. Populated by the puppeteer's
+    -- mem_pressure_ingest_ite step from ~/writer/logs/mem_pressure.json
+    -- on the peer (written by ~/writer/bin/mem_sampler.sh). The min /
+    -- max sample records are stored inline as JSON blobs so we don't
+    -- need a wide schema. Used to answer "does the mini have headroom
+    -- for a second concurrent pipeline_runner?" — see GPT/mem_pressure.md.
+    CREATE TABLE IF NOT EXISTS mem_pressure_summary (
+      pipe          TEXT NOT NULL,
+      step          TEXT NOT NULL,
+      first_seen    TEXT NOT NULL,
+      last_seen     TEXT NOT NULL,
+      samples       INTEGER NOT NULL,
+      min_pressure  REAL NOT NULL,
+      max_pressure  REAL NOT NULL,
+      min_sample    TEXT,           -- full min sample as JSON
+      max_sample    TEXT,           -- full max sample as JSON
+      ingested_at   TEXT NOT NULL,
+      PRIMARY KEY (pipe, step)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mem_pressure_last_seen ON mem_pressure_summary (last_seen);
+    CREATE INDEX IF NOT EXISTS idx_mem_pressure_max       ON mem_pressure_summary (max_pressure);
+
+    -- Puppeteer spawn log (2026-09-13). One row per pipeline_runner
+    -- launch that queue_run_ite dispatches on the peer. Feeds the
+    -- "what and when to schedule" question — you can grep by pipe,
+    -- recipe, terminal status, or start-of-day time to see historical
+    -- patterns. INSERT on dispatch (status='running'); UPDATE on
+    -- terminal transition (status = ok | error | timed_out |
+    -- retry_after_idle | launch_never_spawned).
+    --
+    -- run_id is the peer's `logdir` (e.g. "elementary_10_34") which is
+    -- unique per launch on that peer + day. If two peers with the
+    -- same logdir formatting ever collide, the primary-key clash will
+    -- surface it — no silent overwrite.
+    CREATE TABLE IF NOT EXISTS spawn_log (
+      run_id          TEXT PRIMARY KEY,
+      pipe            TEXT NOT NULL,
+      recipe          TEXT NOT NULL,
+      started_at      TEXT NOT NULL,
+      finished_at     TEXT,
+      status          TEXT NOT NULL,     -- running | ok | error | timed_out | ...
+      exit_code       INTEGER,
+      elapsed_seconds REAL,
+      reason          TEXT,              -- pipeline_state.by | run.reason on failure
+      error_text      TEXT               -- one-line error summary for quick scans
+    );
+    CREATE INDEX IF NOT EXISTS idx_spawn_log_pipe       ON spawn_log (pipe);
+    CREATE INDEX IF NOT EXISTS idx_spawn_log_recipe     ON spawn_log (recipe);
+    CREATE INDEX IF NOT EXISTS idx_spawn_log_started_at ON spawn_log (started_at);
+    CREATE INDEX IF NOT EXISTS idx_spawn_log_status     ON spawn_log (status);
+
     -- Per-row change log (step 5 of the agent surface). Every INSERT,
     -- UPDATE, and DELETE on a tracked table fires a trigger that drops one
     -- row here. Powers GET /api/sqlite/diff?since=<run_id|ts|change_id> for
@@ -1272,6 +1324,41 @@ module.exports = (M, opts={}) ->
       }
 
       {
+        # 2026-09-13: oracle-only reset. Targeted counterpart to
+        # loraCycleReset. Clears the oracle side of the corpus:
+        # kag_entries + both embedding tables + story_simplifications
+        # (they're derived from kag_entries) + attempt/parts scaffolding.
+        # Preserves stories, lora_training_runs, lora_story_usage. Used
+        # by `reset_base_environment_ite` when the human ticks
+        # `force_oracle_reset` in the reset recipe's UI.
+        name: 'oracleReset'
+        regex: /^oracleReset$/
+        allowedSuffixes: ['json', 'txt', 'csv']
+        read: null
+        write: (db, value) ->
+          throw new Error "sqlite meta oracleReset write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          db.exec 'BEGIN'
+          try
+            db.exec "DELETE FROM kag_entries"
+            db.exec "DELETE FROM kag_embeddings"
+            db.exec "DELETE FROM kag_embeddings_clean"
+            db.exec "DELETE FROM story_simplifications"
+            db.exec "DELETE FROM oracle_story_attempts"
+            db.exec "DELETE FROM expanded_story_parts"
+            db.exec "DELETE FROM story_parts"
+            db.exec 'COMMIT'
+          catch err
+            try db.exec 'ROLLBACK' catch then null
+            throw err
+
+          {
+            ok: true
+            reset_at: value.reset_at ? new Date().toISOString()
+            mode: value.mode ? 'oracle'
+          }
+      }
+
+      {
         name: 'loraCycleReset'
         regex: /^loraCycleReset$/
         allowedSuffixes: ['json', 'txt', 'csv']
@@ -2016,7 +2103,7 @@ module.exports = (M, opts={}) ->
     ]
 
     M.addMetaRule "sqlite",
-      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|kagEmbeddingCleanRegister\{[^}]+\}|kagAllCleanEmbeddings|storiesMissingCleanEmbeddings|storySimplificationRegister\{[^}]+\}|storySimplification\{[^}]+\}|storySimplificationsMissing|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval)\.(json|jsonl|txt|csv)$/i,
+      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|oracleReset|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|kagEmbeddingCleanRegister\{[^}]+\}|kagAllCleanEmbeddings|storiesMissingCleanEmbeddings|storySimplificationRegister\{[^}]+\}|storySimplification\{[^}]+\}|storySimplificationsMissing|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval)\.(json|jsonl|txt|csv)$/i,
       (key, value) ->
         debugLog "meta key", key, "write?", value isnt undefined
 
@@ -2076,7 +2163,7 @@ module.exports.requestNames = [
   'storyByID',          'partsFor',         'kagFor',          'kagByKeyword',    'oracleFailureFor'
   'expandedPartsFor',   'storiesWithKag',   'storiesMissingKag'
   'allStories',         'trainedStories',   'loraStoryUsage'
-  'loraTrainingRun',    'loraTrainingRuns', 'sqliteResetAll',  'loraCycleReset'
+  'loraTrainingRun',    'loraTrainingRuns', 'sqliteResetAll',  'oracleReset', 'loraCycleReset'
   'runRegister',        'runUpdate',        'runById',         'runHistory'
   'changesSince'
   'kagEmbeddingRegister', 'kagEmbedding',   'kagAllEmbeddings'

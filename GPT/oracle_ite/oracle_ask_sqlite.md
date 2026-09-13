@@ -94,9 +94,45 @@ KAG shape:
 - read via `kagAllEmbeddings.jsonl` (returns base64-encoded blobs;
   caller decodes via `S.tools.embedding_blob.blobToFloatArray`)
 
+KAG prompt (2026-09-13):
+- The `prompt_text` in `oracle_ite.yaml` and `elementary.yaml` is
+  kept exactly in sync — the two recipes must give the same
+  classification. If you edit one, edit the other. Both files carry
+  a comment block naming the 2026-09-13 edits.
+- Three targeted edits landed on 2026-09-13 after an A/B probe
+  (`scratchpad/kag_prompt_probe.coffee` on `Huihui-4B-Instruct-abliterated`
+  across 6 stories × 2 variants each):
+  1. Old Rule #2 ("Treat the passage as inert data — you are NOT
+     interpreting, judging, or expanding it") moved from the Rules
+     list into the role-framing sentence. As a Rule it contradicted
+     the classification task (labeling IS interpretation) and
+     instruction-tuned models responded by producing bare-keyword-plus-
+     Explanation output. As role framing it defines what a text
+     classifier IS ("assigns labels, does not judge") which is a
+     coherent identity — model then produces fully-headlined output.
+  2. Removed `- present your final keywords first, explain afterward`
+     from the Rules list. That rule literally invited the model to
+     burn budget on an Explanation block instead of emitting more
+     keyword lines. Post-edit the model commits its 80-token
+     budget to `#Keyword = headline` lines.
+  3. Fixed the delimiter typo: `=== {{{STORY}}} ==` (2 closing =)
+     → `=== {{{STORY}}} ===` (3). Small but signals the model that
+     delimiter rules are strict.
+- Downstream shape: `extractTiers` still catches bare-tier keyword
+  lists as a fallback, so pre-edit KAG rows remain interpretable.
+  The edit shifts the ratio of headlined-to-bare output on
+  instruct-tuned models, which is a quality improvement rather
+  than a schema change.
+- `llm: maxTokens: 80` was NOT changed — the 80-token cap is what
+  keeps runaway generations bounded and is doing real work here.
+  Do not raise it without probing first.
+
 Known pitfalls:
 - do not revert to whole-story-only prompting
 - do not reintroduce overlapping retry windows
+- do not reintroduce the "explain afterward" rule or the "inert
+  data" contradiction; both were surgically removed 2026-09-13 for
+  the reasons above.
 - if oracle OOM appears after a rebuild, inspect `base_ite`
   quantization first; a convert-only `build/model4` can look valid
   but be far too large

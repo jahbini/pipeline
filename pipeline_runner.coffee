@@ -1394,7 +1394,10 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
 
     param: (key, defaultValue) ->
       debug "param request", key
-      ui type:'param', phase:'request', key:key
+      # 2026-09-12: skip emitting phase:'request' — every param() call
+      # still emits exactly one terminal event (default | resolved |
+      # missing), which halves ui-events.jsonl volume while preserving
+      # the outcome-of-lookup diagnostic that actually matters.
       value = memo.getStepParam stepName, key
       if value is undefined and arguments.length >= 2
         debug "param default", key, defaultValue
@@ -1418,7 +1421,9 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
     need: (artifactKey) ->
       { needs, makes } = getDecls()
       debug "need request", describeArtifact(artifactKey), "declared needs=", needs.join(','), "makes=", makes.join(',')
-      ui type:'need', phase:'request', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey)
+      # 2026-09-12: skip phase:'request' (see param above). `waiting`
+      # still fires to mark the block point; resolved | missing carries
+      # the outcome.
       declared = needs.includes(artifactKey) or makes.includes(artifactKey)
       throw new Error "[#{stepName}] Artifact '#{artifactKey}' must be declared in needs or makes" unless declared
 
@@ -1449,7 +1454,8 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
     peek: (artifactKey, defaultValue = undefined) ->
       { needs, makes } = getDecls()
       debug "peek request", describeArtifact(artifactKey), "declared needs=", needs.join(','), "makes=", makes.join(',')
-      ui type:'peek', phase:'request', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey)
+      # 2026-09-12: skip phase:'request' (see param above). resolved
+      # or default carries the outcome.
       declared = needs.includes(artifactKey) or makes.includes(artifactKey)
       throw new Error "[#{stepName}] Artifact '#{artifactKey}' must be declared in needs or makes" unless declared
 
@@ -1489,7 +1495,8 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
     make: (artifactKey, value) ->
       { makes } = getDecls()
       debug "make request", describeArtifact(artifactKey), "declared makes=", makes.join(',')
-      ui type:'make', phase:'request', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey), value_summary:summarizeValue(value)
+      # 2026-09-12: skip phase:'request' (see param above). `written`
+      # fires immediately after and carries the same shape.
       throw new Error "[#{stepName}] Artifact '#{artifactKey}' must be declared in makes" unless makes.includes artifactKey
       memo.saveThis artifactKey, value
       debug "make wrote", describeArtifact(artifactKey), "(#{typeof value})"

@@ -33,7 +33,20 @@ Inputs:
 - step param `prompt_template` — optional; defaults to a template with
   a `{{{STORY}}}` placeholder that is replaced verbatim per row.
 - step param `llm` — optional map merged into the `callLLM` args (all
-  values except `op` are forwarded).
+  values except `op` are forwarded). Recipe-level entries here OVERRIDE
+  the hard-coded defaults below when set.
+
+Hard-coded LLM defaults (2026-09-13):
+- `no_thinking: true` — Qwen's default thinking mode dumps
+  chain-of-thought into the output ("Okay, so the user wants…"),
+  which then gets stored verbatim as the "simplification". A
+  session_api-side fix (2026-09-12) added the flag; this step now
+  passes it on every call so the polluted output can't recur.
+- `presence_penalty: 1.5` — without this, the model recurses on its
+  own summary ("I think that's the final version…" repeated dozens
+  of times). Any pipe whose `story_simplifications` rows show this
+  loop was populated before the fix.
+- Both are overridable per-recipe via the `llm:` param block.
 
 Outputs:
 - Per-story meta write: `storySimplificationRegister{sid}.json`

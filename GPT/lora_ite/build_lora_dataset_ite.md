@@ -14,15 +14,25 @@ Inputs:
 Outputs:
 - artifacts `train_rows`, `valid_rows`, `test_rows`
 
-Row shape (2026-09-12 rewrite):
+Row shape (2026-09-13 fix — was silently broken 2026-09-12):
 - **one row per whole story**, no fragment/paragraph-group splitting.
+- Emitted as `{prompt, completion}` — the supervised shape mlx_lm.lora
+  expects when `--mask-prompt` is on. Under the mask, loss is computed
+  ONLY on completion tokens — the whole point of a style-transfer LoRA.
 - `prompt`     = the plain-language retelling from `story_simplifications.simple_text`
-- `completion` = the original Jim-voice `stories.text`
+- `completion` = the original Jim-voice `stories.text` + tokenizer's `eos_token`
 - rationale: this is a supervised **style-transfer** signal — flat prose →
   Jim's word-play — not a next-paragraph continuation task.
 - Stories with no `story_simplifications` row yet are **skipped with a log
   line**. `simplify_stories_ite` populates that row for every story that
   has kag_entries; a missing row means simplification hasn't caught up.
+- 2026-09-13 fingerprint of the old bug: `head -1 build/train/train.jsonl`
+  reports a single `text` key concatenating prompt + completion, and
+  the trainer sees no mask → learns to reproduce plain prose too. If
+  you see that shape on a live pipe, the code is stale; sync and
+  regenerate via `reset` + `force_lora_reset` (and `force_oracle_reset`
+  if the `story_simplifications` rows are also polluted by Qwen
+  thinking-mode leakage — see `simplify_stories_ite.md`).
 
 EOS supervision:
 - reads `tokenizer_config.json` from the pipe's quantized model dir

@@ -593,15 +593,35 @@
 
             <div class="controls-group">
               <h3>Run</h3>
-              <label>
+              <!-- 2026-09-13 layout: attach button → last-run summary →
+                   recipe selector → restart → cooldown → launch/kill →
+                   adapter dropdown → save good adapter. Matches
+                   writer/ui/index.html so both UIs read the same way. -->
+
+              <!-- Attach-to-running-pipeline. Hidden by default;
+                   refresh() reveals it when /api/find_active_runner
+                   reports a live runner on a DIFFERENT pipe. -->
+              <button id="attach-runner-button" type="button"
+                      style="display:none;margin-top:2px;background:#4a6fa5;color:#fff;"
+                      title="A pipeline_runner is alive on a different pipe than the one this UI is showing. Click to switch this UI to that pipe.">
+                ⤴ Attach To Running Pipeline
+              </button>
+              <div id="attach-runner-hint" class="hint mono" style="min-height:1em;"></div>
+
+              <!-- Last Run summary — recipe / pipe / status / hh_mm / logdir -->
+              <div class="hint" style="margin-top:2px;">Last Run</div>
+              <div id="run-kv" class="kv"></div>
+
+              <label style="display:block;margin-top:8px;">
                 Recipe Selector
                 <select id="pipeline-select"></select>
               </label>
-              <div id="run-kv" class="kv"></div>
+
               <label class="checkbox-row">
                 <input id="continuous-checkbox" type="checkbox">
                 <span>Restart after cooldown until pipeline shutdown</span>
               </label>
+
               <label>
                 Cooldown Seconds
                 <select id="continuous-delay-select">
@@ -609,10 +629,22 @@
                   <option value="20">20</option>
                 </select>
               </label>
+
               <button id="launch-button" type="button">Write Override And Run</button>
               <button id="kill-button" type="button">Kill Run</button>
-              <button id="save-good-adapter-button" type="button" style="margin-top:6px; background:#3d7a45; color:#fff;">Save Good Adapter</button>
               <div id="launch-result" class="hint mono"></div>
+
+              <!-- Available Adapters dropdown — same source as writer UI
+                   (loadDropdownOptions('adapters') in ui_server). Empty
+                   list = LoRA training not completed for this pipe. The
+                   "(base — no adapter)" sentinel is always selectable. -->
+              <label style="display:block;margin-top:8px;">
+                Available Adapters
+                <select id="available-adapters-select"></select>
+              </label>
+              <div id="available-adapters-hint" class="hint mono" style="min-height:1em;"></div>
+
+              <button id="save-good-adapter-button" type="button" style="margin-top:6px; background:#3d7a45; color:#fff;">Save Good Adapter</button>
               <div id="save-good-adapter-result" class="hint mono"></div>
             </div>
 
@@ -1225,6 +1257,101 @@
       delaySelect.value = String(controls?.continuous_delay_seconds === 20 ? 20 : 60);
     }
 
+    // 2026-09-13: attach-to-running-pipeline. Polls /api/find_active_runner
+    // and reveals a jump button when a runner is alive on a DIFFERENT
+    // pipe than this UI is currently showing. Same behavior as the
+    // writer/ui/index.html implementation.
+    let _attachTarget = null;
+    async function refreshAttachRunner() {
+      const btn  = byId('attach-runner-button');
+      const hint = byId('attach-runner-hint');
+      if (!btn || !hint) return;
+      try {
+        const res = await fetch('/api/find_active_runner', { cache: 'no-store' });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'find_active_runner failed');
+        const other = (data.matches || []).find(m => !m.is_current);
+        if (other) {
+          _attachTarget = other;
+          btn.textContent = `⤴ Attach To ${other.pipe} (${other.pipeline || 'runner'} pid ${other.pid})`;
+          btn.style.display = 'block';
+          hint.textContent = '';
+        } else {
+          _attachTarget = null;
+          btn.style.display = 'none';
+          hint.textContent = '';
+        }
+      } catch (err) {
+        btn.style.display = 'none';
+        hint.textContent = 'runner scan: ' + String(err.message || err);
+        hint.style.color = '#c60';
+      }
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      const btn = byId('attach-runner-button');
+      if (!btn) return;
+      btn.addEventListener('click', async () => {
+        if (!_attachTarget) return;
+        const hint = byId('attach-runner-hint');
+        hint.textContent = `attaching to ${_attachTarget.pipe}…`;
+        hint.style.color = '';
+        try {
+          const res = await fetch('/api/switch_pipe', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({pipe: _attachTarget.pipe})
+          });
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error || 'switch_pipe failed');
+          location.reload();
+        } catch (err) {
+          hint.textContent = 'attach failed: ' + String(err.message || err);
+          hint.style.color = '#c60';
+        }
+      });
+    });
+
+    // 2026-09-13: adapter-listing dropdown in the RUN section. Same
+    // source and behavior as writer/ui/index.html.
+    async function refreshAvailableAdapters() {
+      const sel = byId('available-adapters-select');
+      const hint = byId('available-adapters-hint');
+      if (!sel || !hint) return;
+      const previousValue = sel.value;
+      try {
+        const res = await fetch('/api/adapters', { cache: 'no-store' });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'adapters lookup failed');
+        const opts = Array.isArray(data.adapters) ? data.adapters : [];
+        const summary = data.summary || {};
+        const real = opts.filter(o => o && typeof o.key === 'string' && o.key.length > 0);
+        sel.innerHTML = '';
+        const knownKeys = new Set();
+        for (const opt of opts) {
+          const el = document.createElement('option');
+          el.value = opt.key || '';
+          el.textContent = opt.label || opt.key || '(?)';
+          sel.appendChild(el);
+          knownKeys.add(el.value);
+        }
+        sel.disabled = opts.length === 0;
+        if (previousValue && knownKeys.has(previousValue)) sel.value = previousValue;
+        if (!real.length) {
+          hint.textContent = '⚠ No trained adapter on disk yet — LoRA training has NOT completed for this pipe.';
+          hint.style.color = '#c60';
+        } else {
+          const iterMsg = (summary.top_iter != null) ? `top iter ${summary.top_iter}` : 'no numbered checkpoints';
+          hint.textContent = `✓ ${real.length} adapter(s) available (${iterMsg}). "(base — no adapter)" remains selectable.`;
+          hint.style.color = '#28a745';
+        }
+      } catch (err) {
+        sel.innerHTML = '';
+        sel.disabled = true;
+        hint.textContent = 'adapters: ' + String(err.message || err);
+        hint.style.color = '#c60';
+      }
+    }
+
     async function refresh() {
       // While any full-screen modal is open, freeze the UI. Applies to
       // both the file-viewer modal and the step-detail modal.
@@ -1249,6 +1376,11 @@
         mergePid: mergeRun.pid || null
       });
       byId('subtitle').textContent = `${pipe.current || ''}  ${run.pipeline || ''}  ${run.hh_mm || ''}  ${run.logdir || ''}`.trim();
+      // 2026-09-13: fire-and-forget refresh of the RUN-section extras.
+      // Kept independent of /api/status so a slow probe never blocks
+      // the heartbeat, and errors here can't hide the status panel.
+      refreshAvailableAdapters();
+      refreshAttachRunner();
       // Page title: "Pipeline Monitor for <project> (<pipe>)" so the human
       // sees at a glance which BASE and which active pipe they're driving.
       const ws = data.workspace || {};

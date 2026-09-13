@@ -18,6 +18,27 @@
     throw new Error "[#{L.stepName}] lora_run_record missing run_id" unless runRecord.run_id?
     throw new Error "[#{L.stepName}] lora_run_record missing story_ids array" unless Array.isArray(runRecord.story_ids)
 
+    # 2026-09-13: belt-and-suspenders. run_lora_train_ite derives its
+    # `status` from checkpoint-file existence via L.tools.adapter, but
+    # if that derivation ever regresses (or a future producer of
+    # lora_run_record forgets it), the pipeline would silently mark
+    # 169 stories as trained without an adapter on disk. Re-probe
+    # here: no checkpoint file → the run's stories don't get counted
+    # as trained. The bad run row is still written so the failure is
+    # visible in `lora_training_runs`, but the story usage is not
+    # advanced — so re-running elementary can retry cleanly.
+    adapterPath = runRecord.adapter_path
+    isTestOnly = runRecord.mode is 'test'
+    checkpointExists = if adapterPath? then L.tools.adapter.latestCheckpoint(adapterPath)? else false
+    runIsReal = isTestOnly or checkpointExists
+    unless runIsReal
+      console.log "[record_lora_training_ite] REJECTED run #{runRecord.run_id}: no adapter checkpoint at #{adapterPath ? '(none)'} — story usage NOT advanced"
+      rejectedRecord = Object.assign {}, runRecord, {status: 'no-adapter', story_ids: []}
+      L.saveThis "loraTrainingRun{#{runRecord.run_id}}.json", rejectedRecord
+      L.make 'trained_story_ids', []
+      L.done()
+      return
+
     L.saveThis "loraTrainingRun{#{runRecord.run_id}}.json", runRecord
 
     # Bust the Memo cache on the usage view before re-reading it.

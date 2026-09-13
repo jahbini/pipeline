@@ -113,11 +113,24 @@
     checkpointPath = L.tools.adapter.latestCheckpoint adapterPath
     stdoutText = logLines.join('\n') + (if logLines.length then '\n' else '')
 
+    # 2026-09-13: status is derived, not hardcoded. Prior versions
+    # always wrote `status: 'done'` regardless of outcome, so a
+    # trainer that returned cleanly without writing an adapter
+    # (silent mlx_lm.lora failure, wrong adapter_path, etc.) still
+    # marked the run successful — `record_lora_training_ite` then
+    # consumed all 169 stories, leaving the pipe permanently
+    # "done training" with no adapter file. See qwen3-1-7b and
+    # qwen3-4b for the fingerprint. `checkpointPath` is the tool's
+    # truth signal: non-null iff adapters.safetensors OR a numbered
+    # checkpoint exists on disk. test-only runs skip the check.
+    trainingOk = testOnly or (!!result?.trained and checkpointPath?)
+    runStatus = if trainingOk then 'done' else 'no-adapter'
+
     runRecord =
       run_id: runID
       started_at: startedAt
       finished_at: finishedAt
-      status: 'done'
+      status: runStatus
       mode: if testOnly then 'test' else 'train'
       trained: !!result?.trained
       tested: !!result?.tested

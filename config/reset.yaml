@@ -54,6 +54,18 @@ reset_base_environment_ite:
   depends_on: []
   needs: []
   makes: []
+  # 2026-09-13: checkbox controls for the human running reset from
+  # the writer UI. All default false — a bare-click reset only
+  # wipes transient out/*.json (safe on any pipe). Tick the
+  # relevant force flag to escalate:
+  #   force_lora_reset   → wipe adapter + clear lora_* sqlite
+  #   force_oracle_reset → clear kag/embeddings/simplifications
+  #   force_download     → wipe build/model[4], forces re-download
+  #   force_full_reset   → nuke everything (pre-2026-09-11 behavior)
+  force_lora_reset:   [ UI_checkbox, false ]
+  force_oracle_reset: [ UI_checkbox, false ]
+  force_download:     [ UI_checkbox, false ]
+  force_full_reset:   [ UI_checkbox, false ]
 
 download_model:
   run: model/download_model.coffee

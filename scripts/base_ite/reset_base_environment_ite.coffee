@@ -1,17 +1,51 @@
 ###
   reset_base_environment_ite.coffee  —  BASE_ITE pipeline step
   =============================================================
-  First step of the base_ite bootstrap chain. Wipes stale
-  training artifacts and per-run bookkeeping so the downstream
-  download/quantize/seed steps start from a clean slate.
+  First step of the `reset` recipe. Wipes stale training artifacts
+  and per-run bookkeeping as directed by the human via checkbox
+  params from the reset recipe's UI.
 
-  Also fires the `sqliteResetAll.json` request key so the meta
-  layer can reset the sqlite corpus (see meta/sqlite.coffee for
-  how the runtime.sqlite is truncated on this request).
+  2026-09-13 rewrite. Prior versions unconditionally wiped
+  `build/adapter/` on every run, which — combined with the sqlite
+  guard that preserves `lora_training_run_stories` — made every
+  elementary retry a self-defeating loop (see
+  `~/pipeline/GPT/base_ite/reset_recipe.md` for the failure
+  fingerprint). Now:
 
-  Runs inside a pipe's CWD (pipes/<pipe>/). Paths are relative
-  to that CWD, so this only cleans the current pipe — other
-  pipes are untouched.
+    Default (no force flags):
+      · Wipe only transient out/*.json files (cheap, prevents
+        stale reads on next launch).
+      · If sqlite doesn't exist or is empty, fire `sqliteResetAll`
+        to initialize the schema. This is the newborn bootstrap
+        path; a populated sqlite is left alone.
+
+    force_lora_reset: true
+      · Wipe build/adapter, build/adapter_llm, build/model_fused_llm.
+      · Fire `loraCycleReset` — clears lora_training_runs,
+        lora_training_run_stories, lora_story_usage,
+        lora_trained_stories.
+      · Preserves kag_entries + stories.
+
+    force_oracle_reset: true
+      · Fire `oracleReset` — clears kag_entries, both embedding
+        tables, story_simplifications, oracle_story_attempts,
+        expanded_story_parts, story_parts.
+      · Preserves stories + lora_*.
+
+    force_download: true
+      · Wipe build/model and build/model4. Forces the next
+        download_model + quantize_model to re-run in full.
+      · Use when the source repo changed or a corrupt download
+        needs replacing.
+
+    force_full_reset: true
+      · Fire `sqliteResetAll` (nukes everything including stories).
+      · Wipe every build/* dir.
+      · Equivalent to the pre-2026-09-11 aggressive reset.
+      · Only use if you truly want to start over from a fresh pipe.
+
+  Runs inside a pipe's CWD (pipes/<pipe>/). Paths are relative to
+  that CWD, so this only cleans the current pipe.
 ###
 fs = require 'fs'
 path = require 'path'
@@ -23,20 +57,19 @@ removePath = (baseDir, relativePath) ->
   true
 
 @step =
-  desc: "Reset stale DB and training artifacts before base_ite seeds a fresh environment"
+  desc: "Reset stale artifacts under human-selected checkboxes (default: preserve everything)"
 
   action: (S) ->
     baseDir = process.cwd()
 
-    # Guard: only truncate sqlite when it's truly empty or absent.
-    # Prior behavior fired sqliteResetAll unconditionally, so re-running
-    # this step (e.g. because the step-state-done gate doesn't apply to
-    # steps with empty `makes:`, or because the human relaunches) blew
-    # away every previously-oracled kag_entries row and every trained
-    # adapter's ancestry. The correct semantics for "reset" is:
-    # "prepare a fresh pipe" — a pipe with populated stories +
-    # kag_entries is already prepared. Don't destroy real work.
-    # (2026-09-11 fix.)
+    forceLoraReset   = !!S.param('force_lora_reset',   false)
+    forceOracleReset = !!S.param('force_oracle_reset', false)
+    forceDownload    = !!S.param('force_download',     false)
+    forceFullReset   = !!S.param('force_full_reset',   false)
+
+    now = -> new Date().toISOString()
+
+    # --- sqlite: bootstrap vs. targeted vs. full wipe ---------------
     sqliteAlive = false
     sqliteHasWork = false
     try
@@ -45,10 +78,6 @@ removePath = (baseDir, relativePath) ->
       if fs.existsSync(dbPath)
         db = new DatabaseSync(dbPath)
         sqliteAlive = true
-        # "Has real work" = any story is present. Any prior seed run
-        # populated `stories`; oracle rows in `kag_entries` are a
-        # stronger signal but not required. If stories exist we
-        # preserve the DB — kag rows just accrue on the next run.
         try
           row = db.prepare("SELECT COUNT(*) AS c FROM stories").get()
           sqliteHasWork = Number(row?.c ? 0) > 0
@@ -58,28 +87,25 @@ removePath = (baseDir, relativePath) ->
     catch
       sqliteAlive = false
 
-    if sqliteAlive and sqliteHasWork
-      console.log "[reset_base_environment_ite] sqlite has populated stories — preserving DB (skipping sqliteResetAll)"
+    if forceFullReset
+      console.log "[reset_base_environment_ite] force_full_reset — firing sqliteResetAll"
+      S.saveThis 'sqliteResetAll.json', {mode: 'full', reset_at: now()}
+    else if not sqliteAlive or not sqliteHasWork
+      console.log "[reset_base_environment_ite] sqlite empty or absent — firing sqliteResetAll (bootstrap)"
+      S.saveThis 'sqliteResetAll.json', {mode: 'full', reset_at: now()}
     else
-      console.log "[reset_base_environment_ite] sqlite empty or absent — firing sqliteResetAll"
-      S.saveThis 'sqliteResetAll.json',
-        mode: 'full'
-        reset_at: new Date().toISOString()
+      # sqlite has real work; only fire targeted resets the human asked for.
+      if forceOracleReset
+        console.log "[reset_base_environment_ite] force_oracle_reset — firing oracleReset"
+        S.saveThis 'oracleReset.json', {reset_at: now()}
+      if forceLoraReset
+        console.log "[reset_base_environment_ite] force_lora_reset — firing loraCycleReset"
+        S.saveThis 'loraCycleReset.json', {mode: 'lora', reset_at: now()}
+      if not (forceOracleReset or forceLoraReset)
+        console.log "[reset_base_environment_ite] sqlite preserved — no force flags set"
 
-    # Do NOT wipe build/model or build/model4. Those are the outputs of
-    # download_model + quantize_model — both are idempotent (download is
-    # git+lfs provenance-checked; quantize skips when target already has
-    # a matching quantization block). Wiping them would force a full
-    # re-download + re-quantize on every base_ite run, which is minutes
-    # to hours of avoidable work.
-    #
-    # The fused-model dir IS wiped because it's derived from an adapter
-    # that reset itself removes — the two must stay consistent.
-    cleanupTargets = [
-      'build/adapter'
-      'build/adapter_llm'
-      'build/train'
-      'build/model_fused_llm'
+    # --- filesystem cleanup: transient always, force-gated for the rest ---
+    transientOut = [
       'out/story_seed_ids.json'
       'out/new_story_ids.json'
       'out/oracle_remaining_count.json'
@@ -92,6 +118,22 @@ removePath = (baseDir, relativePath) ->
       'out/lora_run_record.json'
       'out/trained_story_ids.json'
     ]
+    loraArtifacts = [
+      'build/adapter'
+      'build/adapter_llm'
+      'build/train'
+      'build/model_fused_llm'
+    ]
+    modelArtifacts = [
+      'build/model'
+      'build/model4'
+    ]
+
+    cleanupTargets = transientOut.slice()
+    if forceLoraReset or forceFullReset
+      cleanupTargets.push loraArtifacts...
+    if forceDownload or forceFullReset
+      cleanupTargets.push modelArtifacts...
 
     removed = []
     for relativePath in cleanupTargets
@@ -99,6 +141,7 @@ removePath = (baseDir, relativePath) ->
         removed.push relativePath
         console.log "[reset_base_environment_ite] removed #{relativePath}"
 
+    console.log "[reset_base_environment_ite] flags: lora=#{forceLoraReset} oracle=#{forceOracleReset} download=#{forceDownload} full=#{forceFullReset}"
     console.log "[reset_base_environment_ite] removed count:", removed.length
     S.done()
     return

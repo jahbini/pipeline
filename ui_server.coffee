@@ -358,6 +358,8 @@ listArtifactsOnDisk = (dir = 'out') ->
 KNOWN_ENDPOINTS = [
   { method: 'GET',  path: '/api/manifest',                         summary: 'this manifest — agent bootstrap' }
   { method: 'GET',  path: '/api/status',                           summary: 'live run/pipe/steps state for the active pipe' }
+  { method: 'GET',  path: '/api/find_active_runner',               summary: 'scan every pipe for a live pipeline_runner; returns pipes hosting one (2026-09-13)' }
+  { method: 'GET',  path: '/api/adapters',                         summary: 'list adapters usable by the active pipe (base sentinel + trained + checkpoints + good_adapters) (2026-09-13)' }
   { method: 'GET',  path: '/api/sqlite/<request-key>',             summary: 'dispatch a meta/sqlite request key through the active pipe' }
   { method: 'GET',  path: '/api/sqlite/diff?since=<run_id|ts|change_id>', summary: 'precise change-log diff since an anchor (uuid, ISO timestamp, or change_id)' }
   { method: 'GET',  path: '/api/run/<run-id>',                     summary: 'composite run-evaluation: runs row + log tails + artifacts written + sqlite rows added' }
@@ -2113,6 +2115,53 @@ server = http.createServer (req, res) ->
     return sendHtml res, resolveUiAsset('index.html')
   if url is '/api/status'
     return sendJson res, 200, buildStatus()
+  if url is '/api/find_active_runner'
+    # 2026-09-13: scan every pipe's state/ui-run.json for a runner
+    # whose pid is alive. Powers the "Attach To Running Pipeline"
+    # button — when a pipeline_runner is chewing on some pipe but
+    # this UI is switched elsewhere, the human clicks the button and
+    # jumps straight to the live pipe. Same shape as writer/ui_server.
+    try
+      matches = []
+      for name in listPipeDirectories()
+        runPath = path.join(PIPES_ROOT, name, 'state', 'ui-run.json')
+        continue unless fs.existsSync(runPath)
+        try
+          raw = readJson(runPath, {})
+          pid = Number(raw?.pid ? 0)
+          continue unless pid > 0 and isProcessAlive(pid)
+          matches.push
+            pipe:       name
+            pid:        pid
+            status:     raw?.status ? null
+            hh_mm:      raw?.hh_mm ? null
+            logdir:     raw?.logdir ? null
+            pipeline:   raw?.pipeline ? null
+            is_current: name is workspacePipeName(CWD)
+        catch
+          continue
+      return sendJson res, 200, { ok: true, matches: matches }
+    catch err
+      return sendJson res, 500, { ok: false, error: String(err?.message ? err) }
+  if url is '/api/adapters'
+    # 2026-09-13: list every adapter usable by this pipe. Powers the
+    # RUN-section dropdown that answers "does this pipe actually have
+    # a trained adapter?" at a glance. Same shape as writer/ui_server.
+    try
+      options = loadDropdownOptions('adapters')
+      checkpointIters = []
+      for opt in options when typeof opt?.label is 'string'
+        m = opt.label.match /@(\d+)/
+        checkpointIters.push Number(m[1]) if m
+      topIter = if checkpointIters.length then Math.max(checkpointIters...) else null
+      trainedOptions = options.filter (o) -> o? and o.key? and o.key.length > 0
+      summary =
+        has_trained: trainedOptions.length > 0
+        top_iter:    topIter
+        count:       trainedOptions.length
+      return sendJson res, 200, { ok: true, adapters: options, summary: summary }
+    catch err
+      return sendJson res, 500, { ok: false, error: String(err?.message ? err) }
   if url.startsWith('/api/step_detail?')
     # Return the state file and params file for one step so the SVG
     # click-popup can show status + inputs and offer a restart button.
