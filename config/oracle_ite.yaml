@@ -84,5 +84,11 @@ oracle_ask_sqlite:
   batch_size: 4
   llm:
     maxTokens: 80
+    # 2026-09-13: no_thinking prefill so Qwen-family models don't emit
+    # `<think>…</think>` blobs where the keywords should be. Fixes the
+    # "Okay, let's see. The user provided a passage..." chain-of-thought
+    # leakage observed on qwen3-4b (base) — same class of bug already
+    # patched in simplify_stories_ite. Non-Qwen models ignore the flag.
+    no_thinking: true
     # max-kv-size dropped: the LLM door caps session KV via mx.setCacheLimit
     # (session_api.coffee, cacheLimitMB default 512 MB) — no per-call knob.
