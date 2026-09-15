@@ -257,11 +257,22 @@ module.exports = (M, opts={}) ->
     CREATE INDEX IF NOT EXISTS idx_evaluations_judged_at ON evaluations (judged_at);
     CREATE INDEX IF NOT EXISTS idx_evaluations_pipeline  ON evaluations (pipeline);
 
-    -- (2026-09-12: chunk_simplifications table removed. The per-KAG-
-    -- chunk simplify_chunks_ite design (see writer/GPT/story/) was
-    -- never implemented and is superseded by whole-story
-    -- simplifications for the LoRA voice-transfer signal — see
-    -- story_simplifications below.)
+    -- Per-chunk plain-language rewrites (restored 2026-09-15). One row
+    -- per (story, chunk) that oracle_ask_sqlite processes. The chunker
+    -- is deterministic (`buildStoryGroups` — 5 groups per story ≥5
+    -- paragraphs, else 1 group covering the whole thing), so the spicy
+    -- half of the LoRA pair is recomputed at training time from
+    -- stories.text; only the bland half needs storing.
+    CREATE TABLE IF NOT EXISTS chunk_simplifications (
+      story_id     TEXT NOT NULL,
+      chunk_index  INTEGER NOT NULL,
+      simple_text  TEXT NOT NULL,
+      model        TEXT,
+      created_at   TEXT,
+      PRIMARY KEY (story_id, chunk_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_simplifications_story_id
+      ON chunk_simplifications (story_id);
 
     -- Whole-story plain-language retellings (2026-09-12). One row per
     -- story, used as the PROMPT half of LoRA training rows so the
@@ -272,6 +283,35 @@ module.exports = (M, opts={}) ->
       model        TEXT,
       created_at   TEXT
     );
+
+    -- Storacle observations (2026-09-15). Human-authored notes on
+    -- storacle output, with full provenance so the helper can later
+    -- reason about which prompt shapes + sampling knobs produced good
+    -- results. Append-only; no delete path. See
+    -- ~/writer/GPT/storacle_observations.md for design.
+    CREATE TABLE IF NOT EXISTS storacle_observations (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      observed_at       TEXT NOT NULL,
+      updated_at        TEXT NOT NULL,
+      storacle_logdir   TEXT,
+      adapter_path      TEXT,
+      lora_run_id       TEXT,
+      adapter_mtime     TEXT,
+      story_id          TEXT,
+      prompt_text       TEXT,
+      think_prefill     TEXT,
+      use_kag           INTEGER,
+      use_chunks        INTEGER,
+      rag_top_k         INTEGER,
+      llm_config_json   TEXT,
+      generated_text    TEXT,
+      notes             TEXT,
+      noted_by          TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_storacle_observations_observed_at
+      ON storacle_observations (observed_at);
+    CREATE INDEX IF NOT EXISTS idx_storacle_observations_lora_run_id
+      ON storacle_observations (lora_run_id);
 
     -- Peer memory-pressure summary (2026-09-13). One row per
     -- (pipe, step) observation window. Populated by the puppeteer's
@@ -2097,13 +2137,201 @@ module.exports = (M, opts={}) ->
         write: null
       }
 
-      # (2026-09-12: chunkSimplification and chunkSimplificationsMissing
-      # meta rules removed with the rest of the never-implemented
-      # per-chunk simplify design.)
+      # --- Per-chunk simplifications (restored 2026-09-15) ------------
+      # `chunkSimplificationRegister{story_id|chunk_index}` — WRITE:
+      # UPSERT one bland-rewrite row for (story, chunk). Payload
+      # {story_id, chunk_index, simple_text, model?, created_at?}.
+      # oracle_ask_sqlite emits one of these per chunk per pass.
+      {
+        name: 'chunkSimplificationRegister'
+        regex: /^chunkSimplificationRegister\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: null
+        write: (db, value, argKey) ->
+          throw new Error "sqlite meta chunkSimplificationRegister write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          # argKey is "story_id|chunk_index" — the payload must agree.
+          [argStory, argIdx] = String(argKey ? '').split('|')
+          storyID = value.story_id ? argStory
+          chunkIdx = Number(value.chunk_index ? argIdx)
+          throw new Error "sqlite meta chunkSimplificationRegister story_id mismatch" unless storyID is argStory
+          throw new Error "sqlite meta chunkSimplificationRegister chunk_index must be a positive integer" unless Number.isFinite(chunkIdx) and chunkIdx > 0 and Math.floor(chunkIdx) is chunkIdx
+          simple = String(value.simple_text ? '')
+          throw new Error "sqlite meta chunkSimplificationRegister simple_text is empty" unless simple.length
+          db.prepare("""
+            INSERT INTO chunk_simplifications (story_id, chunk_index, simple_text, model, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(story_id, chunk_index) DO UPDATE SET
+              simple_text = excluded.simple_text,
+              model       = excluded.model,
+              created_at  = excluded.created_at
+          """).run(
+            storyID
+            chunkIdx
+            simple
+            value.model ? null
+            value.created_at ? new Date().toISOString()
+          )
+          { ok: true, story_id: storyID, chunk_index: chunkIdx, chars: simple.length }
+      }
+
+      # `chunkSimplification{story_id|chunk_index}` — READ: fetch one
+      # bland-rewrite row. Handy for spot-checking a single chunk.
+      {
+        name: 'chunkSimplification'
+        regex: /^chunkSimplification\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: (db, argKey) ->
+          [storyArg, idxArg] = String(argKey ? '').split('|')
+          chunkIdx = Number(idxArg)
+          return null unless storyArg and Number.isFinite(chunkIdx)
+          row = db.prepare("""
+            SELECT story_id, chunk_index, simple_text, model, created_at
+            FROM chunk_simplifications
+            WHERE story_id = ? AND chunk_index = ?
+          """).get(storyArg, chunkIdx)
+          return null unless row?
+          {
+            story_id:    row.story_id
+            chunk_index: row.chunk_index
+            simple_text: row.simple_text
+            model:       row.model
+            created_at:  row.created_at
+          }
+        write: null
+      }
+
+      # --- Storacle observations (2026-09-15) --------------------------
+      # `storacleObservationRegister{new}` — INSERT a new observation
+      # row with empty notes. Payload carries provenance from the
+      # storacle run + user; returns the new id. `notes` starts empty.
+      {
+        name: 'storacleObservationRegister'
+        regex: /^storacleObservationRegister\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: null
+        write: (db, value, argKey) ->
+          throw new Error "sqlite meta storacleObservationRegister write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          now = new Date().toISOString()
+          info = db.prepare("""
+            INSERT INTO storacle_observations
+              (observed_at, updated_at, storacle_logdir, adapter_path,
+               lora_run_id, adapter_mtime, story_id, prompt_text,
+               think_prefill, use_kag, use_chunks, rag_top_k,
+               llm_config_json, generated_text, notes, noted_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """).run(
+            value.observed_at ? now
+            now
+            value.storacle_logdir ? null
+            value.adapter_path ? null
+            value.lora_run_id ? null
+            value.adapter_mtime ? null
+            value.story_id ? null
+            value.prompt_text ? null
+            value.think_prefill ? null
+            (if value.use_kag then 1 else 0)
+            (if value.use_chunks then 1 else 0)
+            value.rag_top_k ? null
+            value.llm_config_json ? null
+            value.generated_text ? null
+            value.notes ? ''
+            value.noted_by ? null
+          )
+          { ok: true, id: Number(info.lastInsertRowid) }
+      }
+
+      # `storacleObservationNoteUpdate{id}` — UPDATE only the notes
+      # + noted_by + updated_at of an existing row. Any other field
+      # is immutable once captured.
+      {
+        name: 'storacleObservationNoteUpdate'
+        regex: /^storacleObservationNoteUpdate\{([^}]+)\}$/
+        allowedSuffixes: ['json']
+        read: null
+        write: (db, value, argKey) ->
+          throw new Error "sqlite meta storacleObservationNoteUpdate write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
+          id = Number(argKey)
+          throw new Error "sqlite meta storacleObservationNoteUpdate id must be a positive integer" unless Number.isFinite(id) and id > 0
+          now = new Date().toISOString()
+          info = db.prepare("""
+            UPDATE storacle_observations
+            SET notes = ?, noted_by = ?, updated_at = ?
+            WHERE id = ?
+          """).run(
+            String(value.notes ? '')
+            value.noted_by ? null
+            now
+            id
+          )
+          { ok: true, id: id, changes: info.changes }
+      }
+
+      # `storacleObservationsAll` — READ: every observation on this
+      # pipe, reverse-chronological. Consumed by the writer UI panel
+      # and (later) by the puppeteer sync poll.
+      {
+        name: 'storacleObservationsAll'
+        regex: /^storacleObservationsAll$/
+        allowedSuffixes: ['jsonl', 'json']
+        read: (db) ->
+          rows = db.prepare("""
+            SELECT id, observed_at, updated_at, storacle_logdir,
+                   adapter_path, lora_run_id, adapter_mtime, story_id,
+                   prompt_text, think_prefill, use_kag, use_chunks,
+                   rag_top_k, llm_config_json, generated_text, notes,
+                   noted_by
+            FROM storacle_observations
+            ORDER BY observed_at DESC
+          """).all()
+          rows.map (row) ->
+            id:              row.id
+            observed_at:     row.observed_at
+            updated_at:      row.updated_at
+            storacle_logdir: row.storacle_logdir
+            adapter_path:    row.adapter_path
+            lora_run_id:     row.lora_run_id
+            adapter_mtime:   row.adapter_mtime
+            story_id:        row.story_id
+            prompt_text:     row.prompt_text
+            think_prefill:   row.think_prefill
+            use_kag:         row.use_kag is 1
+            use_chunks:      row.use_chunks is 1
+            rag_top_k:       row.rag_top_k
+            llm_config:      (try JSON.parse(row.llm_config_json ? 'null') catch then null)
+            generated_text:  row.generated_text
+            notes:           row.notes
+            noted_by:        row.noted_by
+        write: null
+      }
+
+      # `chunkSimplificationsForStory{story_id}` — READ: all bland
+      # rewrite rows for one story, ordered by chunk_index. Consumed
+      # by build_lora_dataset_ite to build (bland → spicy) training
+      # pairs — one row per chunk that has a simplification.
+      {
+        name: 'chunkSimplificationsForStory'
+        regex: /^chunkSimplificationsForStory\{([^}]+)\}$/
+        allowedSuffixes: ['jsonl', 'json']
+        read: (db, storyArg) ->
+          return [] unless storyArg
+          rows = db.prepare("""
+            SELECT story_id, chunk_index, simple_text, model, created_at
+            FROM chunk_simplifications
+            WHERE story_id = ?
+            ORDER BY chunk_index ASC
+          """).all(storyArg)
+          rows.map (row) ->
+            story_id:    row.story_id
+            chunk_index: row.chunk_index
+            simple_text: row.simple_text
+            model:       row.model
+            created_at:  row.created_at
+        write: null
+      }
     ]
 
     M.addMetaRule "sqlite",
-      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|oracleReset|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|kagEmbeddingCleanRegister\{[^}]+\}|kagAllCleanEmbeddings|storiesMissingCleanEmbeddings|storySimplificationRegister\{[^}]+\}|storySimplification\{[^}]+\}|storySimplificationsMissing|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval)\.(json|jsonl|txt|csv)$/i,
+      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|oracleReset|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|kagEmbeddingCleanRegister\{[^}]+\}|kagAllCleanEmbeddings|storiesMissingCleanEmbeddings|storySimplificationRegister\{[^}]+\}|storySimplification\{[^}]+\}|storySimplificationsMissing|chunkSimplificationRegister\{[^}]+\}|chunkSimplification\{[^}]+\}|chunkSimplificationsForStory\{[^}]+\}|storacleObservationRegister\{[^}]+\}|storacleObservationNoteUpdate\{[^}]+\}|storacleObservationsAll|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval)\.(json|jsonl|txt|csv)$/i,
       (key, value) ->
         debugLog "meta key", key, "write?", value isnt undefined
 
@@ -2169,6 +2397,8 @@ module.exports.requestNames = [
   'kagEmbeddingRegister', 'kagEmbedding',   'kagAllEmbeddings'
   'kagEmbeddingCleanRegister', 'kagAllCleanEmbeddings', 'storiesMissingCleanEmbeddings'
   'storySimplificationRegister', 'storySimplification', 'storySimplificationsMissing'
+  'chunkSimplificationRegister', 'chunkSimplification', 'chunkSimplificationsForStory'
+  'storacleObservationRegister', 'storacleObservationNoteUpdate', 'storacleObservationsAll'
   'evaluationRegister',   'evaluation',     'evaluationHistory', 'evaluationLatest'
   'evaluationsByPromptHash', 'corpusHealth', 'trainingHistoryJoinEval'
 ]

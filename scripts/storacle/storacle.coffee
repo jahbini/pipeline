@@ -5,13 +5,21 @@
   chosen from a UI dropdown) and a prompt template (UI textarea) that
   contains any of these placeholders:
 
-    {{{STORY}}}          → full raw story text (kept for backwards compat)
-    {{{LEAD_FRAGMENT}}}  → the exact opening fragment fed to LoRA
-                            training (via build_lora_dataset_ite's
-                            `buildFragmentParagraphs` — first paragraph,
-                            plus second if the first is <300 chars).
-                            Use this when testing whether the trained
-                            adapter recognizes its own training prompts.
+    {{{STORY}}}          → full raw story text
+    {{{FRAGMENT_1}}} .. {{{FRAGMENT_5}}}
+                          → the story chunked by `buildStoryGroups` (the
+                            SAME chunker oracle_ask_sqlite uses and the
+                            SAME one build_lora_dataset_ite pairs against
+                            chunk_simplifications rows). This is the
+                            distribution the adapter was TRAINED on
+                            (2026-09-15+): one bland-vs-spicy pair per
+                            chunk. Test the adapter at inference by
+                            feeding a single fragment, not the whole
+                            story — whole-story input is
+                            out-of-distribution for a chunk-pair adapter.
+                            Stories shorter than 5 paragraphs collapse
+                            to a single group; FRAGMENT_2..5 resolve to
+                            empty string in that case.
 
   Optional context knobs (all default OFF so bare-minimum calls behave
   exactly as they did pre-augmentation):
@@ -33,32 +41,62 @@
 fs = require 'fs'
 path = require 'path'
 
-STORY_PLACEHOLDER = '{{{STORY}}}'
-LEAD_PLACEHOLDER  = '{{{LEAD_FRAGMENT}}}'
+STORY_PLACEHOLDER    = '{{{STORY}}}'
+# 2026-09-15: numbered chunk placeholders. Indexed 1..5 to match
+# buildStoryGroups' 1-based group_index. Five is fixed because
+# buildStoryGroups always emits exactly 5 groups for stories with
+# ≥5 paragraphs; short stories emit 1, and placeholders past the
+# actual group count resolve to '' (harmless — a prompt template
+# with unused {{{FRAGMENT_N}}} just gets empty substitutions there).
+FRAGMENT_PLACEHOLDERS = ('{{{FRAGMENT_' + i + '}}}' for i in [1..5])
 
-# Same helpers build_lora_dataset_ite uses. Kept byte-identical so
-# {{{LEAD_FRAGMENT}}} substitution exactly matches what the LoRA saw
-# during training.
-splitParagraphs = (text) ->
+# --- Chunker for FRAGMENT_N placeholders -----------------------------------
+# Bit-for-bit copy of the chunker in oracle_ask_sqlite.coffee (line ~324)
+# AND build_lora_dataset_ite.coffee. All three MUST stay in sync — pair
+# alignment between (chunk_simplifications.simple_text, storyGroups[i].text)
+# depends on it. If oracle's chunker changes, this changes too.
+splitParagraphsChunk = (text) ->
+  rawParts = String(text ? '').split /\n\s*\n/
   parts = []
-  for rawPart in String(text ? '').split(/\n\s*\n/)
-    part = String(rawPart ? '').trim()
-    parts.push part if part.length
+  for rawPart in rawParts
+    part = String(rawPart ? '').replace(/\s+/g, ' ').trim()
+    continue unless part.length
+    parts.push part
   parts
 
-buildFragmentParagraphs = (paragraphs) ->
-  rval = []
-  return rval unless Array.isArray(paragraphs) and paragraphs.length
-  firstPara = paragraphs[0] ? ''
-  rval.push firstPara.trim() if firstPara.trim().length
-  currentLen = rval.join("\n\n").length
-  if currentLen < 300 and paragraphs.length > 2
-    secondPara = paragraphs[1] ? ''
-    rval.push secondPara.trim() if secondPara.trim().length
-  rval
+buildStoryGroups = (text) ->
+  paragraphs = splitParagraphsChunk text
+  return [] unless paragraphs.length
 
-leadFragmentFor = (storyText) ->
-  buildFragmentParagraphs(splitParagraphs(storyText)).join "\n\n"
+  if paragraphs.length < 5
+    return [
+      group_index: 1
+      start_paragraph: 1
+      end_paragraph: paragraphs.length
+      paragraphs: paragraphs.slice()
+      text: paragraphs.join "\n\n"
+    ]
+
+  groups = []
+  total = paragraphs.length
+  baseSize = Math.floor(total / 5)
+  remainder = total % 5
+  startIndex = 0
+
+  for groupIndex in [0...5]
+    groupSize = baseSize
+    groupSize += 1 if groupIndex < remainder
+    selected = paragraphs.slice startIndex, startIndex + groupSize
+    endIndex = startIndex + selected.length - 1
+    groups.push
+      group_index: groupIndex + 1
+      start_paragraph: startIndex + 1
+      end_paragraph: endIndex + 1
+      paragraphs: selected
+      text: selected.join "\n\n"
+    startIndex += groupSize
+
+  groups
 
 readStoryText = (L, storyId) ->
   row = L.theLowdown("storyByID{#{storyId}}.json")?.value
@@ -136,28 +174,40 @@ resolveAdapterPath = (raw) ->
     adapterPath = resolveAdapterPath adapterRaw
 
     throw new Error "[#{L.stepName}] prompt_text is empty — nothing to send" unless template.trim().length
-    throw new Error "[#{L.stepName}] story_id is empty — pick a story from the UI dropdown" unless storyId.length
     throw new Error "[#{L.stepName}] Missing quantized_model_dir param" unless modelDir?
-    unless template.indexOf(STORY_PLACEHOLDER) >= 0 or template.indexOf(LEAD_PLACEHOLDER) >= 0
-      throw new Error "[#{L.stepName}] prompt_text must contain #{STORY_PLACEHOLDER} or #{LEAD_PLACEHOLDER} — that's where the story text will be substituted"
+    # 2026-09-15: neither placeholders nor story_id are required. If
+    # story_id is empty, storacle runs the prompt as-is (KAG and
+    # placeholder substitution both no-op). If story_id is set but the
+    # story cannot be found we still fail — that catches typos, not
+    # an intentionally-empty story_id.
 
-    storyText = readStoryText L, storyId
-    throw new Error "[#{L.stepName}] no story with story_id='#{storyId}' in CWD/runtime.sqlite" unless storyText?
-    leadText = leadFragmentFor storyText
+    if storyId.length
+      storyText = readStoryText L, storyId
+      throw new Error "[#{L.stepName}] no story with story_id='#{storyId}' in CWD/runtime.sqlite" unless storyText?
+      storyGroups = buildStoryGroups storyText
+    else
+      storyText   = ''
+      storyGroups = []
 
-    # Placeholder substitution — both are always resolved so the human
-    # can mix them ("Given the lead {{{LEAD_FRAGMENT}}}, complete the
-    # story like Jim would; original for reference: {{{STORY}}}").
-    prompt = template
-      .split(STORY_PLACEHOLDER).join(storyText)
-      .split(LEAD_PLACEHOLDER).join(leadText)
+    # Fragment placeholders resolve from `buildStoryGroups` in the same
+    # order oracle_ask_sqlite processes chunks. Missing indices (story
+    # has fewer groups than 5) → ''.
+    fragmentTexts = for i in [1..5]
+      (storyGroups[i - 1]?.text) ? ''
+
+    # Placeholder substitution — all always resolved so the human can
+    # mix them. Empty story / short story collapses unused placeholders
+    # to '' (harmless).
+    prompt = template.split(STORY_PLACEHOLDER).join(storyText)
+    for placeholder, idx in FRAGMENT_PLACEHOLDERS
+      prompt = prompt.split(placeholder).join(fragmentTexts[idx])
 
     # Optional prefix blocks — KAG first (structured signals), then
     # chunks (retrieval passages). Human's prompt template goes last.
     prefixParts = []
     kagBlock = ''
     passages = []
-    if useKag
+    if useKag and storyId.length
       kagBlock = readKagContext L, storyId
       prefixParts.push kagBlock if kagBlock.length
     if useChunks
@@ -166,7 +216,8 @@ resolveAdapterPath = (raw) ->
       prefixParts.push retrieval.augmented if retrieval.augmented.length
     effectivePrompt = if prefixParts.length then prefixParts.join('') + prompt else prompt
 
-    console.log "[storacle] story_id=#{storyId} (#{storyText.length} chars, lead=#{leadText.length})"
+    fragmentSummary = ("F#{i + 1}=#{fragmentTexts[i].length}" for i in [0...5]).join(' ')
+    console.log "[storacle] story_id=#{storyId or '(none)'} (story=#{storyText.length} chars, groups=#{storyGroups.length}, #{fragmentSummary})"
     console.log "[storacle] flags: use_chunks=#{useChunks} (top-#{ragTopK}, #{passages.length} retrieved) use_kag=#{useKag} (#{kagBlock.length} chars) adapter=#{adapterPath ? '(none — base model)'}"
     console.log "[storacle] template=#{template.length} → effective prompt=#{effectivePrompt.length} chars"
     console.log "[storacle] modelDir: #{modelDir}"
@@ -187,6 +238,16 @@ resolveAdapterPath = (raw) ->
     raw = String(result?.rawText ? result?.text ? '')
     console.log "[storacle] generated #{result?.generatedTokens} tokens in #{result?.elapsedSec?.toFixed?(2) ? '?'}s"
 
+    # 2026-09-15: stamp the effective llm config into meta so future
+    # storacle_observations rows carry the sampling provenance. Copy
+    # only the numeric/string fields — no functions or objects.
+    llmSnapshot = {}
+    if llmConfig? and typeof llmConfig is 'object' and not Array.isArray(llmConfig)
+      for own k, v of llmConfig
+        continue unless v?
+        if typeof v is 'number' or typeof v is 'string' or typeof v is 'boolean'
+          llmSnapshot[k] = v
+
     meta =
       mode: 'storacle'
       model_dir: modelDir
@@ -194,12 +255,15 @@ resolveAdapterPath = (raw) ->
       story_id: storyId
       use_chunks: useChunks
       use_kag: useKag
+      rag_top_k: ragTopK
       story_chars: storyText.length
-      lead_chars: leadText.length
+      fragment_char_counts: (fragmentTexts[i].length for i in [0...5])
       kag_context_chars: kagBlock.length
       retrieved_passages: passages.map (p) -> {story_id: p.story_id, chunk_index: p.chunk_index, cos: p.cos}
       template_chars: template.length
+      template_text: template
       prompt_chars: effectivePrompt.length
+      llm_config: llmSnapshot
       generated_tokens: result?.generatedTokens ? null
       prompt_tokens: result?.promptTokens ? null
       elapsed_sec: result?.elapsedSec ? null

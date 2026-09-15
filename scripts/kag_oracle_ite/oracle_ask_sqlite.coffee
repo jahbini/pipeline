@@ -447,20 +447,34 @@ explainKeyVerdict = (key, value) ->
       return {status: 'rejected', rule: p.name, matched_on: (if p.re.test(emotionKey) then 'key' else 'value')}
   {status: 'accepted', emotion: emotionKey, headline: emotionText}
 
-# Dump raw + parse tiers + precedence + per-key filter verdicts +
-# final filtered to STDERR. One block per LLM call. This is what makes
-# it possible to see WHY the filter freaks out on a given chunk.
+# Dump parser diagnostics to STDERR. Two verbosity modes:
+#   - QUIET (default, 2026-09-15): one-liner per chunk when the parse
+#     succeeded (≥1 headlined key, ≥1 survived the filter). ~1 line
+#     per chunk instead of ~20. Anomalies (nothing parsed, everything
+#     rejected, bare-tier winning) still dump the full block.
+#   - VERBOSE: full block per chunk. Enable by setting
+#     ORACLE_VERBOSE_LOG=1 in the environment when diagnosing parser
+#     regressions.
 LOG_RAW_CAP = 800
 logGroupOutcome = (label, raw, filtered) ->
+  tiers = extractTiers raw
+  hKeys = Object.keys tiers.headlined
+  bKeys = Object.keys tiers.bare
+  filteredCount = Object.keys(filtered ? {}).length
+  # Happy path: headlined tier produced usable keys. Emit one line.
+  ok = hKeys.length > 0 and filteredCount > 0
+  verbose = process.env.ORACLE_VERBOSE_LOG?
+  if ok and not verbose
+    keys = Object.keys(filtered).join(',')
+    console.error "── #{label} ── kept=#{filteredCount} [#{keys}]"
+    return
+  # Full diagnostic block (anomaly, or verbose mode).
   console.error ""
   console.error "── #{label} ──────────────────────────────────────────"
   rawSnippet = if raw.length > LOG_RAW_CAP then raw.slice(0, LOG_RAW_CAP) + " …[+#{raw.length - LOG_RAW_CAP} chars]" else raw
   console.error "raw reply (#{raw.length} chars):"
   for line in rawSnippet.split '\n'
     console.error "  | #{line}"
-  tiers = extractTiers raw
-  hKeys = Object.keys tiers.headlined
-  bKeys = Object.keys tiers.bare
   console.error "parse tiers: headlined=#{hKeys.length}  bare=#{bKeys.length}"
   if hKeys.length
     console.error "  headlined:"
@@ -478,7 +492,6 @@ logGroupOutcome = (label, raw, filtered) ->
     status = verdict.status.toUpperCase()
     rule = if verdict.rule then " (#{verdict.rule})" else ''
     console.error "  #{status}#{rule}: #{k} → '#{String(v).slice(0, 100)}#{if String(v).length > 100 then '…' else ''}'"
-  filteredCount = Object.keys(filtered ? {}).length
   console.error "filtered: #{filteredCount} usable"
   for own k, v of (filtered ? {})
     console.error "  ✓ #{k}: #{String(v).slice(0, 100)}#{if String(v).length > 100 then '…' else ''}"
@@ -491,18 +504,11 @@ logGroupOutcome = (label, raw, filtered) ->
 
   action: (S) ->
     promptText = S.param 'prompt_text'
-    # Optional second-pass rewrite that produces a plain-English
-    # version of each chunk for LoRA pair training. Unset → feature
-    # is off, oracle behaves exactly as before. When set, `{{{STORY}}}`
-    # is substituted with the chunk text. Falls back to a sensible
-    # default when set to `true` / empty.
-    rewritePromptRaw = S.param 'rewrite_prompt_text', null
-    rewritePromptText = switch
-      when rewritePromptRaw is null or rewritePromptRaw is false then null
-      when rewritePromptRaw is true or rewritePromptRaw is '' then DEFAULT_REWRITE_PROMPT
-      else String(rewritePromptRaw)
-    if rewritePromptText? and rewritePromptText.indexOf(STORY_PLACEHOLDER) < 0
-      throw new Error "[oracle_ask_sqlite] rewrite_prompt_text must contain the placeholder #{STORY_PLACEHOLDER}"
+    # 2026-09-15: the second-pass rewrite is now unconditional. Every
+    # chunk sent to the oracle also gets a plain-English rewrite via
+    # DEFAULT_REWRITE_PROMPT — the bland half of the (bland → jim)
+    # LoRA training pair. No toggle, no config knob.
+    rewritePromptText = DEFAULT_REWRITE_PROMPT
     batchSzRaw = S.param 'batch_size'
     batchSz = Number(batchSzRaw)
     throw new Error "[oracle_ask_sqlite] batch_size must be a positive integer" unless Number.isFinite(batchSz) and batchSz > 0 and Math.floor(batchSz) is batchSz
@@ -525,6 +531,24 @@ logGroupOutcome = (label, raw, filtered) ->
 
     pendingStories = S.theLowdown('storiesMissingKag.jsonl')?.value
     throw new Error "[#{S.stepName}] storiesMissingKag.jsonl must be an array" unless Array.isArray pendingStories
+
+    # 2026-09-16: defensive check for the empty-sqlite failure mode.
+    # `pendingStories` = anti-join (stories minus already-tagged). It
+    # can be empty for TWO reasons:
+    #   (A) stories table is empty — pipe was never seeded, needs
+    #       `reset` before `elementary` (the failure we hit overnight
+    #       on both 4B pipes; scheduler thrashed ~60 times because
+    #       nothing distinguished this from (B)).
+    #   (B) every story is already tagged — the legitimate "done"
+    #       state, hand off to next step.
+    # `pending.length == 0` alone conflates them. Read `allStories`
+    # to disambiguate and throw a specific error for (A) so the
+    # failure classifier can route the pipe to hospital-with-hint
+    # rather than retry-loop.
+    if pendingStories.length is 0
+      allStoryRows = S.theLowdown('allStories.jsonl')?.value
+      if Array.isArray(allStoryRows) and allStoryRows.length is 0
+        throw new Error "[#{S.stepName}] stories table is empty — run `reset` recipe before `elementary` (seed_story_sqlite populates stories from ~/writer/data/jim.md)"
 
     pending = pendingStories.slice 0, batchSz
     rejectRows = await S.peek 'kag_rejects', []
@@ -568,28 +592,26 @@ logGroupOutcome = (label, raw, filtered) ->
 
       for group in storyGroups
         # Second-pass rewrite: plain-English version of THIS chunk,
-        # for LoRA pair training (plain → jim). Runs on every chunk
-        # in every batch — matches the oracle's own "always
-        # re-classify" contract. Existing row (if any) is overwritten
-        # by the meta/sqlite UPSERT handler. If you're re-scanning a
-        # story, you want fresh output, not skipped output.
-        if rewritePromptText?
-          simKey = "chunkSimplification{#{storyID}|#{group.group_index}}.json"
-          rewritePrompt = renderPrompt rewritePromptText, group.text
-          try
-            simpleText = await runRewriteOnce S, modelDir, rewritePrompt, adapterPath, rewriteLlmConfig
-            if simpleText.length
-              S.saveThis simKey,
-                story_id:    storyID
-                chunk_index: group.group_index
-                simple_text: simpleText
-                model:       modelDir
-                created_at:  new Date().toISOString()
-              console.log "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrote #{group.text.length}→#{simpleText.length} chars"
-            else
-              console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite returned empty; not persisting"
-          catch err
-            console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite failed: #{err?.message ? err}"
+        # for LoRA pair training (plain → jim). Unconditional — runs
+        # on every chunk in every batch. Matches the oracle's own
+        # "always re-classify" contract; existing row (if any) is
+        # overwritten by the meta/sqlite UPSERT handler.
+        simKey = "chunkSimplificationRegister{#{storyID}|#{group.group_index}}.json"
+        rewritePrompt = renderPrompt rewritePromptText, group.text
+        try
+          simpleText = await runRewriteOnce S, modelDir, rewritePrompt, adapterPath, rewriteLlmConfig
+          if simpleText.length
+            S.saveThis simKey,
+              story_id:    storyID
+              chunk_index: group.group_index
+              simple_text: simpleText
+              model:       modelDir
+              created_at:  new Date().toISOString()
+            console.log "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrote #{group.text.length}→#{simpleText.length} chars"
+          else
+            console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite returned empty; not persisting"
+        catch err
+          console.error "[oracle_ask_sqlite] #{storyID}|#{group.group_index} rewrite failed: #{err?.message ? err}"
 
         groupPrompt = renderPrompt promptText, group.text
         attempt1 = await runOracleOnce S, modelDir, groupPrompt, adapterPath, llmConfig

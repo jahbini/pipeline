@@ -55,12 +55,24 @@ generateOp = (params) ->
     # previously-emitted tokens. OpenAI-style: logits[t] -= penalty
     # for every token t already in the generation. Values 0..2.
     presencePenalty: params.presence_penalty ? params.presencePenalty ? 0
+    # Repetition penalty (2026-09-14) — HF-style multiplicative, applied
+    # over the last `repetition_context_size` tokens. Values 1.10–1.20
+    # break degenerate 4-token loops that presence_penalty could not.
+    repetitionPenalty:     params.repetition_penalty      ? params.repetitionPenalty      ? 1.0
+    repetitionContextSize: params.repetition_context_size ? params.repetitionContextSize  ? 128
     # No-thinking (2026-09-12) — for Qwen3-family models. When true
     # AND raw=true, prepends `<think>\n\n</think>\n\n` to the prompt
     # so the model sees a completed empty think phase and skips into
     # the answer. Accepts both `no_thinking:true` and the yaml-friendly
     # `enable_thinking:false`.
     noThinking: params.no_thinking ? params.noThinking ? (params.enable_thinking is false)
+    # Think-prefill (2026-09-14) — when non-empty AND raw=true, fills
+    # the `<think>...</think>` block with the given text (rules,
+    # examples, format cues) so the model treats them as its own
+    # already-completed reasoning. Beats stuffing the same guidance
+    # into the user turn: chat models read prefilled think content as
+    # more authoritative than user instructions. See HELPER.md § 4.
+    thinkPrefill: params.think_prefill ? params.thinkPrefill ? ''
 
 trainOp = (params) ->
   # trainLoRA already takes camelCase opts (modelDir, dataDir, adapterPath,

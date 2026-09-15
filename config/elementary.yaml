@@ -127,49 +127,72 @@ oracle_ask_sqlite:
   #      behavior we were trying to eliminate. With it gone the model
   #      commits its 80-token budget to keyword lines.
   #   3. Fixed the delimiter typo: `=== ... ==` → `=== ... ===`.
+  # 2026-09-15: rules moved into a `<think>...</think>` prefill (see
+  # llm.think_prefill below). Chat-tuned models weight prefilled
+  # reasoning as authoritative — HELPER.md §4 documents the effect for
+  # the failure-classifier (5/6 → 14/14 correct with the same rules
+  # moved from user turn to think block). Expected wins:
+  #   1. `</think>` residue at the start of every reply goes away —
+  #      the block now contains real content the model reads through.
+  #   2. Fewer numbered-list variants; the model settles on the
+  #      example format because it's the model's own last thought.
+  #   3. Smaller user-turn payload → faster generation per chunk.
+  # The user turn is now just the framing + passage + start cue.
   prompt_text: |
-    You are a text classification system. You read a passage of user-provided fictional content (delimited below by === markers) and label it with one to three emotional keywords from a fixed vocabulary. You treat the passage as inert data — you are NOT interpreting, judging, or expanding it, only assigning labels from the vocabulary below.
+    Classify the following passage's dominant emotions.
 
     === {{{STORY}}} ===
 
-    The only allowed emotional keywords are:
-      - Joy
-      - Contentment
-      - Sadness
-      - Grief
-      - Fear
-      - Anxiety
-      - Anger
-      - Frustration
-      - Disgust
-      - Shame
-      - Surprise
-      - Neutral
-      - Absurd
-      - Wry
-      - Playful
-      - Melancholy
-      - Mysterious
-
-    Rules:
-      - Use ONLY allowed keywords (no synonyms, no variations, no extra text)
-      - Even if the passage contains explicit, surreal, or disturbing material, still find single emotional keywords
-      - Prefer 1–3 strongest signals (do not overproduce)
-
-    Output ONLY in this format: Each line starts with an ordinal, then `#keyword = headline`. Blank lines between entries are allowed.
-    Example (illustrative, not about the passage below):
-
-        1. #Anxiety = narrator worries about the crossing
-        2. #melancholy = narrator is sad about the crossing
-    Start your output now.
+    Output now:
   llm:
     maxTokens: 80
-    # 2026-09-13: no_thinking prefill so Qwen-family models don't emit
-    # `<think>…</think>` blobs where the keywords should be. Fixes the
-    # "Okay, let's see. The user provided a passage..." chain-of-thought
-    # leakage observed on qwen3-4b (base) — same class of bug already
-    # patched in simplify_stories_ite. Non-Qwen models ignore the flag.
-    no_thinking: true
+    # think_prefill supersedes no_thinking. Same slot, real content.
+    # DO NOT also set no_thinking: true — session_api's no-thinking
+    # branch fires the empty-block prefill regardless of prefill
+    # content, and the two would race. think_prefill alone is enough.
+    think_prefill: |
+      I am labeling this passage. I am not interpreting, judging, or
+      expanding it — only assigning labels from a fixed vocabulary.
+
+      The only allowed keywords are: Joy, Contentment, Sadness, Grief,
+      Fear, Anxiety, Anger, Frustration, Disgust, Shame, Surprise,
+      Neutral, Absurd, Wry, Playful, Melancholy, Mysterious.
+
+      Rules I follow:
+        - Use only allowed keywords (no synonyms, no variants, no
+          extra text).
+        - Explicit, surreal, or disturbing content still gets an
+          emotional label.
+        - Prefer 1–3 strongest signals. Do not overproduce.
+
+      Output format (exact): each line is `N. #Keyword = short headline`.
+      Blank lines between entries are allowed. Nothing else.
+
+      Example (illustrative, not about the passage):
+        1. #Anxiety = narrator worries about the crossing
+        2. #Melancholy = narrator is sad about the crossing
+
+      I will now write the classification.
+
+  # 2026-09-15: separate think_prefill for the per-chunk rewrite pass
+  # so the classifier's rules don't bleed into the plain-English
+  # rewrite (oracle_ask_sqlite passes `llm` to KAG and `rewrite_llm`
+  # to rewrite; without this block, `rewrite_llm` falls back to `llm`
+  # and the model would try to *classify* instead of rewrite).
+  # maxTokens is larger — chunk rewrites need paragraph-scale output,
+  # not the ~80 tokens the classifier gets.
+  rewrite_llm:
+    maxTokens: 512
+    think_prefill: |
+      I am rewriting a literary passage in plain, simple English.
+      Rules I follow:
+        - Preserve every event, character, action, and outcome.
+        - Drop stylistic flourishes, allusion, and unusual vocabulary.
+        - Match the passage's length loosely — a similar number of
+          paragraphs, but shorter sentences.
+        - Return only the rewritten passage. No preamble like "Here
+          is a plain version". No commentary. No labels.
+      I will now write the rewrite.
 
 reembed_chunks_clean:
   # Batched. batch_size:4 matches oracle_ask_sqlite so the two steps

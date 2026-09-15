@@ -42,35 +42,72 @@ _origSample = _baseModule.sample
 _penaltyCtx =
   presencePenalty: 0
   seenTokens: null   # Set<number> — populated per-generate; null = disabled
+  # Repetition penalty (2026-09-14) — HuggingFace-style multiplicative
+  # penalty. Unlike presence_penalty (constant subtract), repetition
+  # scales with logit magnitude, which is what actually breaks 4-token
+  # cycles. `recentTokens` is a bounded deque of the last N token ids;
+  # tokens outside the window are NOT penalized (a plain Set over the
+  # full generation would eventually penalize the whole vocabulary).
+  repetitionPenalty: 1.0
+  recentTokens: null      # Array<number> — deque, most-recent last
+  recentTokensSet: null   # Set<number> — fast lookup mirror of the deque
+  recentContextSize: 128
 
-_applyPresencePenalty = (logits) ->
-  # logits shape: [batch=1, vocab_size]. Move to JS, subtract penalty
-  # at each seen-token index, ship back. ~150k floats per token step —
-  # cheap enough at token-generation rates and simpler than
-  # constructing an MLX scatter-subtract.
-  return logits unless _penaltyCtx.seenTokens? and _penaltyCtx.seenTokens.size > 0 and _penaltyCtx.presencePenalty > 0
-  arr = logits.tolist()   # [[num, num, ...]]
-  row = arr[0]
+_applyPresencePenalty = (row) ->
+  return unless _penaltyCtx.seenTokens? and _penaltyCtx.seenTokens.size > 0 and _penaltyCtx.presencePenalty > 0
   penalty = _penaltyCtx.presencePenalty
   for id from _penaltyCtx.seenTokens
     row[id] = row[id] - penalty if id >= 0 and id < row.length
-  mx.array [row], mx.float32
+  return
+
+_applyRepetitionPenalty = (row) ->
+  return unless _penaltyCtx.recentTokensSet? and _penaltyCtx.recentTokensSet.size > 0 and _penaltyCtx.repetitionPenalty > 1
+  # HF convention: divide positive logits by penalty, multiply negatives.
+  # A logit of +5 with penalty=1.2 → 4.17; -3 → -3.6. Ranking shifts
+  # away from recent tokens proportionally to how confident the model
+  # was about them, which is what actually breaks loops.
+  penalty = _penaltyCtx.repetitionPenalty
+  for id from _penaltyCtx.recentTokensSet
+    continue unless id >= 0 and id < row.length
+    v = row[id]
+    row[id] = if v > 0 then v / penalty else v * penalty
+  return
 
 _baseModule.sample = (logits, topP, temperature) ->
-  patched = _applyPresencePenalty(logits)
+  # Merge both penalties into ONE JS-side pass. logits shape:
+  # [batch=1, vocab_size]. tolist + rebuild is the expensive part; do it
+  # once regardless of how many penalties are active.
+  needsPatch =
+    (_penaltyCtx.presencePenalty > 0 and _penaltyCtx.seenTokens?.size > 0) or
+    (_penaltyCtx.repetitionPenalty > 1 and _penaltyCtx.recentTokensSet?.size > 0)
+  patched = logits
+  if needsPatch
+    arr = logits.tolist()
+    row = arr[0]
+    _applyPresencePenalty(row)
+    _applyRepetitionPenalty(row)
+    patched = mx.array [row], mx.float32
   result = _origSample.call(_baseModule, patched, topP, temperature)
-  # result is [tokenTensor, prob]. Extract token id to add to seen set.
-  if _penaltyCtx.seenTokens?
-    try
-      tokenTensor = result[0]
-      mx.eval tokenTensor
-      # tolist returns a scalar for 0-d arrays (which sample yields per batch=1)
-      tid = tokenTensor.tolist?()
-      tid = tid[0] if Array.isArray(tid)
-      if typeof tid is 'number' and tid >= 0
-        _penaltyCtx.seenTokens.add tid
-    catch
-      # swallow — a stale eval issue mustn't crash generation
+  # result is [tokenTensor, prob]. Extract token id, update accumulators.
+  try
+    tokenTensor = result[0]
+    mx.eval tokenTensor
+    tid = tokenTensor.tolist?()
+    tid = tid[0] if Array.isArray(tid)
+    if typeof tid is 'number' and tid >= 0
+      _penaltyCtx.seenTokens?.add tid
+      if _penaltyCtx.recentTokens?
+        _penaltyCtx.recentTokens.push tid
+        _penaltyCtx.recentTokensSet.add tid
+        # Bound the deque; evict the oldest and rebuild the set-mirror
+        # only when the evicted id no longer appears elsewhere in the
+        # window (cheap check — window size is small).
+        while _penaltyCtx.recentTokens.length > _penaltyCtx.recentContextSize
+          evicted = _penaltyCtx.recentTokens.shift()
+          unless _penaltyCtx.recentTokens.includes(evicted)
+            _penaltyCtx.recentTokensSet.delete(evicted)
+  catch
+    # swallow — a stale eval issue mustn't crash generation
   result
 
 # --- version-skew shims -----------------------------------------------------
@@ -96,7 +133,12 @@ peakMB = -> (mx.getPeakMemory?() ? 0) / (1024*1024)
 # When active MLX memory crosses this ceiling, throw before the OS starts
 # thrashing. Tunable via env, but has a hard default so a bare `pipe-run`
 # still fails fast instead of freezing the laptop.
-MEM_CEIL_MB = Number(process.env.SESSION_API_MEM_CEIL_MB ? 10240)
+# 2026-09-15: default raised 10240 → 20480. Storacle with adapter +
+# KAG + chunks was tripping SAFETY ABORT at ~15 GB on the mac-mini
+# even though the host has headroom. 20 GB still prevents true OS
+# swap-thrash on a 32 GB machine and keeps the guard meaningful.
+# SESSION_API_MEM_CEIL_MB env still wins for per-host tuning.
+MEM_CEIL_MB = Number(process.env.SESSION_API_MEM_CEIL_MB ? 20480)
 # Baseline peak captured at first assertion — the model-load peak is
 # ~1 GB and doesn't count against per-call budget. We compare
 # (currentPeak - baselinePeak) against the ceiling so a run that spikes
@@ -317,10 +359,38 @@ createSession = (opts = {}) ->
       # models skip the reasoning phase and start on the answer. The
       # library's chat template handles this via enable_thinking; we
       # bypass it for raw prompts.
+      # 2026-09-14: `thinkPrefill` extends this — the caller supplies
+      # the CONTENT of the <think>…</think> block, i.e. reasoning we
+      # want the model to have "already done" before it answers. The
+      # attention layers treat it as its own chain-of-thought, which
+      # lets a caller inject domain-specific decision rules into the
+      # model's reasoning context at inference time — a form of
+      # prompt-engineered directive thinking. When empty (default),
+      # behaves exactly like the pre-existing no_thinking behavior:
+      # `<think>\n\n</think>` primer with no reasoning content.
       noThinking = gopts.noThinking is true or gopts.no_thinking is true or gopts.enable_thinking is false
+      thinkPrefill = String(gopts.thinkPrefill ? '').trim()
       effectiveText =
-        if noThinking and gopts.raw
-          "<think>\n\n</think>\n\n" + String(userText ? '')
+        if (noThinking or thinkPrefill.length > 0) and gopts.raw
+          body = if thinkPrefill.length > 0 then "\n#{thinkPrefill}\n" else "\n\n"
+          thinkBlock = "<think>#{body}</think>\n\n"
+          # 2026-09-14: place the <think> block INSIDE the assistant
+          # turn, not before the user turn. Qwen's chat template treats
+          # <think>…</think> as the leading reasoning span OF the
+          # assistant response — that's where it must appear for both
+          # thinking-mode toggling and any downstream LoRA training
+          # (which wraps the whole prompt in ChatML). Insert after
+          # `<|im_start|>assistant\n` if present; fall back to prepend
+          # for callers who genuinely want a bare-text prefix.
+          txt = String(userText ? '')
+          asstMarker = '<|im_start|>assistant\n'
+          idx = txt.lastIndexOf(asstMarker)
+          if idx >= 0
+            head = txt.slice(0, idx + asstMarker.length)
+            tail = txt.slice(idx + asstMarker.length)
+            head + thinkBlock + tail
+          else
+            thinkBlock + txt
         else
           userText
 
@@ -328,6 +398,17 @@ createSession = (opts = {}) ->
       # monkey-patched sample() applies penalty to seen tokens.
       _penaltyCtx.presencePenalty = Number(gopts.presencePenalty ? gopts.presence_penalty ? 0)
       _penaltyCtx.seenTokens = if _penaltyCtx.presencePenalty > 0 then new Set() else null
+      # 2026-09-14: same for repetition_penalty (HF-style multiplicative,
+      # windowed). Setting either penalty to its "off" value (1.0 for
+      # repetition, 0 for presence) leaves the sample fast-path unchanged.
+      _penaltyCtx.repetitionPenalty = Number(gopts.repetitionPenalty ? gopts.repetition_penalty ? 1.0)
+      _penaltyCtx.recentContextSize = Number(gopts.repetitionContextSize ? gopts.repetition_context_size ? 128)
+      if _penaltyCtx.repetitionPenalty > 1
+        _penaltyCtx.recentTokens = []
+        _penaltyCtx.recentTokensSet = new Set()
+      else
+        _penaltyCtx.recentTokens = null
+        _penaltyCtx.recentTokensSet = null
 
       prompt = if gopts.raw then effectiveText else formatChatML(effectiveText, systemPrompt)
       promptEmbeds = await llm.encode(prompt)
@@ -416,6 +497,9 @@ createSession = (opts = {}) ->
       seenCount = _penaltyCtx.seenTokens?.size ? 0
       _penaltyCtx.presencePenalty = 0
       _penaltyCtx.seenTokens = null
+      _penaltyCtx.repetitionPenalty = 1.0
+      _penaltyCtx.recentTokens = null
+      _penaltyCtx.recentTokensSet = null
 
       elapsed = (tEnd - tStart) / 1000
       ttftSec = if firstTokenAt then (firstTokenAt - tStart) / 1000 else elapsed

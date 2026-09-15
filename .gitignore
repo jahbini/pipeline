@@ -18,3 +18,4 @@ data/
 pipeline.json
 .DS_Store
 *.log
+mlx/helper_lora/

@@ -30,19 +30,57 @@ estimateTokens = (text) ->
   Math.ceil(cleaned.length / 4)
 
 splitParagraphs = (text) ->
-  rawParagraphs = String(text ? '').split /\n\s*\n/
-  paragraphs = []
-  for para in rawParagraphs
-    cleanPara = String(para ? '').trim()
-    continue unless cleanPara.length > 0
-    paragraphs.push cleanPara
-  paragraphs
+  # NOTE: this matches the whitespace-collapsing form in
+  # oracle_ask_sqlite.coffee — both files must chunk identically or the
+  # bland/spicy pair alignment breaks. Keep in sync.
+  rawParts = String(text ? '').split /\n\s*\n/
+  parts = []
+  for rawPart in rawParts
+    part = String(rawPart ? '').replace(/\s+/g, ' ').trim()
+    continue unless part.length
+    parts.push part
+  parts
 
-# (2026-09-12: removed buildStoryGroups / buildFragmentParagraphs /
-# splitSingleParagraphTrainingText. They served the old
-# per-paragraph-group training design; the rewritten step emits ONE
-# row per whole story — `{prompt: simple_text, completion: jim_story}`
-# — with no fragment splitting.)
+# 2026-09-15: RE-ADDED buildStoryGroups. Bit-for-bit copy of the
+# function in `oracle_ask_sqlite.coffee` (line ~339) — the LoRA
+# training pair (bland from chunk_simplifications, spicy from
+# stories.text) only aligns when both sides use the SAME chunker on
+# the SAME story text. If oracle_ask_sqlite ever changes its chunking,
+# THIS FUNCTION MUST CHANGE IN LOCKSTEP. Consider extracting to a
+# shared helper when a third caller appears.
+buildStoryGroups = (text) ->
+  paragraphs = splitParagraphs text
+  return [] unless paragraphs.length
+
+  if paragraphs.length < 5
+    return [
+      group_index: 1
+      start_paragraph: 1
+      end_paragraph: paragraphs.length
+      paragraphs: paragraphs.slice()
+      text: paragraphs.join "\n\n"
+    ]
+
+  groups = []
+  total = paragraphs.length
+  baseSize = Math.floor(total / 5)
+  remainder = total % 5
+  startIndex = 0
+
+  for groupIndex in [0...5]
+    groupSize = baseSize
+    groupSize += 1 if groupIndex < remainder
+    selected = paragraphs.slice startIndex, startIndex + groupSize
+    endIndex = startIndex + selected.length - 1
+    groups.push
+      group_index: groupIndex + 1
+      start_paragraph: startIndex + 1
+      end_paragraph: endIndex + 1
+      paragraphs: selected
+      text: selected.join "\n\n"
+    startIndex += groupSize
+
+  groups
 
 # Deterministic per-story split. Sort story ids, then bucket by index:
 # 0..7 → train, 8 → valid, 9 → test. No RNG state; identical stories in
@@ -105,26 +143,34 @@ splitStoryIds = (storyIds, trainOut = 8, validOut = 1, testOut = 1) ->
       rowsWritten += 1
       return
 
-    # 2026-09-12 REDESIGN #2 — style-transfer training rows.
+    # 2026-09-15 REDESIGN #3 — per-chunk style-transfer training rows.
     #
-    # Row shape:
-    #   prompt     = the story's PLAIN-LANGUAGE RETELLING (from
-    #                story_simplifications; populated by
-    #                simplify_stories_ite before this step runs)
-    #   completion = Jim's WHOLE original story
+    # Row shape (one row per chunk, up to 5 rows per story):
+    #   prompt     = chunk_simplifications.simple_text[i]
+    #                (bland plain-English rewrite of THAT chunk;
+    #                 populated by oracle_ask_sqlite on every run)
+    #   completion = buildStoryGroups(story.text)[i-1].text
+    #                (Jim's original spicy chunk; regenerated
+    #                 deterministically from stories.text)
     #
-    # This teaches the LoRA: "given plain content, produce Jim's voice."
-    # A story with no simplification row yet is skipped (with a log)
-    # — simplify_stories_ite must run first (guaranteed by the
+    # Both sides use the SAME chunker so pairs align by index.
+    # Rationale: the prior redesign #2 fed whole story → whole story,
+    # which trained on paragraph-arc as much as voice. Users asked
+    # for local bland↔spicy pairs so the adapter learns rewording
+    # per paragraph-group, decoupled from narrative structure.
+    #
+    # A story with no chunk_simplifications rows is skipped (with a
+    # log) — oracle_ask_sqlite must run first (guaranteed by the
     # elementary DAG's depends_on chain).
     #
-    # Stories where prompt+completion exceed max_total_tokens are
-    # logged and skipped. Bump the budget in the recipe if you want
-    # more coverage.
+    # Chunks where prompt+completion exceed max_total_tokens are
+    # logged and skipped INDIVIDUALLY — other chunks from the same
+    # story still contribute if they fit.
     MAX_TOTAL_TOKENS = Number(L.param('max_total_tokens', 2048))
     SAFETY_TOKENS = 64
     skippedTooLong = 0
     skippedNoSimp = 0
+    skippedNoMatch = 0
 
     for storyID in selectedStoryIDs
       continue unless storyID?
@@ -142,37 +188,53 @@ splitStoryIds = (storyIds, trainOut = 8, validOut = 1, testOut = 1) ->
       fullStoryText = String(story.text ? '').trim()
       continue unless fullStoryText.length > 0
 
-      # Read the plain-language retelling from sqlite. If none exists
-      # yet, skip this story — simplify_stories_ite must run first.
-      simpEntry = L.theLowdown "storySimplification{#{storyID}}.json"
-      simpRow = simpEntry?.value
-      simpleText = String(simpRow?.simple_text ? '').trim()
-      unless simpleText.length
-        console.log "[#{L.stepName}] skip #{storyID}: no story_simplifications row yet (run simplify_stories_ite first)"
+      # Read all bland-rewrite rows for this story. Empty → skip.
+      chunksEntry = L.theLowdown "chunkSimplificationsForStory{#{storyID}}.jsonl"
+      chunkRows = chunksEntry?.value
+      unless Array.isArray(chunkRows) and chunkRows.length
+        console.log "[#{L.stepName}] skip #{storyID}: no chunk_simplifications rows yet (run oracle_ask_sqlite first)"
         skippedNoSimp += 1
         continue
 
-      # Style-transfer pairing:
-      #   prompt     = the plain-language retelling (drives conditioning)
-      #   completion = Jim's original story (what the adapter should learn to produce)
-      # No trailing "\n\n" on the prompt — the trainer joins the two
-      # halves with tokenizer eos/bos glue as configured. Keep the
-      # completion clean; EOS is appended in the collect() pass.
-      promptText     = simpleText
-      completionText = fullStoryText
-      rowTokens = estimateTokens(promptText) + estimateTokens(completionText)
+      # Deterministic re-chunk of the spicy source, keyed by group_index
+      # (1..5). Must match oracle's chunker exactly — that's the
+      # invariant behind pair alignment.
+      spicyGroups = buildStoryGroups fullStoryText
+      spicyByIdx = {}
+      for group in spicyGroups
+        spicyByIdx[group.group_index] = group.text
 
-      if rowTokens + SAFETY_TOKENS > MAX_TOTAL_TOKENS
-        console.log "[#{L.stepName}] skip #{storyID}: row is #{rowTokens} tok — exceeds max_total_tokens=#{MAX_TOTAL_TOKENS}"
-        skippedTooLong += 1
-        continue
+      emittedThisStory = 0
+      for row in chunkRows
+        chunkIdx = Number(row?.chunk_index)
+        continue unless Number.isFinite(chunkIdx) and chunkIdx > 0
+        promptText = String(row?.simple_text ? '').trim()
+        continue unless promptText.length
+        completionText = String(spicyByIdx[chunkIdx] ? '').trim()
+        unless completionText.length
+          # Bland row exists but the deterministic chunker no longer
+          # produces a group at that index — story text may have
+          # shrunk (edits since the bland was generated). Skip.
+          console.log "[#{L.stepName}] #{storyID}|#{chunkIdx}: no spicy chunk at that index (chunker mismatch)"
+          skippedNoMatch += 1
+          continue
 
-      emit storyID, promptText, completionText
-      storiesProcessed += 1
-      processedStoryIds.push storyID if rowsByStory[storyID]?
+        rowTokens = estimateTokens(promptText) + estimateTokens(completionText)
+        if rowTokens + SAFETY_TOKENS > MAX_TOTAL_TOKENS
+          console.log "[#{L.stepName}] skip #{storyID}|#{chunkIdx}: #{rowTokens} tok — exceeds max_total_tokens=#{MAX_TOTAL_TOKENS}"
+          skippedTooLong += 1
+          continue
+
+        emit storyID, promptText, completionText
+        emittedThisStory += 1
+
+      if emittedThisStory > 0
+        storiesProcessed += 1
+        processedStoryIds.push storyID if rowsByStory[storyID]?
 
     console.log "[#{L.stepName}] skipped no-simplification: #{skippedNoSimp}"
-    console.log "[#{L.stepName}] skipped over-budget stories: #{skippedTooLong}"
+    console.log "[#{L.stepName}] skipped chunker-mismatch chunks: #{skippedNoMatch}"
+    console.log "[#{L.stepName}] skipped over-budget chunks: #{skippedTooLong}"
 
     console.log "[build_lora_dataset_ite] stories processed:", storiesProcessed
     console.log "[build_lora_dataset_ite] rows written:", rowsWritten

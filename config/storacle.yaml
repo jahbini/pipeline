@@ -57,10 +57,13 @@ storacle:
   # Both are resolved every run so you can mix them freely.
   prompt_text: [ UI_textarea, "" ]
 
-  # Adapter picker — dropdown of adapters known to the writer's UI
-  # (same source `prompt_llm` uses). Sentinel values that mean "no
-  # adapter, base model only": empty string, "none", "base", "-".
-  adapter_path: [ UI_dropdown, adapters, "" ]
+  # 2026-09-15: the step-scoped Adapter dropdown is retired. The
+  # single source of truth is the writer UI's "Available Adapters"
+  # dropdown in the RUN section (index.html #available-adapters-select),
+  # which now carries data-path="storacle.adapter_path" so
+  # collectUiValues() writes here on every launch. `""` is the base-
+  # model default when the human picks "(base — no adapter)".
+  adapter_path: ""
 
   # Toggle: prepend a Related-Passages block retrieved via top-K
   # cosine over kag_embeddings_clean. RAG-lite.
@@ -74,6 +77,20 @@ storacle:
   rag_top_k: 4
 
   llm:
-    maxTokens: 400
-    temperature: 0.2
-    topP: 0.9
+    # 2026-09-15: every knob exposed as a UI input so the human can
+    # tune per-run without editing yaml. The second element in each
+    # tuple is the DEFAULT — matches what worked before the UI
+    # promotion. `think_prefill` was previously only reachable by
+    # embedding `<think>...</think>` directly in prompt_text; now it
+    # has a proper textarea and session_api reads it via the option
+    # of the same name.
+    #
+    # For the known-good "full-story Jim-voice rewrite" prompt see
+    # ~/puppeteer/GPT/storacle_prompts.md — Prompt 1.
+    maxTokens:                [ UI_number, 400 ]
+    temperature:              [ UI_number, 0.7 ]
+    topP:                     [ UI_number, 0.9 ]
+    repetition_penalty:       [ UI_number, 1.15 ]
+    repetition_context_size:  [ UI_number, 128 ]
+    presence_penalty:         [ UI_number, 0.6 ]
+    think_prefill:            [ UI_textarea, "" ]
