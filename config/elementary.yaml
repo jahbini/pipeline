@@ -45,11 +45,14 @@
 #   reembed drained) as the completion signal.
 
 run:
-  # run.model is a pipe-level fact; each pipe's override sets it.
+  # Model paths are pipe-level facts. The pipe's override.yaml MUST
+  # set run.loraLand (base model dir) and run.quantized_dir (quantized
+  # model dir). See writer/MORNING.md — 2026-09-21 the recipe stops
+  # manufacturing paths via ${MODELS}/${run.model}; step blocks below
+  # only *point to* run.quantized_dir by name.
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_mlx: false
   debug_sql: false
@@ -107,7 +110,7 @@ oracle_ask_sqlite:
   depends_on: []
   needs: []
   makes: [new_story_ids, oracle_remaining_count, kag_rejects, kag_viewed]
-  model_dir: ${MODELS}/${run.model}-mlx4
+  model_dir: ${run.quantized_dir}
   batch_size: 4
   # Reuse the same prompt as oracle_ite.yaml. Kept short here — the
   # authoritative long form lives in oracle_ite.yaml (single source of
@@ -204,7 +207,7 @@ reembed_chunks_clean:
   depends_on: [oracle_ask_sqlite]
   needs: []
   makes: [reembed_remaining_count]
-  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  quantized_model_dir: ${run.quantized_dir}
   batch_size: 4
 
 simplify_stories_ite:
@@ -216,7 +219,7 @@ simplify_stories_ite:
   depends_on: [reembed_chunks_clean]
   needs: []
   makes: [simplify_remaining_count]
-  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  quantized_model_dir: ${run.quantized_dir}
   batch_size: 4
   llm:
     maxTokens: 800
@@ -244,7 +247,7 @@ run_lora_train_ite:
   needs: [lora_cycle_state, selected_story_ids, train_rows, valid_rows, test_rows]
   makes: [lora_stdout, lora_run_record]
   test_only: false
-  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  quantized_model_dir: ${run.quantized_dir}
   adapter_path: build/adapter
   resume_adapter_file: build/adapter/adapters.safetensors
   llm:

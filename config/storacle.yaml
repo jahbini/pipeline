@@ -21,12 +21,13 @@
 #     - Kick the run; watch pipes/<pipe>/out/storacle.txt.
 
 run:
-  # `run.model` intentionally not set here — the model identity is a
-  # pipe fact, not a recipe fact. Each pipe's override.yaml must set
-  # it. See GPT/model_identity.md.
+  # Model paths are pipe-level facts. The pipe's override.yaml MUST
+  # set run.loraLand (base) and run.quantized_dir (quantized). See
+  # writer/MORNING.md — 2026-09-21 the recipe stops manufacturing
+  # paths via ${MODELS}/${run.model}; step blocks below only *point
+  # to* run.quantized_dir by name.
   output_dir: out
   data_dir: data
-  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_llm: false
 
@@ -43,7 +44,7 @@ storacle:
   depends_on: []
   needs: []
   makes: [storacle_raw, storacle_meta, storacle_text]
-  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  quantized_model_dir: ${run.quantized_dir}
 
   # Story picker — dropdown of every story in this pipe's sqlite.
   story_id: [ UI_dropdown, db/story_titles, "" ]

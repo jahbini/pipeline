@@ -190,7 +190,34 @@ gitPublicArgs = [
     #      quantized derivative sits alongside as `<name>-mlx<bits>`.
     #   3. Legacy fallback: `build/model`.
     explicit  = (M.getStepParam(stepName, 'download_dir') ? M.getStepParam(stepName, 'loraLand'))
-    modelsRoot = M.getStepParam(stepName, 'models_root') ? process.env.MODELS
+    rawModelsRoot = M.getStepParam(stepName, 'models_root') ? process.env.MODELS
+
+    # 2026-09-20 — /Volumes/<label>* glob fallback. When macOS
+    # remounts a volume with a suffix (" 1", " 2", …) because
+    # DiskArb thinks the plain name is taken (usually a stale Time
+    # Machine snapshot registration), any code hard-coding the plain
+    # path fails with EACCES on mkdir. If the configured root doesn't
+    # exist, glob its /Volumes/<label> component and take the first
+    # sibling that does — that's the actually-mounted one.
+    resolveModelsRoot = (raw) ->
+      return null unless raw?
+      s = String(raw)
+      return s if fs.existsSync s
+      m = s.match /^\/Volumes\/([^\/]+)(\/.*)?$/
+      return s unless m?
+      label = m[1]
+      rest  = m[2] ? ''
+      try
+        for entry in fs.readdirSync '/Volumes'
+          continue unless entry.indexOf(label) is 0
+          cand = "/Volumes/#{entry}#{rest}"
+          if fs.existsSync cand
+            console.log "[init] modelsRoot #{s} not present; falling back to #{cand}"
+            return cand
+      catch _err
+        null
+      s
+    modelsRoot = resolveModelsRoot rawModelsRoot
 
     targetDir = if explicit?
       path.resolve String(explicit)

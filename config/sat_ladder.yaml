@@ -1,0 +1,368 @@
+# =====================================================================
+#   sat_ladder.yaml  —  Three-tier SAT ablation recipe
+# =====================================================================
+#
+#   Runs the full "can this model do X?" ladder against a locked
+#   fixture set, so a sweep over (temperature, top_p, adapter_dir,
+#   with_judge, KAG on/off) tells you which capability bucket the
+#   model belongs to. Emits three verdict artifacts consumed by the
+#   writer UI's SAT Buckets panel:
+#
+#     Tier 1 — elementary reading      → elementary_verdict
+#              (can it read a short story and answer factual Q +
+#               produce a bounded summary?)
+#
+#     Tier 2 — diary from fixed spine  → sat_verdict_adapted
+#                                       + sat_verdict_base
+#              (does a diary letter written from a locked spine
+#               pass elementary_sat_ite's six checks?)
+#
+#     Tier 3 — story from fixed spine  → sat_story_verdict
+#              (does a short story from the same spine hold the
+#               invariants, character lock, length, coherence?)
+#
+#   Fixture inputs (source-only artifacts declared below) must exist
+#   in the pipe's data/ dir. See writer/pipes/small/data/ for the
+#   canonical scaffold.
+#
+#   Tuning knobs live in each step's block below. Per-pipe overrides
+#   go in <pipe>/override/sat_ladder.yaml (or split per-step:
+#   <pipe>/override/sat_diary_ite.yaml etc.) — never edit this file
+#   for tuning.
+#
+#   Bucket policy (implemented in the individual step scripts):
+#     can_read      — elementary_verdict.bucket
+#     can_diary     — sat_verdict_adapted.pass  AND  sat_verdict_base.pass?
+#                     Depends on what you're proving. Typical sweep:
+#                     adapted must pass; base is the ablation baseline.
+#     can_story     — sat_story_verdict.bucket
+#
+# =====================================================================
+
+run:
+  # Model paths are pipe-level facts. The pipe's override.yaml MUST
+  # set run.loraLand (base) and run.quantized_dir (quantized). See
+  # writer/MORNING.md — 2026-09-21 the recipe stops manufacturing
+  # paths via ${MODELS}/${run.model}; step blocks below only *point
+  # to* run.quantized_dir by name.
+  output_dir: out
+  data_dir: data
+  debug_s: false
+  debug_llm: false
+
+# ---------------------------------------------------------------------
+# Artifacts
+# ---------------------------------------------------------------------
+# Three kinds live here:
+#   1. Source-only fixtures (data/*.txt, data/*.yaml). The pipe must
+#      provide these files; the runner reads them through the meta
+#      layer when a step L.needs the key.
+#   2. Intermediate artifacts written by generator steps (diary text,
+#      story text, prompts). Materialized to out/ so a human can
+#      inspect them alongside the verdict.
+#   3. Verdict artifacts — the pass/fail buckets. Materialized so the
+#      writer UI panels (sat_verdicts, sat_buckets) can read them from
+#      params/*.yaml.
+# ---------------------------------------------------------------------
+artifacts:
+  # ---- source-only fixtures (pipe-provided) ----
+  elementary_story_text:
+    source: data/elementary_story.txt
+  elementary_qa_json:
+    source: data/elementary_qa.yaml
+  sat_fixed_spine_json:
+    source: data/sat_fixed_spine.yaml
+
+  # ---- generator outputs, per (config, side) ----
+  # Diary ablation matrix: 4 configs × {adapted, base} = 8 letters +
+  # 4 prompt-text artifacts (one per config since prompts differ
+  # when KAG/chunks context blocks are injected).
+  diary_baseline_prompt_text:  { target: out/diary_baseline_prompt.txt }
+  diary_baseline_adapted_text: { target: out/diary_baseline_adapted.txt }
+  diary_baseline_base_text:    { target: out/diary_baseline_base.txt }
+  diary_kag_prompt_text:       { target: out/diary_kag_prompt.txt }
+  diary_kag_adapted_text:      { target: out/diary_kag_adapted.txt }
+  diary_kag_base_text:         { target: out/diary_kag_base.txt }
+  diary_chunks_prompt_text:    { target: out/diary_chunks_prompt.txt }
+  diary_chunks_adapted_text:   { target: out/diary_chunks_adapted.txt }
+  diary_chunks_base_text:      { target: out/diary_chunks_base.txt }
+  diary_both_prompt_text:      { target: out/diary_both_prompt.txt }
+  diary_both_adapted_text:     { target: out/diary_both_adapted.txt }
+  diary_both_base_text:        { target: out/diary_both_base.txt }
+
+  sat_story_prompt_text:
+    target: out/sat_story_prompt.txt
+  sat_story_text:
+    target: out/sat_story.txt
+
+  # ---- grader outputs (read by the writer UI panels + matrix ingest) ----
+  elementary_answers_json:
+    target: out/elementary_answers.json
+  elementary_verdict:
+    target: out/elementary_verdict.yaml
+
+  # Diary grader verdicts — 8 slots (4 configs × 2 sides).
+  sat_verdict_baseline_adapted: { target: out/sat_verdict_baseline_adapted.yaml }
+  sat_verdict_baseline_base:    { target: out/sat_verdict_baseline_base.yaml }
+  sat_verdict_kag_adapted:      { target: out/sat_verdict_kag_adapted.yaml }
+  sat_verdict_kag_base:         { target: out/sat_verdict_kag_base.yaml }
+  sat_verdict_chunks_adapted:   { target: out/sat_verdict_chunks_adapted.yaml }
+  sat_verdict_chunks_base:      { target: out/sat_verdict_chunks_base.yaml }
+  sat_verdict_both_adapted:     { target: out/sat_verdict_both_adapted.yaml }
+  sat_verdict_both_base:        { target: out/sat_verdict_both_base.yaml }
+
+  sat_story_verdict:
+    target: out/sat_story_verdict.yaml
+
+# =====================================================================
+# Steps
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# Tier 1 — Elementary reading.
+# ---------------------------------------------------------------------
+# Independent of the other tiers; runs first because it's the cheapest
+# gate ("if the model can't answer factual Qs, don't bother grading
+# its diary voice"). No depends_on so a run resumes cleanly.
+elementary_ite:
+  run: elementary_ite.coffee
+  depends_on: []
+  needs:
+    - elementary_story_text
+    - elementary_qa_json
+  makes:
+    - elementary_answers_json
+    - elementary_verdict
+  quantized_model_dir: ${run.quantized_dir}
+  # Comprehension wants low creativity.
+  temperature: 0.2
+  top_p: 0.8
+  max_answer_tokens: 120
+  max_summary_tokens: 200
+  min_keywords_hit: 1
+  min_summary_hits: 3
+  with_judge: true
+  grader_temperature: 0.1
+
+# ---------------------------------------------------------------------
+# Tier 2 — Diary from fixed spine (adapted + base ablation).
+# ---------------------------------------------------------------------
+# Two parallel generation branches so the grader has an adapted-vs-base
+# comparison. Each generator step aliases sat_diary_ite with a
+# different `side` param, which is what determines which artifact key
+# the letter lands under (diary_adapted_text vs diary_base_text).
+#
+# The `adapter_dir` knob is intentionally left null in this recipe:
+# the pipe's override sets both (adapter_dir for the adapted branch;
+# null / absent for base). Keeping the default null makes a bare
+# `pipeline: sat_ladder` still runnable — it just runs adapted-side
+# against no adapter, which is a legit "does the raw model diary?" probe.
+
+# ---------------------------------------------------------------------
+# Diary tier — 4-cell KAG/chunks ablation, each cell an aliased
+# instance of sat_diary_ite.coffee.
+#
+# Each aliased step generates BOTH adapter sides (adapted, base) in a
+# single step to avoid the @frost-beta/mlx cross-step MLX crash
+# documented in the pre-refactor recipe. Adapted uses `adapter_dir`,
+# base always runs without adapter — do NOT set adapter_dir in the
+# grader override for the base side.
+#
+# The four cells are strictly serialized to keep MLX single-threaded
+# and to keep the runner's log ordering deterministic.
+#
+# See writer/GPT/sat/emotional_arc_spine.md for the emotional_arc +
+# kag_emotion_map that KAG/chunks lookups use.
+
+sat_diary_baseline_ite:
+  run: sat_diary_ite.coffee
+  depends_on: [elementary_ite]
+  needs: [sat_fixed_spine_json]
+  makes: [diary_baseline_prompt_text, diary_baseline_adapted_text, diary_baseline_base_text]
+  quantized_model_dir: ${run.quantized_dir}
+  adapter_dir: null
+  temperature: 0.75
+  top_p: 0.9
+  max_tokens: 3000
+  config_label: baseline
+  include_kag: false
+  include_chunks: false
+
+sat_diary_kag_ite:
+  run: sat_diary_ite.coffee
+  depends_on: [sat_diary_baseline_ite]
+  needs: [sat_fixed_spine_json]
+  makes: [diary_kag_prompt_text, diary_kag_adapted_text, diary_kag_base_text]
+  quantized_model_dir: ${run.quantized_dir}
+  adapter_dir: null
+  temperature: 0.75
+  top_p: 0.9
+  max_tokens: 3000
+  config_label: kag
+  include_kag: true
+  include_chunks: false
+
+sat_diary_chunks_ite:
+  run: sat_diary_ite.coffee
+  depends_on: [sat_diary_kag_ite]
+  needs: [sat_fixed_spine_json]
+  makes: [diary_chunks_prompt_text, diary_chunks_adapted_text, diary_chunks_base_text]
+  quantized_model_dir: ${run.quantized_dir}
+  adapter_dir: null
+  temperature: 0.75
+  top_p: 0.9
+  max_tokens: 3000
+  config_label: chunks
+  include_kag: false
+  include_chunks: true
+
+sat_diary_both_ite:
+  run: sat_diary_ite.coffee
+  depends_on: [sat_diary_chunks_ite]
+  needs: [sat_fixed_spine_json]
+  makes: [diary_both_prompt_text, diary_both_adapted_text, diary_both_base_text]
+  quantized_model_dir: ${run.quantized_dir}
+  adapter_dir: null
+  temperature: 0.75
+  top_p: 0.9
+  max_tokens: 3000
+  config_label: both
+  include_kag: true
+  include_chunks: true
+
+# ---------------------------------------------------------------------
+# Diary graders — 8 aliased instances of elementary_sat_ite.coffee,
+# one per (config, side). Strictly serialized so the LLM-judge calls
+# don't collide.
+# ---------------------------------------------------------------------
+
+elementary_sat_baseline_adapted:
+  run: elementary_sat_ite.coffee
+  depends_on: [sat_diary_both_ite]
+  needs: [diary_baseline_adapted_text, diary_baseline_prompt_text]
+  makes: [sat_verdict_baseline_adapted]
+  side: adapted
+  config_label: baseline
+  with_llm: true
+  min_premise: 3
+  min_freshness_run: 6
+  grader_model_dir: ${run.quantized_dir}
+  quantized_model_dir: ${run.quantized_dir}
+
+elementary_sat_baseline_base:
+  run: elementary_sat_ite.coffee
+  depends_on: [elementary_sat_baseline_adapted]
+  needs: [diary_baseline_base_text, diary_baseline_prompt_text]
+  makes: [sat_verdict_baseline_base]
+  side: base
+  config_label: baseline
+  with_llm: true
+  min_premise: 3
+  min_freshness_run: 6
+  grader_model_dir: ${run.quantized_dir}
+  quantized_model_dir: ${run.quantized_dir}
+
+elementary_sat_kag_adapted:
+  run: elementary_sat_ite.coffee
+  depends_on: [elementary_sat_baseline_base]
+  needs: [diary_kag_adapted_text, diary_kag_prompt_text]
+  makes: [sat_verdict_kag_adapted]
+  side: adapted
+  config_label: kag
+  with_llm: true
+  min_premise: 3
+  min_freshness_run: 6
+  grader_model_dir: ${run.quantized_dir}
+  quantized_model_dir: ${run.quantized_dir}
+
+elementary_sat_kag_base:
+  run: elementary_sat_ite.coffee
+  depends_on: [elementary_sat_kag_adapted]
+  needs: [diary_kag_base_text, diary_kag_prompt_text]
+  makes: [sat_verdict_kag_base]
+  side: base
+  config_label: kag
+  with_llm: true
+  min_premise: 3
+  min_freshness_run: 6
+  grader_model_dir: ${run.quantized_dir}
+  quantized_model_dir: ${run.quantized_dir}
+
+elementary_sat_chunks_adapted:
+  run: elementary_sat_ite.coffee
+  depends_on: [elementary_sat_kag_base]
+  needs: [diary_chunks_adapted_text, diary_chunks_prompt_text]
+  makes: [sat_verdict_chunks_adapted]
+  side: adapted
+  config_label: chunks
+  with_llm: true
+  min_premise: 3
+  min_freshness_run: 6
+  grader_model_dir: ${run.quantized_dir}
+  quantized_model_dir: ${run.quantized_dir}
+
+elementary_sat_chunks_base:
+  run: elementary_sat_ite.coffee
+  depends_on: [elementary_sat_chunks_adapted]
+  needs: [diary_chunks_base_text, diary_chunks_prompt_text]
+  makes: [sat_verdict_chunks_base]
+  side: base
+  config_label: chunks
+  with_llm: true
+  min_premise: 3
+  min_freshness_run: 6
+  grader_model_dir: ${run.quantized_dir}
+  quantized_model_dir: ${run.quantized_dir}
+
+elementary_sat_both_adapted:
+  run: elementary_sat_ite.coffee
+  depends_on: [elementary_sat_chunks_base]
+  needs: [diary_both_adapted_text, diary_both_prompt_text]
+  makes: [sat_verdict_both_adapted]
+  side: adapted
+  config_label: both
+  with_llm: true
+  min_premise: 3
+  min_freshness_run: 6
+  grader_model_dir: ${run.quantized_dir}
+  quantized_model_dir: ${run.quantized_dir}
+
+elementary_sat_both_base:
+  run: elementary_sat_ite.coffee
+  depends_on: [elementary_sat_both_adapted]
+  needs: [diary_both_base_text, diary_both_prompt_text]
+  makes: [sat_verdict_both_base]
+  side: base
+  config_label: both
+  with_llm: true
+  min_premise: 3
+  min_freshness_run: 6
+  grader_model_dir: ${run.quantized_dir}
+  quantized_model_dir: ${run.quantized_dir}
+
+# ---------------------------------------------------------------------
+# Tier 3 — Story from fixed spine.
+# ---------------------------------------------------------------------
+# Self-grading (generate + four checks in one step). Chained after the
+# diary tier for the same MLX-serialization reason above.
+
+sat_story_ite:
+  run: sat_story_ite.coffee
+  # Tail of the whole diary block (baseline → kag → chunks → both,
+  # each with its two graders). Story tier not yet KAG/chunks-ablated —
+  # story ablation is a future build item.
+  depends_on: [elementary_sat_both_base]
+  needs: [sat_fixed_spine_json]
+  makes: [sat_story_prompt_text, sat_story_text, sat_story_verdict]
+  quantized_model_dir: ${run.quantized_dir}
+  # Overrides set adapter_dir per sweep cell.
+  adapter_dir: null
+  temperature: 0.8
+  top_p: 0.9
+  max_tokens: 1400
+  min_words: 300
+  max_words: 1200
+  grader_model_dir: ${run.quantized_dir}
+  grader_temperature: 0.1
+
+pipeline: sat_ladder

@@ -23,13 +23,14 @@
 #         diary_ite (generate + view entries against the trained adapter).
 
 run:
-  # `run.model` intentionally not set here — the model identity is a
-  # pipe fact, not a recipe fact. Each pipe's override.yaml must set
-  # it. See GPT/model_identity.md.
+  # Model paths are pipe-level facts. The pipe's override.yaml MUST
+  # set run.loraLand (base) and run.quantized_dir (quantized). See
+  # writer/MORNING.md — 2026-09-21 the recipe stops manufacturing
+  # paths via ${MODELS}/${run.model}; step blocks below only *point
+  # to* run.quantized_dir by name.
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_mlx: false
   debug_sql: false
@@ -78,7 +79,7 @@ run_lora_train_ite:
   needs: [lora_cycle_state, selected_story_ids, train_rows, valid_rows, test_rows]
   makes: [lora_stdout, lora_run_record]
   test_only: false
-  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  quantized_model_dir: ${run.quantized_dir}
   adapter_path: build/adapter
   resume_adapter_file: build/adapter/adapters.safetensors
   llm:

@@ -487,12 +487,15 @@ expandIncludes = (spec, baseDir) ->
 
 Two pipeline_runners writing to the same `state/` directory will
 corrupt each other's per-step files. `ensureSingleInstance` scans `ps`
-for sibling processes also running `pipeline_runner.coffee`; if any
-are found it returns them and `main()` exits cleanly after recording
-the conflict in `state/ui-run.json`. This is observational, not a
-lock — racing startups can still both pass the check. The cost of a
-real lock wasn't worth it for a teaching tool; the cost of *silent*
-double-run was.
+for sibling processes also running `pipeline_runner.coffee` and
+compares each candidate's CWD (via lsof -d cwd) to ours. Only
+same-CWD siblings are flagged as a conflict; different-CWD runners
+have their own state/ dir and cannot corrupt us. This unblocks the
+puppeteer running its own recipe (e.g. celarien_prep in ~/puppeteer)
+alongside a peer/smoke pipe in a different CWD. This is observational,
+not a lock — racing startups can still both pass the check. The cost
+of a real lock wasn't worth it for a teaching tool; the cost of
+*silent* double-run was.
 
 `isProcessAlive` is a `kill(pid, 0)` probe used when re-attaching to
 an in-flight UI run.
@@ -524,9 +527,22 @@ ensureSingleInstance = ->
       firstToken = command.split(/\s+/)[0] ? ''
       exeBase = firstToken.split('/').pop()
       continue unless exeBase is 'coffee' or exeBase is 'node'
+      # CWD-scope: only runners in our SAME CWD share our state/ dir.
+      # Different-CWD runners cannot corrupt us and are allowed.
+      otherCwd = null
+      try
+        lsofOut = execSync("lsof -a -p #{pid} -d cwd -Fn 2>/dev/null", encoding:'utf8')
+        for lsofLine in lsofOut.split("\n")
+          if lsofLine.length > 1 and lsofLine[0] is 'n'
+            otherCwd = lsofLine.slice(1).trim()
+            break
+      catch _err
+        otherCwd = null
+      continue if otherCwd? and otherCwd isnt process.cwd()
       others.push
         pid: pid
         command: command
+        cwd: otherCwd
 
     if others.length > 0
       console.error "[pipeline_runner] another pipeline_runner.coffee is already active"

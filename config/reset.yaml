@@ -24,21 +24,25 @@
 #
 #   Project overrides:
 #     - Change `stories_md.source` if your markdown lives elsewhere.
-#     - Change `run.model` if you're bootstrapping a different HF repo.
-#     - Set `download_model.download_dir` / `quantize_model.src_dir` /
-#       `quantized_dir` to move the on-disk layout.
+#     - The pipe's override.yaml MUST set run.loraLand (base model
+#       dir — target for download_model) and run.quantized_dir
+#       (target for quantize_model). Change run.model there too if
+#       you're bootstrapping a different HF repo (tracing only —
+#       no path is derived from it anymore). See writer/MORNING.md.
 #
 #   No other recipe `include:`s base_ite, so these steps don't bleed
 #   into diary_ite / oracle_ite / lora_ite / eval_ite runs.
 #
 run:
-  # `run.model` intentionally not set here — the model identity is a
-  # pipe fact, not a recipe fact. Each pipe's override.yaml must set
-  # it. See GPT/model_identity.md.
+  # Model paths are pipe-level facts. The pipe's override.yaml MUST
+  # set run.loraLand (base — download_model target) and
+  # run.quantized_dir (quantize_model target). See writer/MORNING.md
+  # — 2026-09-21 the recipe stops manufacturing paths via
+  # ${MODELS}/${run.model}; step blocks below only *point to* those
+  # fields by name.
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_mlx: false
   debug_sql: false
@@ -72,7 +76,7 @@ download_model:
   depends_on: [reset_base_environment_ite]
   needs: []
   makes: []
-  download_dir: ${MODELS}/${run.model}
+  download_dir: ${run.loraLand}
 
 quantize_model:
   # Runs LAST — after seed_story_sqlite — so a Metal SIGABRT here
@@ -82,8 +86,8 @@ quantize_model:
   depends_on: [download_model, seed_story_sqlite]
   needs: []
   makes: []
-  src_dir:       ${MODELS}/${run.model}
-  quantized_dir: ${MODELS}/${run.model}-mlx4
+  src_dir:       ${run.loraLand}
+  quantized_dir: ${run.quantized_dir}
   q_bits: 4
 
 seed_story_sqlite:

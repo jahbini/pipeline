@@ -128,6 +128,99 @@ thinkPrefillFor =
   """
   summarize_log: ''  # freeform reasoning is what this capability needs
 
+  # 2026-09-16: scheduling adviser. Given a pipe's recent-session history
+  # and current state, recommend ONE structured action. Rules encode the
+  # 7 canonical decisions from puppeteer/GPT/scheduling_helper.md;
+  # ordering matters — first match wins so we get deterministic routing.
+  schedule: """
+    I read the pipe's recent sessions and current state, then walk this
+    checklist to decide ONE action. First match wins:
+
+      1. peer_active_now names a DIFFERENT pipe than target →
+         wait (peer's writer is single-instance).
+
+      2. recent_sessions has ≥3 consecutive crashed/error rows on the
+         same recipe with the same error_signature, no successful run
+         between them, AND (only for `no rows in build/train/train.jsonl`
+         signature) there is NO successful reset row between them →
+         reset (empty sqlite pattern).
+
+      3. Same as (2) but the error signature is NOT the empty-sqlite
+         signature (e.g. same MLX crash three times, same SAFETY_ABORT
+         at the same ceiling three times) →
+         hospitalize (retry loop is unproductive).
+
+      4. Latest crash has SAFETY_ABORT with activeMem/ceiling ratio ≥ 2×,
+         OR the pipe already has a raised_ceiling marker AND still
+         crashed with SAFETY_ABORT →
+         reject (model doesn't fit here).
+
+      5. Latest crash has SAFETY_ABORT with ratio in [1×, 2×) AND no
+         raised_ceiling marker →
+         raise_ceiling (host has headroom).
+
+      6. Elementary + training succeeded AND cross_pipe_signals shows
+         a recent storacle probe with repetition_loop=true →
+         graduate (small model overfits; can't fix via sampling).
+
+      7. Legitimate healthy state — successful runs, no failure signal
+         at the top of history, pipe in continue with unrun elementary →
+         launch elementary. Or if nothing to do, wait.
+
+      8. Recent success dominates. If recent_sessions[0] shows a
+         successful terminal run (status='done' or 'success') for
+         the same recipe, do NOT recommend an action predicated on
+         older failures. Older crashes were superseded by the
+         success at the top. Prefer `wait` (the recipe just finished
+         and the human hasn't reviewed yet). Older-failure rules
+         (needs_reset, hospitalize-after-N-crashes) apply ONLY when
+         the top of history is NOT a matching success.
+
+    Rule 9 — escalate when I don't know. If NONE of rules 1-8 apply
+    cleanly to the input, OR the signals are contradictory (two rules
+    both match but recommend different actions), OR the scenario shape
+    doesn't resemble any example I've seen — pick `escalate` with a
+    `reason` field naming exactly what's unclear. Do NOT invent a
+    decision to fill the JSON when I'm uncertain. Escalating a healthy
+    pipe is cheaper than executing a wrong destructive action.
+    Concrete escalate triggers:
+      - Recent sessions include a status value not in {done, success,
+        crashed, error, running, shutdown, retry_after_idle}.
+      - error_signature on a crash doesn't resemble any pattern in
+        the seed examples.
+      - Two rules from 1-8 both match this scenario but their actions
+        differ (e.g. would recommend both raise_ceiling AND reject).
+      - Cross-pipe signals are internally inconsistent (peer says
+        idle but a session shows recipe running with recent
+        started_at).
+      - The scenario is missing fields I'd normally rely on
+        (recent_sessions empty, or current_state not set).
+
+    Rule 10 — always emit `confidence: 0..1` alongside action. 1.0 =
+    the scenario matches a seed example exactly; 0.5 = I applied a
+    rule but there are unusual details; below 0.3 I should probably
+    have escalated. The auto-execute machinery uses this to gate
+    dispatches; be honest.
+
+    Anti-patterns I must NOT commit:
+      - If peer_active_now is null (empty string / missing / null),
+        the peer is IDLE. I do NOT choose `wait` and claim "peer
+        busy" — that is a hallucination.
+      - I do NOT default to `wait` when I am uncertain. If the input
+        shows a specific failure pattern (SAFETY_ABORT, N-consecutive-
+        crashes, degenerate-loop), I MUST match the pattern to its
+        rule above and emit that rule's action — even if the seed
+        examples for that action are fewer.
+      - I do NOT invent state that isn't in the input. If
+        pipe_markers is empty or a specific marker is null, I treat
+        it as absent — I do NOT claim raised_ceiling was already
+        applied when it wasn't.
+
+    The reason field cites SPECIFIC evidence (which row indices in
+    recent_sessions, what error_signature, what state marker).
+    I emit one JSON line — no prose, no code fences.
+  """
+
 # 2026-09-14: few-shot exemplars — 11 (input → output) pairs covering
 # every category. Rendered inside the task prompt where they belong
 # (see the classify_failure body). Concrete examples plus concise
@@ -172,35 +265,127 @@ FEW_SHOT_CLASSIFY_FAILURE = """
 # --- shared runner -------------------------------------------------------
 # Every capability builds a task prompt, calls the model, strips the
 # think prefix, tries JSON.parse, and returns a normalized envelope.
-# On parse failure the runner retries once at a lower temperature; if
-# that also fails, returns {ok:false, raw, error}.
+#
+# Sequence per call:
+#   1. First attempt at opts.temperature (default 0.2).
+#   2. If parse fails AND the raw output looks truncated inside <think>
+#      (no </think> present AND length near maxTokens char-budget), do a
+#      rescue continuation: reconstruct the prompt including the injected
+#      thinkPrefill and the partial output, append "time's up" + </think>
+#      + {, generate ~250 more tokens, and prepend { to what comes back.
+#      Preserves the reasoning the model already did; often lands JSON.
+#   3. If rescue fails or wasn't triggered, retry once at temperature*0.4.
+#   4. If that also fails, return {ok:false, raw, error}.
+#
+# See memory: thinking-budget-rescue.
 runCapability = (capabilityName, taskPrompt, opts = {}) ->
-  session = await getSession()
-  prefill = thinkPrefillFor[capabilityName] ? ''
+  session   = await getSession()
+  prefill   = thinkPrefillFor[capabilityName] ? ''
+  baseTemp  = opts.temperature ? 0.2
+  maxTokens = opts.maxTokens   ? 120
+  topP      = opts.topP        ? 0.8
 
   attempt = (temp) ->
     result = await session.generate buildChatML(taskPrompt),
-      maxTokens:    opts.maxTokens   ? 120
+      maxTokens:    maxTokens
       temperature:  temp
-      topP:         opts.topP        ? 0.8
+      topP:         topP
       raw:          true
       no_thinking:  true
       thinkPrefill: prefill
-    stripThink result.text
+    String(result.text ? '')     # PRE-strip so we can inspect the trajectory
 
-  temps  = [opts.temperature ? 0.2, (opts.temperature ? 0.2) * 0.4]
+  tryParse = (raw) ->
+    return null unless raw
+    try
+      return JSON.parse stripThink(raw)
+    catch
+      return null
+
+  # Two truncation shapes worth rescuing:
+  #   (a) inside-think — no </think> in raw AND near budget: model is still
+  #       reasoning and never committed. Inject "time's up" + </think> + {.
+  #   (b) inside-JSON — </think> present but JSON.parse failed AND raw ends
+  #       near budget: model committed to answering but ran out mid-JSON.
+  #       Continue the partial JSON directly.
+  # Char-budget ≈ 3.4 chars/token × maxTokens (empirical for Qwen3 English).
+  rescueShape = (raw) ->
+    return null unless raw
+    return null unless raw.length >= Math.floor(3.0 * maxTokens)
+    if /<\/think>/.test(raw) then 'json' else 'think'
+
+  # Rescue (a): reconstruct the full prompt the first attempt saw and force a
+  # </think> + { commit at the tail. session_api passes the raw prompt through
+  # unmodified when no_thinking:false + thinkPrefill:'' (session_api.coffee:371-395).
+  rescueInsideThink = (partialRaw) ->
+    injected     = "<think>\n#{prefill}\n</think>\n\n"
+    forceCommit  = "\n\nOK, time's up, answering now.\n</think>\n\n{"
+    rescuePrompt = buildChatML(taskPrompt) + injected + partialRaw + forceCommit
+    result = await session.generate rescuePrompt,
+      maxTokens:    300
+      temperature:  0.15
+      topP:         topP
+      raw:          true
+      no_thinking:  false
+      thinkPrefill: ''
+    tail = String(result.text ? '').replace(/<\|im_end\|>[\s\S]*$/, '').trim()
+    tail = tail.replace(/^\{+/, '')
+    try
+      return JSON.parse('{' + tail)
+    catch
+      return null
+
+  # Rescue (b): thinking already closed, JSON started but got cut. Take the
+  # partial output through the last `{`, ask the model to continue from where
+  # it stopped. Splice head+continuation and parse.
+  rescueInsideJson = (partialRaw) ->
+    injected     = "<think>\n#{prefill}\n</think>\n\n"
+    stripped     = stripThink partialRaw               # post-</think> tail
+    # If stripped doesn't start with `{`, there's non-JSON preamble; keep
+    # from the first `{` onward — that's what session output usually looks
+    # like when JSON begins mid-line.
+    idx = stripped.indexOf('{')
+    return null if idx < 0
+    head = stripped.slice(idx)
+    rescuePrompt = buildChatML(taskPrompt) + injected + partialRaw
+    result = await session.generate rescuePrompt,
+      maxTokens:    300
+      temperature:  0.1
+      topP:         topP
+      raw:          true
+      no_thinking:  false
+      thinkPrefill: ''
+    tail = String(result.text ? '').replace(/<\|im_end\|>[\s\S]*$/, '').trim()
+    candidate = head + tail
+    try
+      return JSON.parse candidate
+    catch
+      # Sometimes the model wraps up neatly if we just append a closing `}`
+      try
+        return JSON.parse(candidate.replace(/,?\s*$/, '') + '}')
+      catch
+        return null
+
+  temps  = [baseTemp, baseTemp * 0.4]
   rawOut = null
-  for temp in temps
+  for temp, i in temps
     try
       rawOut = await attempt(temp)
     catch err
       return { ok: false, raw: null, error: "generate threw: #{String(err?.message ? err)}", capability: capabilityName }
-    try
-      parsed = JSON.parse rawOut
-      return Object.assign({ ok: true, capability: capabilityName }, parsed)
-    catch parseErr
-      # try the lower-temp retry on next loop iteration
-      continue
+    parsed = tryParse(rawOut)
+    return Object.assign({ ok: true, capability: capabilityName }, parsed) if parsed?
+    if i is 0
+      shape = rescueShape(rawOut)
+      if shape?
+        try
+          rescued =
+            if shape is 'think' then await rescueInsideThink(rawOut)
+            else                     await rescueInsideJson(rawOut)
+          if rescued?
+            return Object.assign({ ok: true, capability: capabilityName, rescued: shape }, rescued)
+        catch _err
+          null
 
   { ok: false, raw: rawOut, error: 'model did not return valid JSON', capability: capabilityName }
 
@@ -282,15 +467,180 @@ summarize_log = (logText, opts = {}) ->
   """
   runCapability 'summarize_log', task, {maxTokens: 200, temperature: 0.2}
 
+# --- CAPABILITY: schedule (2026-09-16) ----------------------------------
+# Input: a scenario object describing one pipe's recent history + current
+# state + cross-pipe signals. See puppeteer/GPT/scheduling_helper.md for
+# the canonical input/output shapes.
+# Output: {action, target_pipe, target_recipe, reason}
+#
+# Runtime callers pass an object; the helper JSON-serializes it into the
+# prompt. Passing a pre-serialized string also works.
+
+SCHEDULE_ACTIONS = [
+  'reset'         # fire reset recipe on target_pipe
+  'launch'        # fire target_recipe on target_pipe
+  'hospitalize'   # flip target_pipe state to hospital
+  'graduate'      # flip target_pipe state to graduated (positive terminus)
+  'reject'        # flip target_pipe state to rejected (cemetery)
+  'wait'          # no action; let current run continue
+  'raise_ceiling' # bump SESSION_API_MEM_CEIL_MB, then retry
+  'kill'          # kill the currently-running pipeline_runner on the peer
+  'escalate'      # 2026-09-16: helper's "I don't know" signal. Routes
+                   # pipe to hospital with reason prefix "helper
+                   # escalation:" so humans can distinguish these from
+                   # scheduler-triggered hospitalizations.
+]
+
+schedule = (scenario, opts = {}) ->
+  # `opts.examples` — optional array of {input, expected_output} pairs
+  # rendered as few-shot exemplars in the task prompt. Same pattern as
+  # FEW_SHOT_CLASSIFY_FAILURE above. Used by the probe script and by
+  # incremental-rehearsal training. If omitted, the task carries only
+  # the rules (in thinkPrefillFor.schedule) and the scenario.
+  actions = SCHEDULE_ACTIONS.join(', ')
+  scenarioText =
+    if typeof scenario is 'string' then scenario
+    else JSON.stringify(scenario, null, 2)
+
+  examples = opts.examples ? []
+  fewShotBlock = ''
+  if Array.isArray(examples) and examples.length > 0
+    fewShotBlock = "\n\n    Examples:\n"
+    for ex in examples
+      inputText =
+        if typeof ex.input is 'string' then ex.input
+        else JSON.stringify(ex.input)
+      outputText =
+        if typeof ex.expected_output is 'string' then ex.expected_output
+        else JSON.stringify(ex.expected_output)
+      fewShotBlock += "\n    Input:  #{inputText}\n    Output: #{outputText}\n"
+
+  task = """
+    You are a scheduling adviser for a puppeteer that runs LoRA training
+    and evaluation recipes on peer machines. Given one pipe's recent
+    session history and current state, reply with exactly one JSON
+    object on one line — no prose, no markdown, no code fences.
+
+    Allowed actions (pick exactly ONE):
+      #{actions}
+
+    Reply shape (all five keys required):
+      {"action": "<one of the above>", "target_pipe": "<pipe name>", "target_recipe": "<recipe name or null>", "confidence": <0.0 to 1.0>, "reason": "<one paragraph explaining WHY, citing specific rows from recent_sessions and any state markers>"}
+    #{fewShotBlock}
+    Now decide for this scenario:
+
+    Input:  #{scenarioText}
+    Output:
+  """
+  runCapability 'schedule', task, {maxTokens: 1500, temperature: 0.2}
+
+# --- CAPABILITY: grade_role (2026-09-17) --------------------------------
+# Input: one paragraph text + the expected role name (scene|arrival|
+#        disturbance|reflection|realization).
+# Output: {role: "<one of five>", fit: "good"|"weak"|"wrong", reason: "..."}
+# Used by elementary_sat.structure_order check: reads back which role the
+# paragraph actually PERFORMS, and how well it fits the expected role.
+
+DIARY_ROLES = ['scene', 'arrival', 'disturbance', 'reflection', 'realization']
+
+thinkPrefillFor.grade_role = """
+  I classify this paragraph by which of five diary roles it PERFORMS,
+  independent of its position in the letter:
+    scene       — sets place/time; sensory/atmospheric; no plot conflict yet.
+    arrival     — someone or something enters; may include quoted dialog.
+    disturbance — conflict, complication, or bad news introduced.
+    reflection  — narrator contemplates causes/motivations; interior monologue
+                  about the situation.
+    realization — insight, decision, or change of stance; often meta ("I'll
+                  define happiness myself, thank you.").
+  Then I score how well it fits the expected role: good | weak | wrong.
+  Reply with one JSON object, no prose, no code fences.
+"""
+
+grade_role = (paragraphText, expectedRole, opts = {}) ->
+  para = String(paragraphText ? '').trim()
+  role = String(expectedRole ? '').trim().toLowerCase()
+  role = 'scene' unless role in DIARY_ROLES
+  task = """
+    You are grading a paragraph from a diary letter (Jim → Friend). The
+    diary format has five paragraphs in fixed order:
+      1. scene   2. arrival   3. disturbance   4. reflection   5. realization
+
+    Read the paragraph below and reply with exactly one JSON object on one
+    line — no prose, no markdown, no code fences.
+
+    Reply shape (all three keys required):
+      {"role": "<scene|arrival|disturbance|reflection|realization>",
+       "fit":  "<good|weak|wrong>",
+       "reason": "<one short sentence>"}
+
+    Expected role for this position: #{role}
+
+    Paragraph:
+    #{para}
+
+    Output:
+  """
+  runCapability 'grade_role', task, {maxTokens: 300, temperature: 0.15}
+
+# --- CAPABILITY: grade_invariants (2026-09-17) --------------------------
+# Input: the whole letter body + array of invariant strings ("things that
+#        must stay true").
+# Output: {overall: "preserved"|"partial"|"broken",
+#          per_invariant: [{invariant, status:"preserved"|"absent"|"contradicted", note}]}
+
+thinkPrefillFor.grade_invariants = """
+  I check each invariant against the letter. For each one I decide:
+    preserved   — the letter honors it (may paraphrase; the fact holds).
+    absent      — the letter never touches it; the fact is neither
+                  present nor contradicted.
+    contradicted — the letter says the opposite, or a mutually
+                  exclusive version.
+  Overall: preserved (all preserved), partial (at least one preserved,
+  no contradictions), broken (any contradicted OR none preserved).
+  Reply with one JSON object, no prose, no code fences.
+"""
+
+grade_invariants = (letterBody, invariants, opts = {}) ->
+  letter = String(letterBody ? '').trim()
+  invs   = if Array.isArray(invariants) then invariants else [String(invariants)]
+  invList = invs.map((s, i) -> "  #{i + 1}. #{String(s).trim()}").join('\n')
+  task = """
+    You are grading a diary letter's fidelity to a list of invariants —
+    facts that must stay true. Read the letter and each invariant, then
+    reply with exactly one JSON object on one line — no prose, no
+    markdown, no code fences.
+
+    Reply shape (both keys required):
+      {"overall": "<preserved|partial|broken>",
+       "per_invariant": [
+         {"invariant": "<verbatim>", "status": "<preserved|absent|contradicted>", "note": "<one short sentence>"}
+       ]}
+
+    Invariants:
+    #{invList}
+
+    Letter:
+    #{letter}
+
+    Output:
+  """
+  runCapability 'grade_invariants', task, {maxTokens: 800, temperature: 0.15}
+
 # --- exports -------------------------------------------------------------
 module.exports = {
   classify_failure
   summarize_log
+  schedule
+  grade_role
+  grade_invariants
   dispose
   # Escape hatch for future capabilities and for tests that want to hold
   # the session across many calls.
   getSession
   FAILURE_CATEGORIES
+  SCHEDULE_ACTIONS
+  DIARY_ROLES
   # 2026-09-14: export the prefill map so helper_train.coffee can bake
   # the SAME <think> content into training rows and keep the training-
   # inference distribution aligned.
@@ -305,7 +655,7 @@ if require.main is module
     [capability, arg...] = process.argv[2..]
     unless capability?
       process.stderr.write "usage: coffee helper_llm.coffee <capability> <arg-or-file...>\n"
-      process.stderr.write "capabilities: classify_failure, summarize_log\n"
+      process.stderr.write "capabilities: classify_failure, summarize_log, schedule\n"
       process.stderr.write "  summarize_log accepts either literal text or a path prefixed with @: `@/path/to/log.err`\n"
       process.exit 2
     input = arg.join ' '
@@ -318,6 +668,12 @@ if require.main is module
     result = switch capability
       when 'classify_failure' then await classify_failure(input)
       when 'summarize_log'    then await summarize_log(input)
+      when 'schedule'
+        # `schedule` expects a scenario object; from CLI accept a JSON
+        # string OR a path prefix (@...). The @-prefix handling above
+        # already read the file into `input` as a string.
+        parsed = try JSON.parse(input) catch then input
+        await schedule(parsed)
       else
         process.stderr.write "unknown capability: #{capability}\n"
         process.exit 2

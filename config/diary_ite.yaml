@@ -12,13 +12,14 @@
 #   npm extraction.
 
 run:
-  # `run.model` intentionally not set here — the model identity is a
-  # pipe fact, not a recipe fact. Each pipe's override.yaml must set
-  # it. See GPT/model_identity.md.
+  # Model paths are pipe-level facts. The pipe's override.yaml MUST
+  # set run.loraLand (base) and run.quantized_dir (quantized). See
+  # writer/MORNING.md — 2026-09-21 the recipe stops manufacturing
+  # paths via ${MODELS}/${run.model}; step blocks below only *point
+  # to* run.quantized_dir by name.
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: ${MODELS}/${run.model}
   debug_s: false
   debug_mlx: false
   debug_sql: false
@@ -103,7 +104,7 @@ generate_diary_with_adapter_ite:
   # Adapter picker (UI dropdown). Lists build/adapter* dirs + checkpoints + a
   # base option; defaults to build/adapter. Empty value ('(base)') = no adapter.
   adapter_path: [ UI_dropdown, adapters, build/adapter ]
-  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  quantized_model_dir: ${run.quantized_dir}
   llm:
     maxTokens: 2000
     temperature: 0.7
@@ -113,7 +114,7 @@ generate_diary_without_adapter_ite:
   depends_on: [build_diary_prompt_ite]
   needs: [story_parts, diary_prompt_text]
   makes: [diary_base_raw, diary_base_meta, diary_base_text]
-  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  quantized_model_dir: ${run.quantized_dir}
   llm:
     maxTokens: 2000
     temperature: 0.7

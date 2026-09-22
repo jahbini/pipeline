@@ -38,9 +38,9 @@
     makes: storacle_raw, storacle_meta, storacle_text
 ###
 
-fs = require 'fs'
-path = require 'path'
-
+# 2026-09-16: `fs` + `path` requires retired — this step is now
+# purely meta-mediated (all reads via S.theLowdown, all writes via
+# S.make / S.saveThis). Matches pipeline/GPT/CONVENTIONS.md fs-stinginess.
 STORY_PLACEHOLDER    = '{{{STORY}}}'
 # 2026-09-15: numbered chunk placeholders. Indexed 1..5 to match
 # buildStoryGroups' 1-based group_index. Five is fixed because

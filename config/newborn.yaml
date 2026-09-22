@@ -19,10 +19,15 @@
 #   storacle.yaml → storacle (one prompt-generation call)
 
 run:
+  # Model paths are pipe-level facts. The pipe's override.yaml MUST
+  # set run.loraLand (base model dir — where download_model writes)
+  # and run.quantized_dir (quantized dir — where quantize_model
+  # writes). See writer/MORNING.md — 2026-09-21 the recipe stops
+  # manufacturing paths via ${MODELS}/${run.model}; step blocks
+  # below only *point to* those fields by name.
   output_dir: out
   data_dir: data
   training_dir: build/train
-  loraLand: ${MODELS}/${run.model}
 
 artifacts:
   stories_md:
@@ -48,7 +53,7 @@ download_model:
   depends_on: [reset_base_environment_ite]
   needs: []
   makes: []
-  download_dir: ${MODELS}/${run.model}
+  download_dir: ${run.loraLand}
 
 seed_story_sqlite:
   run: kag_oracle_ite/seed_story_sqlite.coffee
@@ -61,8 +66,8 @@ quantize_model:
   depends_on: [download_model, seed_story_sqlite]
   needs: []
   makes: []
-  src_dir:       ${MODELS}/${run.model}
-  quantized_dir: ${MODELS}/${run.model}-mlx4
+  src_dir:       ${run.loraLand}
+  quantized_dir: ${run.quantized_dir}
   q_bits: 4
 
 # ------ audition stage ------
@@ -71,7 +76,7 @@ storacle:
   depends_on: [quantize_model]
   needs: []
   makes: [storacle_raw, storacle_meta, storacle_text]
-  quantized_model_dir: ${MODELS}/${run.model}-mlx4
+  quantized_model_dir: ${run.quantized_dir}
   # Canonical audition — same story + prompt for every newborn, so a
   # human comparing candidates isn't rating them on different tests.
   story_id: anna-played-piana-md

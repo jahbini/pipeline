@@ -85,7 +85,37 @@ FAILURE_CATEGORIES = [
   'no_adapter', 'metal_abort', 'network', 'unknown'
 ]
 
+SCHEDULE_ACTIONS = [
+  'reset', 'launch', 'hospitalize', 'graduate', 'reject', 'wait',
+  'raise_ceiling', 'kill', 'escalate'
+]
+
 promptFor =
+  # 2026-09-16: schedule prompt — MIRRORS helper_llm.coffee `schedule()`.
+  # Any change to the runtime shape must land here in the same commit,
+  # or trained rows will train the model to answer a different prompt
+  # than inference sends.
+  schedule: (input) ->
+    scenarioText =
+      if typeof input is 'string' then input
+      else JSON.stringify(input, null, 2)
+    """
+    You are a scheduling adviser for a puppeteer that runs LoRA training
+    and evaluation recipes on peer machines. Given one pipe's recent
+    session history and current state, reply with exactly one JSON
+    object on one line — no prose, no markdown, no code fences.
+
+    Allowed actions (pick exactly ONE):
+      #{SCHEDULE_ACTIONS.join(', ')}
+
+    Reply shape (all five keys required):
+      {"action": "<one of the above>", "target_pipe": "<pipe name>", "target_recipe": "<recipe name or null>", "confidence": <0.0 to 1.0>, "reason": "<one paragraph explaining WHY, citing specific rows from recent_sessions and any state markers>"}
+
+    Scenario:
+    #{scenarioText}
+    Output:
+  """
+
   classify_failure: (errorText) -> """
     You are a pipeline-failure classifier. Read the error text below and
     reply with exactly one JSON object on one line — no prose, no markdown,
@@ -276,7 +306,26 @@ writeJsonlSets = (opts = {}) ->
 
 # --- train -----------------------------------------------------------------
 train = (opts = {}) ->
-  { nTrain, nValid, outDir } = writeJsonlSets(opts)
+  # 2026-09-17: `--skip-jsonl` bypasses the sqlite-read + JSONL-write
+  # step. Use when training on a host that doesn't have the puppeteer
+  # DB — e.g. the mac-mini peer, which has helper_lora/train/*.jsonl
+  # synced in but no runtime.sqlite. Row counts are read from the
+  # existing files' line counts so the iters-heuristic still works.
+  # Accept both camelCase (programmatic) and kebab-case (CLI) forms.
+  skipJsonl = opts.skipJsonl or opts['skip-jsonl']
+  { nTrain, nValid, outDir } =
+    if skipJsonl
+      dir = String(opts.outDir ? DEFAULT_TRAIN_DIR)
+      trainPath = path.join(dir, 'train.jsonl')
+      validPath = path.join(dir, 'valid.jsonl')
+      unless fs.existsSync(trainPath)
+        throw new Error "--skip-jsonl requires an existing #{trainPath}. Sync the training data over first, or drop the flag."
+      countLines = (p) ->
+        return 0 unless fs.existsSync(p)
+        fs.readFileSync(p, 'utf8').split(/\r?\n/).filter((l) -> l.trim().length).length
+      { nTrain: countLines(trainPath), nValid: countLines(validPath), outDir: dir }
+    else
+      writeJsonlSets(opts)
   adapterDir = String(opts.adapterDir ? DEFAULT_ADAPTER_DIR)
   fs.mkdirSync adapterDir, recursive: true
 
