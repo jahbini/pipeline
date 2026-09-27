@@ -12,18 +12,6 @@ section opens with prose that explains why the code looks the way it
 does. Read [`pipeline_runner.coffee`](pipeline_runner.coffee) front to
 back as the canonical tour.
 
-## How the runner works — one page
-
-Before reading the source, skim the flowchart:
-[`flowchart/pipeline_runner.md`](flowchart/pipeline_runner.md).
-
-Two diagrams — the 10-phase startup and the execution loop — plus a
-table of the `L` object (what every step's `action(L)` is allowed to
-do), a note on resume semantics, and a map of where every file lands
-on disk. The puppeteer UI serves this file too: any project running
-the runner and hitting `/api/recipe_flowchart?recipe=pipeline_runner`
-gets the same doc via the framework fallback.
-
 ## Install
 
 ```sh
