@@ -240,11 +240,49 @@ cleanGeneratedText = (raw) ->
     true
   lines.join('\n').trim()
 
+# --- GPU claim (2026-09-25, puppeteer→mini migration step 9) ----------------
+# One claim per pipeline_runner process. The FIRST createSession call in this
+# process claims the GPU mutex; subsequent calls reuse the claim (they can't
+# race — same process, single-threaded weight-load path). The claim is
+# released at process exit so a crash never orphans the lock. Stale locks
+# get stolen by the mutex logic (see gpu_claim.coffee § stale detection).
+_gpuClaim   = null
+_gpuTicket  = null
+_ensureGpuClaim = (tag = 'session_api.createSession', timeoutMs = 600_000) ->
+  return if _gpuTicket?
+  _gpuClaim  ?= require './gpu_claim'
+  _gpuTicket  = await _gpuClaim.claim { tag, timeoutMs }
+  # Register process-exit release ONCE. Node's exit handlers are sync, so
+  # we delete the lock file rather than call the async release (which
+  # would race). release() is already tolerant of null/missing tickets.
+  process.on 'exit', ->
+    return unless _gpuTicket?
+    try
+      require('fs').unlinkSync _gpuClaim.LOCK_PATH()
+    catch _ then null
+  # SIGTERM / SIGINT — also clean up. Rethrow after cleanup so normal
+  # shutdown semantics still apply.
+  handleSignal = (sig) ->
+    return unless _gpuTicket?
+    try
+      require('fs').unlinkSync _gpuClaim.LOCK_PATH()
+    catch _ then null
+    process.kill process.pid, sig
+  process.once 'SIGTERM', -> handleSignal 'SIGTERM'
+  process.once 'SIGINT',  -> handleSignal 'SIGINT'
+
 # --- session factory --------------------------------------------------------
 createSession = (opts = {}) ->
   modelDir = opts.modelDir ? throw new Error 'createSession: modelDir required'
   modelDir = path.resolve modelDir
   cacheLimitMB = opts.cacheLimitMB ? 512
+
+  # 2026-09-25 — GPU mutex. Blocks if another process (helper LLM, other
+  # pipeline_runner) is holding the Metal claim. Timeout is generous
+  # (10 min) because a legitimate holder — a long storacle generation —
+  # can run several minutes; stale locks get stolen automatically.
+  # opts.gpuClaimTag lets the caller label its wait for diagnostics.
+  await _ensureGpuClaim(opts.gpuClaimTag ? "session_api.#{path.basename modelDir}", opts.gpuClaimTimeoutMs ? 600_000)
 
   # Quantized fallback: recipes pin modelDir to `<repo>-mlx4/` but
   # quantize can fail (Metal GPU timeout on some models). For small

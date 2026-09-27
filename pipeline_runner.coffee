@@ -378,6 +378,14 @@ stripUiDirectives = (node) ->
       return if node.length >= 3 then node[2] else ''
     if directive is 'UI_textarea'
       return if node.length >= 2 then String(node[1] ? '') else ''
+    # 2026-09-22 — UI_number handler was missing; recipes declare
+    # llm.maxTokens/temperature/topP/etc. as [UI_number, <default>]
+    # and the un-stripped array was reaching the model layer as
+    # ['UI_number', 400] where a scalar was required (rendering
+    # generation defaults inert; observed as storacle wedging at
+    # bogus maxTokens interpretation on 4b). node[1] is the default.
+    if directive is 'UI_number'
+      return if node.length >= 2 then Number(node[1] ? 0) else 0
     return node.map (item) -> stripUiDirectives(item)
   if isPlainObject(node)
     out = {}
@@ -895,14 +903,51 @@ class Memo
     args = buildArgs(cmdType, payload)
     console.error "MLX args",args if dbug
     spawnSync = require('child_process').spawnSync
-    res = spawnSync resolvePython(CWD), args, {encoding:'utf8'}
-    console.error "MLX result" ,res if dbug
-    
-    if res.error?
-      throw res.error
-    if res.status isnt 0
-      throw new Error "MLX failed: #{res.stderr ? res.stdout ? "exit #{res.status}"}"
-    res.stdout
+    # 2026-09-25 (puppeteer→mini step 9): claim the GPU mutex around
+    # the Python subprocess. The subprocess is a separate process
+    # (its MLX state isolated), but Metal RAM is shared with any
+    # in-process session_api users; without the claim, an mlx_lm
+    # spawn while the helper LLM is generating (or vice versa) can
+    # blow past GPU RAM and crash. sync path — see session_api for
+    # the async path.
+    gpuClaim = require './mlx/gpu_claim'
+    ticket = null
+    try
+      # Sync claim not available; the mutex is inherently async, but
+      # callMLX is sync-in-legacy. Do a busy-wait via a spawnSync
+      # sleep loop up to 5 minutes. This IS ugly; the right fix is
+      # to make callMLX async downstream. Flagged for follow-up.
+      startedAt = Date.now()
+      deadline  = startedAt + 300_000
+      while true
+        cur = gpuClaim.held_by()
+        alive = cur? and (try process.kill(cur.pid, 0); true catch then false)
+        stale = cur? and (not alive or (Date.now() - (cur.claimed_at ? 0)) > 10*60*1000)
+        canTake = (not cur?) or stale
+        if canTake
+          try
+            require('fs').writeFileSync gpuClaim.LOCK_PATH(),
+              JSON.stringify({pid: process.pid, tag: "callMLX.#{cmdType}", claimed_at: Date.now(), ticket_id: "callmlx-#{Date.now()}-#{Math.random()}"})
+            ticket = require('fs').readFileSync(gpuClaim.LOCK_PATH(), 'utf8')
+            break
+          catch _ then null
+        break if Date.now() > deadline
+        # Small sync sleep — spawnSync 'sleep 0.25' is portable.
+        spawnSync 'sleep', ['0.25']
+      res = spawnSync resolvePython(CWD), args, {encoding:'utf8'}
+      console.error "MLX result" ,res if dbug
+      if res.error?
+        throw res.error
+      if res.status isnt 0
+        throw new Error "MLX failed: #{res.stderr ? res.stdout ? "exit #{res.status}"}"
+      res.stdout
+    finally
+      # Remove the lock file if it still records us as the holder.
+      try
+        cur = gpuClaim.held_by()
+        if cur?.pid is process.pid
+          require('fs').unlinkSync gpuClaim.LOCK_PATH()
+      catch _ then null
 
   callLLM: (params, dbug = false) ->
     console.error "LLM(in-process) #{params.op}", params if dbug

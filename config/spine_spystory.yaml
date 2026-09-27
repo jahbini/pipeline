@@ -1,0 +1,27 @@
+# =====================================================================
+#   spine_spystory.yaml  —  generate a five-beat spy spine
+# =====================================================================
+#   Cover / Contact / Complication / Chase / Catch.
+#   Path A second-pass clause derivation attached.
+#   Output: out/spine_spystory.txt + ~/writer/data/spines/<slug>_spystory.txt
+
+run:
+  output_dir: out
+  data_dir: data
+
+artifacts:
+  spine_text:
+    target: out/spine_spystory.txt
+  spine_meta:
+    target: out/spine_spystory_meta.json
+
+spine_spystory:
+  run: spine/spine.coffee
+  depends_on: []
+  needs: []
+  makes: [spine_text, spine_meta]
+
+  kind: spystory
+  brief:       [ UI_textarea, "" ]
+  constraints: [ UI_textarea, "" ]
+  slug:        [ UI_textarea,    "spine" ]

@@ -1,0 +1,29 @@
+# =====================================================================
+#   spine_voyage.yaml  —  generate a four-act voyage spine
+# =====================================================================
+#   Act I Departure / Act II Passage / Act III Descent / Act IV Return,
+#   four chapters each = 16 chapter-purpose lines total. Path A
+#   second-pass "because X, the protagonist Y" clause attached at act
+#   granularity (not per chapter — 16 clauses is too many).
+#   Output: out/spine_voyage.txt + ~/writer/data/spines/<slug>_voyage.txt
+
+run:
+  output_dir: out
+  data_dir: data
+
+artifacts:
+  spine_text:
+    target: out/spine_voyage.txt
+  spine_meta:
+    target: out/spine_voyage_meta.json
+
+spine_voyage:
+  run: spine/spine.coffee
+  depends_on: []
+  needs: []
+  makes: [spine_text, spine_meta]
+
+  kind: voyage
+  brief:       [ UI_textarea, "" ]
+  constraints: [ UI_textarea, "" ]
+  slug:        [ UI_textarea,    "spine" ]

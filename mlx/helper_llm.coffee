@@ -278,9 +278,14 @@ FEW_SHOT_CLASSIFY_FAILURE = """
 #   4. If that also fails, return {ok:false, raw, error}.
 #
 # See memory: thinking-budget-rescue.
-runCapability = (capabilityName, taskPrompt, opts = {}) ->
+_runCapabilityUnguarded = (capabilityName, taskPrompt, opts = {}) ->
   session   = await getSession()
-  prefill   = thinkPrefillFor[capabilityName] ? ''
+  # 2026-09-23 (approach 2 / turn-prefill at inference). Callers can
+  # now pass an override prefill in opts.thinkPrefill to inject
+  # scenario-specific directive reasoning at the assistant turn head.
+  # Falls back to the static thinkPrefillFor[cap] map otherwise.
+  # See schedule() below for the KAG-aggregated prefill it builds.
+  prefill   = opts.thinkPrefill ? thinkPrefillFor[capabilityName] ? ''
   baseTemp  = opts.temperature ? 0.2
   maxTokens = opts.maxTokens   ? 120
   topP      = opts.topP        ? 0.8
@@ -388,6 +393,27 @@ runCapability = (capabilityName, taskPrompt, opts = {}) ->
           null
 
   { ok: false, raw: rawOut, error: 'model did not return valid JSON', capability: capabilityName }
+
+# 2026-09-25 (step 1 of puppeteer→mini migration): claim the GPU mutex
+# around each helper capability call. Post-migration on the mini, writer
+# pipes and the helper share one Metal device; without this claim they'd
+# overlap and thrash GPU RAM (both are 4B-class ~2.5 GB VRAM). Pre-
+# migration this claim is cheap (usually uncontended) but it validates
+# the design end-to-end. Wrapper around _runCapabilityUnguarded so
+# try/finally guarantees release regardless of which early-return path
+# _runCapabilityUnguarded takes.
+runCapability = (capabilityName, taskPrompt, opts = {}) ->
+  gpuClaim   = require './gpu_claim'
+  timeoutMs  = Number(opts.gpuClaimTimeoutMs ? process.env.GPU_CLAIM_TIMEOUT_MS ? 120_000)
+  ticket     = null
+  try
+    ticket = await gpuClaim.claim { tag: "helper.#{capabilityName}", timeoutMs }
+  catch err
+    return { ok: false, error: "gpu_claim: #{err?.message ? err}" }
+  try
+    await _runCapabilityUnguarded capabilityName, taskPrompt, opts
+  finally
+    gpuClaim.release ticket
 
 # --- CAPABILITY: classify_failure ---------------------------------------
 # Input: raw error text from spawn_log.error_text (or pipe_states.last_failure.error).
@@ -510,10 +536,32 @@ schedule = (scenario, opts = {}) ->
       inputText =
         if typeof ex.input is 'string' then ex.input
         else JSON.stringify(ex.input)
+      # 2026-09-23 — Approach (1) from KAG steering discussion: wrap
+      # each row's expected `reason` in a <think> block between Input
+      # and Output. Qwen3-family models weight <think> content higher
+      # than user-turn text, so the reasoning trace becomes an active
+      # steering signal instead of buried metadata. Directive shape
+      # ("the rule is X because Y") rather than contemplative — see
+      # voice_findings_2026-09-21.md for why contemplative think blocks
+      # cause the model to imitate rumination instead of deciding.
+      #
+      # expected_output shape: {action, target_pipe, target_recipe,
+      #                         confidence, reason}. The reason is what
+      #                         belongs inside <think>; the rest is the
+      #                         Output line the model should learn to
+      #                         emit AFTER thinking.
+      expectedObj =
+        if typeof ex.expected_output is 'string'
+          try JSON.parse(ex.expected_output) catch then null
+        else ex.expected_output
+      reasonText = expectedObj?.reason ? null
       outputText =
         if typeof ex.expected_output is 'string' then ex.expected_output
         else JSON.stringify(ex.expected_output)
-      fewShotBlock += "\n    Input:  #{inputText}\n    Output: #{outputText}\n"
+      if reasonText? and String(reasonText).trim().length
+        fewShotBlock += "\n    Input:  #{inputText}\n    <think>\n    #{String(reasonText).trim()}\n    </think>\n    Output: #{outputText}\n"
+      else
+        fewShotBlock += "\n    Input:  #{inputText}\n    Output: #{outputText}\n"
 
   task = """
     You are a scheduling adviser for a puppeteer that runs LoRA training
@@ -532,7 +580,67 @@ schedule = (scenario, opts = {}) ->
     Input:  #{scenarioText}
     Output:
   """
-  runCapability 'schedule', task, {maxTokens: 1500, temperature: 0.2}
+  # 2026-09-23 — Approach 2 with guards (v2 / third iteration).
+  # v1 (approach 1, `<think>` inside few-shot examples): 3/7 canonicals,
+  #                                                     flat with baseline.
+  # v2 (approach 2, top-K reasons prepended to prefill): 4/7 canonicals,
+  #                                                     but #9 regressed
+  #                                                     from safe-wrong (wait)
+  #                                                     to destructive-wrong
+  #                                                     (reject on a 1.5×
+  #                                                      SAFETY_ABORT that
+  #                                                      should have been
+  #                                                      raise_ceiling).
+  # v3 (this): pair each retrieved case with an EXPLICIT PRECONDITION guard
+  #            so the model can't fire an action whose guard doesn't hold.
+  #            Guards are extracted from the seed corpus's reasoning
+  #            structure (SAFETY_ABORT ratio bands, N-consecutive-crash
+  #            counts, etc.) and are keyed by action name. When a top-K
+  #            row's action has a known guard, that guard renders next to
+  #            the case cue in the prefill.
+  ACTION_GUARDS =
+    reset:         'FIRE ONLY IF: ≥3 consecutive crashes with error_signature="no rows in build/train/train.jsonl" AND no successful reset row between them (empty-sqlite pattern).'
+    hospitalize:   'FIRE ONLY IF: ≥3 consecutive crashes with the SAME non-empty-sqlite signature (Metal timeout, model_loader_attr, etc.) AND a successful reset row exists.'
+    reject:        'FIRE ONLY IF: SAFETY_ABORT with active/ceiling ratio ≥ 2.0 (too_big band), OR pipe_markers.raised_ceiling is already set AND a SAFETY_ABORT still fires.'
+    raise_ceiling: 'FIRE ONLY IF: SAFETY_ABORT with active/ceiling ratio in [1.0, 2.0) (soft-limit band) AND pipe_markers.raised_ceiling is null.'
+    wait:          'FIRE ONLY IF: peer_active_now names a DIFFERENT pipe than target, OR pipe.state is SAT/graduated (auto-transition — do not touch), OR the recipe just succeeded (Rule 8: recent success dominates).'
+    launch:        'FIRE ONLY IF: reset completed successfully AND elementary has not been re-attempted since AND peer is idle. Or: only prior failure was a retriable network error (single occurrence).'
+    graduate:      'FIRE ONLY IF: elementary + training completed successfully AND a storacle probe surfaced repetition_loop_detected=true (small-model overfitting; sampling knobs cannot escape).'
+    escalate:      'FIRE ONLY IF: no other rule\'s guard holds AND signals are novel or contradictory. Escalate names the specific missing rule so the corpus can grow.'
+  runOpts = {maxTokens: 1500, temperature: 0.2}
+  if Array.isArray(examples) and examples.length > 0
+    basePrefill = thinkPrefillFor.schedule ? ''
+    caseLines = []
+    guardsSeen = {}
+    for ex, i in examples[0...5]
+      expectedObj =
+        if typeof ex.expected_output is 'string'
+          try JSON.parse(ex.expected_output) catch then null
+        else ex.expected_output
+      continue unless expectedObj?
+      action = expectedObj.action ? '?'
+      reason = String(expectedObj.reason ? '').replace(/\s+/g, ' ').trim()
+      short  = reason[0...200]
+      caseLines.push "- Case #{i+1} (→ #{action}): #{short}"
+      guardsSeen[action] = true
+    guardLines = []
+    for action of guardsSeen
+      g = ACTION_GUARDS[action]
+      guardLines.push "- #{action}: #{g}" if g
+    if caseLines.length
+      dynamicPrefill = """
+        These past cases are most-similar to the current scenario:
+        #{caseLines.join('\n')}
+
+        Each action has a PRECONDITION GUARD. I do NOT fire an action whose guard fails, no matter how similar a case looks:
+        #{guardLines.join('\n')}
+
+        I match strongest signals in the input against the guards above. First guard that holds is my action. If no guard holds, escalate (naming the missing rule). One JSON line, no prose.
+
+        #{basePrefill}
+      """
+      runOpts.thinkPrefill = dynamicPrefill
+  runCapability 'schedule', task, runOpts
 
 # --- CAPABILITY: grade_role (2026-09-17) --------------------------------
 # Input: one paragraph text + the expected role name (scene|arrival|
@@ -627,6 +735,459 @@ grade_invariants = (letterBody, invariants, opts = {}) ->
   """
   runCapability 'grade_invariants', task, {maxTokens: 800, temperature: 0.15}
 
+# --- CAPABILITY: spine (2026-09-25) -------------------------------------
+# Input:  brief (free-form theme / character / situation) + kind
+#         ∈ {diary, story, spystory, voyage}.
+# Output: {ok, kind, text, meta}. `text` is the raw spine content ready
+#         to write to <spines>/<slug>.txt. This is a FREEFORM capability
+#         (no JSON schema on the reply); the helper generates 500-2500
+#         words of structured spine material given the brief.
+#
+# Why this exists: 2026-09-24 design directive — the helper LLM
+# generates ALL story spines (diary, story, spystory, voyage) so peer
+# pipes stop having to do dual-mode work. Consistency + reliable
+# grading. See `writer/GPT/story/spine_library.md` + morning notes.
+#
+# Each kind has a different STRUCTURAL PREFILL that fixes the required
+# section names and shape. The `brief` is what the human types in the
+# UI — usually 1-3 sentences of character + situation. The helper
+# fills every named section with 2-3 excerpt paragraphs.
+
+SPINE_KINDS = ['diary', 'story', 'spystory', 'voyage']
+
+SPINE_PREFILLS =
+  # 5-part Jim-letter structure — same shape as
+  # ~/writer/data/spines/susannas_song.txt. Sections named
+  # scene / arrival / disturbance / reflection / realization,
+  # each populated with 2-3 excerpt paragraphs written IN
+  # Jim's voice.
+  # 2026-09-25 (Path B): each section header is followed by an inline
+  # <think>emotion directive</think> block that the downstream story-
+  # generation model reads as its own mid-stream reasoning. The
+  # per-section emotion tags are hardcoded — they're intrinsic to
+  # the diary structure, not brief-dependent. Probe on 1.7B (2026-09-25)
+  # confirmed inline think blocks work as beat-level steering at
+  # small-model scale (3.5/4 clear hits on tommy-anger/walk-dread/
+  # organ-grief; walk-dread and organ-grief also showed the think
+  # block PROTECTS the model from repetition loops).
+  diary: """
+    I write a diary-letter spine in the same 5-section shape as the
+    canonical Jim spines. The word "spine" does NOT appear in the
+    output — it is the name of this template, not part of the letter.
+
+    The five named sections in order are:
+      scene         — everyday frame before events land.
+      arrival       — the new thing / news that starts the letter's action.
+      disturbance   — the complication that Jim wants to take about.
+      reflection    — Jim's aside / gossip / philosophy turn.
+      realization   — where the letter ends; what Jim now understands.
+
+    Each of the 5 sections is semantically distinct from the others —
+    reflection and realization are NOT the same thing, and their
+    excerpts do not repeat.
+
+    FORMAT — critical:
+      Line 1: "You are Jim from St. John's, writing to a friend."
+      Line 2: A short (2-3 sentence) framing paragraph naming who / what
+              the letter is about.
+      Then, for each of the 5 sections in order:
+         section-name-lowercase-followed-by-a-colon-on-its-own-line
+         a literal <think>...</think> block on its own line (see below)
+         2 or 3 excerpt paragraphs, each 60-90 words, indented 2 spaces
+      NO numbering. NO bullet points. NO markdown headers or bold.
+
+    INLINE <think> STEERING — each section's think block carries
+    THIS EXACT emotional register:
+      scene       → <think>Register is settled, warmly digressive, unhurried gossip. Jim is comfortable and observational, not yet in motion.</think>
+      arrival     → <think>Register sharpens with curiosity. Jim leans in, still warm but expectant. Something has landed.</think>
+      disturbance → <think>Register is keenly attentive with a wobble underneath. Jim is not upset yet — he is drawn in, sensing there is something worth telling.</think>
+      reflection  → <think>Register is meandering and associative. Jim steps into philosophy or gossip; the letter drifts into the "old man muses" tone.</think>
+      realization → <think>Register is quietly conclusive, humble, a note landed. Jim now sees the small point of the letter; he does not force it.</think>
+
+    Every excerpt is written IN Jim's voice: warm, wry, digressive,
+    gossipy, third-hand. Jim is never inside another character's head.
+    Southwick and Sandy are Jim's usual sources — they can be named as
+    who told him what. Jim NEVER uses "I" to speak as anyone but himself.
+  """
+
+  # Narrative-story structure — for shortform fiction whose peer pipe
+  # generates as one continuous story. 5 acts, each with 2-3 seed
+  # paragraphs illustrating tone.
+  story: """
+    I write a story spine in 5 acts:
+      setup         — establishes the character and their normal world.
+      complication  — the disruption / stakes emerge.
+      escalation    — pressure mounts; earlier choices harden.
+      climax        — the moment of decision or confrontation.
+      resolution    — how the character stands after the choice.
+    Each act carries 2-3 short seed paragraphs (3-4 sentences each) written
+    in the intended voice + register. The seeds are ORIENTATION — the peer
+    pipe reads them to decide how the finished story sounds, so they hold
+    tone, cadence, vocabulary, but do NOT hold the plot beat-for-beat.
+    Section headers on their own line ending with a colon. No numbering.
+  """
+
+  # Spy-adventure structure — 5 acts oriented around a mission.
+  spystory: """
+    I write a spy-adventure spine in 5 acts:
+      cover         — the operative's cover identity + the mission brief.
+      contact       — the first meeting with an asset / mark / adversary.
+      complication  — the plan begins to fail; something the operative did not expect.
+      chase         — the physical/technical/social pursuit; kinetic beat.
+      catch         — the resolution — extraction, capture, betrayal, or twist.
+    Each act carries 2-3 short seed paragraphs (3-4 sentences each) that
+    hold the operational tone, terse dialogue register, and physicality
+    a spy story needs. Section headers on their own line ending with a
+    colon. No numbering.
+  """
+
+  # Voyage / Celarien multi-chapter arc — a whole novel-length spine
+  # expressed as chapter_purpose lines. Structured as acts×chapters.
+  # Matches CELARIEN.md's 4-act × 4-chapter default (16 chapters).
+  voyage: """
+    I write a voyage spine as a 4-act × 4-chapter arc (16 chapter_purpose
+    lines total). Each line is ONE crisp declarative sentence that names
+    what the chapter must accomplish (character revelation, world reveal,
+    beat landed, tone shift). No plot spoilers past the chapter itself.
+    The 4 acts are named:
+      Act I  — Departure   (chapters 1-4:   world-setup + inciting event)
+      Act II — Passage     (chapters 5-8:   trials that reshape the traveler)
+      Act III— Descent     (chapters 9-12:  crisis / lowest point)
+      Act IV — Return      (chapters 13-16: transformation + homecoming)
+    Structure: one line reading `## Act I — Departure`, then four lines
+    reading `chapter_purpose: <one sentence>`. Repeat for each act.
+    No numbering on chapters; the position under an act header is the
+    chapter number. Sentences average 15-25 words. Vocabulary stays
+    consistent with the brief's setting.
+  """
+
+# 2026-09-25 — Freeform variant of runCapability (no JSON schema).
+# The spine capability generates 500-2500 words of structured text
+# and doesn't want the runCapability's JSON-rescue machinery. Same
+# GPU-claim guarantees, same session, plain text return.
+_runFreeformUnguarded = (capabilityName, taskPrompt, opts = {}) ->
+  session   = await getSession()
+  prefill   = opts.thinkPrefill ? thinkPrefillFor[capabilityName] ? ''
+  maxTokens = opts.maxTokens ? 2500
+  temp      = opts.temperature ? 0.55
+  topP      = opts.topP ? 0.9
+  result = await session.generate buildChatML(taskPrompt),
+    maxTokens:    maxTokens
+    temperature:  temp
+    topP:         topP
+    raw:          true
+    no_thinking:  true
+    thinkPrefill: prefill
+  stripThink String(result.text ? '')
+
+runFreeform = (capabilityName, taskPrompt, opts = {}) ->
+  gpuClaim  = require './gpu_claim'
+  timeoutMs = Number(opts.gpuClaimTimeoutMs ? process.env.GPU_CLAIM_TIMEOUT_MS ? 120_000)
+  ticket    = null
+  try
+    ticket = await gpuClaim.claim { tag: "helper.#{capabilityName}", timeoutMs }
+  catch err
+    return { ok: false, error: "gpu_claim: #{err?.message ? err}" }
+  try
+    text = await _runFreeformUnguarded capabilityName, taskPrompt, opts
+    { ok: true, capability: capabilityName, text: String(text ? '').trim() }
+  finally
+    gpuClaim.release ticket
+
+# Register the diary/story/spystory/voyage prefills under a single
+# `spine` capability so the mutex tag is uniform. Kind-specific text
+# lives in SPINE_PREFILLS; the runtime prefill is picked per call.
+thinkPrefillFor.spine = ''  # dynamically filled by spine()
+
+# --- Post-processor: diary <think> injection (Path A, 2026-09-25) --------
+# Chat-tuned Qwen won't emit literal <think>...</think> in output when
+# instructed to (it's a reserved metadata token). Solution: harness
+# injects them deterministically after generation. Emotions are
+# intrinsic to the section role — same for every diary — so this
+# is a fixed table, not a per-brief computation.
+#
+# Downstream storacle / voice_test reads a spine that HAS real <think>
+# blocks; the model treats each as its own mid-stream reasoning when
+# generating the actual story text. Beat-level steering that survives
+# from spine to story (evidence: think_steer_probe 3.5/4 on 1.7B).
+DIARY_SECTION_EMOTIONS =
+  scene:       "Register is settled, warmly digressive, unhurried gossip. Jim is comfortable and observational, not yet in motion."
+  arrival:     "Register sharpens with curiosity. Jim leans in, still warm but expectant. Something has landed."
+  disturbance: "Register is keenly attentive with a wobble underneath. Jim is not upset yet — he is drawn in, sensing there is something worth telling."
+  reflection:  "Register is meandering and associative. Jim steps into philosophy or gossip; the letter drifts into the 'old man muses' tone."
+  realization: "Register is quietly conclusive, humble, a note landed. Jim now sees the small point of the letter; he does not force it."
+
+DIARY_SECTIONS = ['scene', 'arrival', 'disturbance', 'reflection', 'realization']
+
+# 2026-09-25: extend Path A to story/spystory/voyage. Section names
+# match the beat labels the SPINE_PREFILLS instruct the model to
+# emit. Voyage clauses are per-Act (4 total), not per-chapter (16
+# would be too many; per-Act is where the emotional arc lives).
+SPINE_SECTION_NAMES =
+  diary:    DIARY_SECTIONS
+  story:    ['setup', 'complication', 'escalation', 'climax', 'resolution']
+  spystory: ['cover', 'contact', 'complication', 'chase', 'catch']
+  voyage:   ['departure', 'passage', 'descent', 'return']
+
+# Injects <think>emotion</think> on its own line immediately after each
+# section header. Recognizes headers that appear as a bare word or with
+# a trailing colon, in any case, allowing for trailing whitespace.
+# Only injects for sections in DIARY_SECTIONS. Never double-injects.
+# Second-pass generation of per-section "observation → affect" clauses.
+# 2026-09-25: fixed emotion table produced valid steering but no story
+# hook — the clause said HOW Jim felt but not WHY, so downstream
+# storacle got a mood without an anchor. Solution: after the diary
+# body is written, ask the helper for one short clause per section
+# grounded in what actually happens in that section. Fallback to the
+# fixed table if the second pass returns garbage or is missing rows.
+# Kept as its own function for two reasons: (a) called from spine()
+# once per diary generation; (b) easy to swap for option 2 (inline
+# emit) later without touching the injector's regex.
+# Reject markers for clauses that drifted into poetry. 4B-Instruct
+# defaults to soft-writer flourishes ("like a bell in a stone church",
+# "as if the room had been holding its breath") — those defeat the
+# whole point of a mid-stream steering directive, which is a plain
+# factual anchor. A clause containing any of these substrings gets
+# rejected and the derive step retries.
+POETIC_MARKERS = [
+  ' like a '
+  ' like an '
+  ' like the '
+  ' as if '
+  ' as though '
+  ' — a '   # em-dash "— a signal" pattern
+  ' – a '   # en-dash variant
+  ' as a '
+  ' as an '
+]
+isPoeticClause = (clause) ->
+  return false unless clause?.length
+  lc = ' ' + String(clause).toLowerCase() + ' '
+  for marker in POETIC_MARKERS
+    return true if lc.indexOf(marker) isnt -1
+  false
+
+deriveSpineThinkClauses = (kind, spineText, brief) ->
+  return {} unless spineText?.length
+  sections = SPINE_SECTION_NAMES[kind]
+  return {} unless sections?.length
+  who = switch kind
+    when 'diary' then 'Jim'
+    else              'the protagonist'
+  sectionList = sections.join(' / ')
+  exampleLines = sections.map((s) -> "      #{s}: because ..., #{who} ...").join('\n')
+  clausePrompt = """
+    You are producing INTERNAL steering directives for a downstream
+    story generator. These are not prose. They are anchors.
+
+    HARD RULES (violation = failure):
+      1. NO similes. Do not write "like a X", "like an X", "like the X",
+         "as if", "as though", "as a X".
+      2. NO metaphors. Do not compare one thing to another. Do not
+         say a thing "was" something it is not literally.
+      3. NO em-dash asides, no "— a signal", no semicolons.
+      4. BOTH halves of the clause — the observation AND the affect —
+         must be plain factual language. Name concrete nouns and
+         events already present in the section text.
+      5. Short. If you cannot say it plainly, use fewer words.
+
+    Below is a #{sections.length}-section #{kind} spine. For each
+    section, produce ONE short clause of the form:
+
+      because <one specific observation from THAT section>, #{who} <affect>
+
+    The affect is a plain verb-phrase: feels uneasy / grows tender /
+    gets curious / drifts into memory / lands quietly / hardens /
+    hesitates / relaxes / sharpens / softens.
+
+    EXAMPLES (good):
+      scene: because Southwick has a beer and no place to be, Jim relaxes
+      arrival: because the daughter says the organ played at 3am, Jim sharpens
+    EXAMPLES (BAD — do not do this):
+      scene: because the pipes were like old bones in the dark, Jim feels uneasy
+      arrival: because the room hushed — a bell in a cave — Jim listens
+
+    Output EXACTLY #{sections.length} lines, no blank lines, in
+    this exact order, each prefixed with the section name (#{sectionList})
+    and a colon:
+
+#{exampleLines}
+
+    Spine:
+    #{spineText}
+  """
+  # Retry loop: if any clause reads poetic (matches POETIC_MARKERS),
+  # regenerate. Cap at 3 attempts. Keep whichever attempt was cleanest.
+  altRe = new RegExp "^\\s*(#{sections.join('|')})\\s*:\\s*(.+?)\\s*$", 'i'
+  bestClauses = {}
+  bestBadCount = Infinity
+  for attempt in [1, 2, 3]
+    result = await runFreeform "spine.#{kind}.think_clauses", clausePrompt,
+      thinkPrefill: ''
+      maxTokens:    500
+      temperature:  0.35 + 0.1 * (attempt - 1)  # nudge sampling on retries
+      topP:         0.9
+    unless result?.ok
+      continue
+    clauses = {}
+    for line in String(result.text ? '').split('\n')
+      m = altRe.exec line
+      continue unless m?
+      clauses[m[1].toLowerCase()] = m[2].trim()
+    badCount = 0
+    badCount += 1 for own _, c of clauses when isPoeticClause(c)
+    if badCount < bestBadCount
+      bestClauses = clauses
+      bestBadCount = badCount
+    break if badCount is 0
+  # Strip any surviving poetic clauses so the injector falls back to
+  # the fixed affect table for those sections. Better a bland "attentive"
+  # than a nonsense simile in a steering directive.
+  for own section, clause of bestClauses when isPoeticClause(clause)
+    console.warn "[spine.#{kind}.think_clauses] dropped poetic clause for '#{section}': #{clause}"
+    delete bestClauses[section]
+  bestClauses
+
+# Back-compat wrapper for diary-only callers.
+deriveDiaryThinkClauses = (diaryText, brief) ->
+  deriveSpineThinkClauses 'diary', diaryText, brief
+
+injectSpineThinkBlocks = (kind, text, overrides) ->
+  return '' unless text?.length
+  overrides ?= {}
+  sections = SPINE_SECTION_NAMES[kind]
+  return String(text) unless sections?.length
+  lines = String(text).split '\n'
+  out = []
+  # Match a section name as a bare word or with trailing colon, in any
+  # case. For voyage the model writes "## Act I — Departure" style
+  # headers — the alternation includes the beat name (Departure etc.)
+  # so we anchor on THAT, not the roman numeral, which the model has
+  # been observed to typo (Act D — Return).
+  altPat = sections.join('|')
+  # Voyage headers are markdown "## Act I — Departure" — require the
+  # `## Act <num> — ` prefix so the section word alone in body text
+  # (e.g. "Passage" mentioned in prose) doesn't get falsely matched.
+  # Diary / story / spystory use bare `SectionName:` headers.
+  headerRe = if kind is 'voyage'
+    new RegExp "^(\\s*)#+\\s*Act\\s+\\S+\\s*[—-]\\s*(#{altPat})\\s*(:?)\\s*(.*)$", 'i'
+  else
+    new RegExp "^(\\s*)(#{altPat})\\s*(:?)\\s*(.*)$", 'i'
+  i = 0
+  while i < lines.length
+    line = lines[i]
+    m = headerRe.exec line
+    unless m?
+      out.push line
+      i += 1
+      continue
+    indent  = m[1] ? ''
+    section = m[2].toLowerCase()
+    colon   = m[3] ? ''
+    rest    = (m[4] ? '').trim()
+    # Overrides win when the second-pass derivation produced a clause
+    # for this section; otherwise fall back to the diary affect table
+    # (only defined for diary — other kinds emit a generic placeholder
+    # if the second-pass parse missed a section).
+    fallback = DIARY_SECTION_EMOTIONS[section] ? "attentive"
+    emotion = overrides[section] ? fallback
+    # Header goes on its own line so the <think> block sits between
+    # header and content — that's the shape the downstream steering
+    # relies on. Preserve the ORIGINAL header shape (e.g.
+    # `## Act I — Departure` for voyage) by keeping the line prefix
+    # up to where inline content starts. If content is inline, split
+    # it off; otherwise keep the header line intact.
+    headerLine = if rest.length then line.slice(0, line.length - rest.length).replace(/\s+$/, '') else line
+    out.push headerLine
+    # Peek ahead for existing <think> so re-processing is idempotent.
+    hasInlineThink = rest.length and /^<think>/i.test(rest)
+    if hasInlineThink
+      out.push rest if rest.length
+    else
+      j = i + 1
+      j += 1 while j < lines.length and lines[j].trim().length is 0
+      hasNextThink = j < lines.length and /^\s*<think>/i.test(lines[j])
+      unless hasNextThink
+        out.push "<think>#{emotion}</think>"
+      out.push rest if rest.length
+    i += 1
+  out.join '\n'
+
+spine = (brief, kind, opts = {}) ->
+  return { ok: false, error: "spine kind must be one of: #{SPINE_KINDS.join(', ')}" } unless kind in SPINE_KINDS
+  return { ok: false, error: 'spine brief required (1-3 sentences describing character + situation)' } unless brief? and String(brief).trim().length
+  brief = String(brief).trim()
+
+  # Extra caller-supplied constraints (character name, setting era, etc.)
+  extra = String(opts.constraints ? '').trim()
+
+  # Prefill is the structural directive for this kind.
+  prefill = SPINE_PREFILLS[kind]
+
+  taskPrompt = """
+    Generate a #{kind} spine following the structural rules in my think
+    block. Nothing outside the sections — no title, no meta commentary.
+    Output ONLY the spine content as it will be written to
+    `#{kind}.txt`. Section headers use the exact names from the rules.
+
+    Brief:
+    #{brief}
+    #{if extra.length then "\n    Additional constraints:\n    #{extra}" else ''}
+
+    Spine:
+  """
+
+  # Spines vary in length by kind — diary is ~1200 words of excerpts,
+  # voyage is ~400 words of chapter-purpose lines. Give voyage more
+  # temperature (variety across 16 lines) and diary more room.
+  runOpts =
+    thinkPrefill: prefill
+    maxTokens: switch kind
+      when 'diary'    then 3000
+      when 'story'    then 2400
+      when 'spystory' then 2400
+      when 'voyage'   then 1200
+    temperature: switch kind
+      when 'voyage' then 0.7
+      else               0.55
+    topP: 0.9
+
+  result = await runFreeform "spine.#{kind}", taskPrompt, runOpts
+  return result unless result.ok
+
+  # Post-process: for diary, inject inline <think>emotion</think>
+  # blocks after each section header (Path A, 2026-09-25). Model
+  # writes CONTENT; harness writes STEERING. Other kinds pass through
+  # unchanged for now — spystory / story may get similar treatment
+  # in a follow-up once we prove the diary lifecycle end-to-end.
+  processed = result.text
+  postProcessed = false
+  thinkClauses = null
+  if SPINE_SECTION_NAMES[kind]?
+    # Second pass: derive per-section "because X, <who> Y" clauses
+    # from the just-generated spine body. Falls back silently for any
+    # section the model didn't emit cleanly.
+    thinkClauses = await deriveSpineThinkClauses kind, result.text, brief
+    processed = injectSpineThinkBlocks kind, result.text, thinkClauses
+    postProcessed = processed isnt result.text
+
+  {
+    ok:       true
+    kind:     kind
+    text:     processed
+    meta:
+      brief:            brief
+      constraints:      extra
+      generated_at:     new Date().toISOString()
+      model_dir:        process.env.HELPER_LLM_MODEL_DIR ? DEFAULT_MODEL_DIR
+      adapter_path:     DEFAULT_ADAPTER_PATH
+      char_count:       processed.length
+      raw_char_count:   result.text.length
+      post_processed:   postProcessed
+      think_clauses:    thinkClauses
+      capability:       "spine.#{kind}"
+  }
+
 # --- exports -------------------------------------------------------------
 module.exports = {
   classify_failure
@@ -634,6 +1195,9 @@ module.exports = {
   schedule
   grade_role
   grade_invariants
+  spine
+  SPINE_KINDS
+  SPINE_PREFILLS
   dispose
   # Escape hatch for future capabilities and for tests that want to hold
   # the session across many calls.

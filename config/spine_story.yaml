@@ -1,0 +1,27 @@
+# =====================================================================
+#   spine_story.yaml  —  generate a five-beat story spine
+# =====================================================================
+#   Setup / Complication / Escalation / Climax / Resolution.
+#   Path A second-pass clause derivation attached.
+#   Output: out/spine_story.txt + ~/writer/data/spines/<slug>_story.txt
+
+run:
+  output_dir: out
+  data_dir: data
+
+artifacts:
+  spine_text:
+    target: out/spine_story.txt
+  spine_meta:
+    target: out/spine_story_meta.json
+
+spine_story:
+  run: spine/spine.coffee
+  depends_on: []
+  needs: []
+  makes: [spine_text, spine_meta]
+
+  kind: story
+  brief:       [ UI_textarea, "" ]
+  constraints: [ UI_textarea, "" ]
+  slug:        [ UI_textarea,    "spine" ]

@@ -28,9 +28,13 @@ getSession = (modelDir, opts = {}) ->
   key = "#{resolved}::#{adapterKey}"
   cached = sessions.get key
   return cached if cached?
-  session = createSession Object.assign({modelDir: resolved}, opts)
-  sessions.set key, session
-  session
+  # 2026-09-25 — createSession is async now (awaits the GPU claim
+  # mutex before touching Metal). Cache the Promise itself so
+  # concurrent callers to getSession serialize on the same eventual
+  # session rather than each creating a separate racing one.
+  sessionPromise = createSession Object.assign({modelDir: resolved}, opts)
+  sessions.set key, sessionPromise
+  sessionPromise
 
 # --- per-op handlers -------------------------------------------------------
 # All handlers take the full params dict and return whatever their underlying
@@ -43,7 +47,7 @@ generateOp = (params) ->
   sessionOpts = {}
   sessionOpts.adapterPath = params.adapterPath if params.adapterPath?
 
-  session = getSession params.modelDir, sessionOpts
+  session = await getSession params.modelDir, sessionOpts
 
   await session.generate params.prompt,
     maxTokens:    params.maxTokens    ? 512
@@ -94,7 +98,7 @@ embedOp = (params) ->
   sessionOpts = {}
   sessionOpts.adapterPath = params.adapterPath if params.adapterPath?
 
-  session = getSession params.modelDir, sessionOpts
+  session = await getSession params.modelDir, sessionOpts
 
   await session.embed params.prompt,
     systemPrompt: params.systemPrompt ? null

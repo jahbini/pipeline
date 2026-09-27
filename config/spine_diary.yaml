@@ -1,0 +1,36 @@
+# =====================================================================
+#   spine_diary.yaml  —  generate a five-section Jim diary spine
+# =====================================================================
+#   Calls helper_llm.spine(brief, 'diary', {constraints}) with the
+#   second-pass "because X, Jim Y" clause derivation enabled. Output
+#   lands in out/spine_diary.txt AND ~/writer/data/spines/<slug>_diary.txt
+#   so downstream storacle/voice_test can find it.
+#
+#   To run:
+#     - In puppeteer UI, switch to the `spines` pipe.
+#     - Select this recipe.
+#     - Fill `brief` (1-3 sentences).
+#     - Optionally fill `constraints` (voice, POV, era).
+#     - Set `slug` (filename prefix, kebab-case).
+#     - Kick the run; watch pipes/spines/out/spine_diary.txt.
+
+run:
+  output_dir: out
+  data_dir: data
+
+artifacts:
+  spine_text:
+    target: out/spine_diary.txt
+  spine_meta:
+    target: out/spine_diary_meta.json
+
+spine_diary:
+  run: spine/spine.coffee
+  depends_on: []
+  needs: []
+  makes: [spine_text, spine_meta]
+
+  kind: diary
+  brief:       [ UI_textarea, "" ]
+  constraints: [ UI_textarea, "" ]
+  slug:        [ UI_textarea,    "spine" ]
