@@ -698,10 +698,19 @@ class StepStateStore
     true
 
   markRunning: (n) ->
+    # 2026-09-28 — stamp the runner's PID into every running-step
+    # ledger. When the runner dies without cleaning up (SIGKILL, OOM,
+    # power loss), the UI can detect a stale `running` file by
+    # cross-checking `pid` with `process.kill(pid, 0)` and re-write
+    # it as `died` so the graph, ledger, and Peer Session History
+    # stop lying. host is captured too so cross-machine peer reads
+    # know the pid is on the peer, not the puppeteer.
     @write n,
       status: 'running'
       done: false
       started_at: new Date().toISOString()
+      pid: process.pid
+      host: (try require('os').hostname() catch then null)
 
   # Preserve started_at from the running state and record duration_ms so the UI
   # keeps the elapsed time after a step finishes/fails (write() replaces the
@@ -1018,11 +1027,40 @@ sees, not what the recipe says).
 substituteBraces = (value) ->
   return value if value is null or value is undefined
   if typeof value is 'string'
-    return value.replace /\{(BASE|EXEC|CWD)\}/g, (_, name) ->
+    v = value.replace /\{(BASE|EXEC|CWD)\}/g, (_, name) ->
       switch name
         when 'BASE' then BASE
         when 'EXEC' then EXEC
         when 'CWD'  then CWD
+    # 2026-09-29 — glob-resolve /Volumes/<pattern>*/... paths at read
+    # time so recipes can reference macOS volumes whose names flap
+    # (e.g., the mini's `bigbig` ↔ `bigbig 1`) via a stable pattern.
+    # Author `/Volumes/bigbig*/models/...` in the recipe; the runner
+    # substitutes whichever `/Volumes/bigbig*` is currently mounted
+    # AND contains the requested subpath. Only fires if the volume
+    # segment (position 2) contains a `*`.
+    if /^\/Volumes\/[^\/]*\*/.test(v)
+      parts = v.split '/'
+      volPattern = parts[2]
+      restPath   = parts.slice(3).join '/'
+      try
+        reStr = '^' + volPattern.replace(/\*/g, '[^/]*') + '$'
+        re    = new RegExp reStr
+        matches = (name for name in fs.readdirSync('/Volumes') when re.test(name))
+      catch
+        matches = []
+      resolved = null
+      for name in matches
+        candidate = "/Volumes/#{name}/#{restPath}"
+        if fs.existsSync candidate
+          resolved = candidate
+          break
+      # Fallback: no candidate exists on disk yet — use the first
+      # matching volume so the path is at least syntactically valid
+      # (a downstream mkdirSync may still create it).
+      resolved ?= "/Volumes/#{matches[0]}/#{restPath}" if matches.length > 0
+      v = resolved ? v
+    return v
   if Array.isArray(value)
     return (substituteBraces(v) for v in value)
   if typeof value is 'object'
@@ -1994,6 +2032,30 @@ main = ->
   S = new StepStateStore path.join(CWD,'state')
   U = createUiRecorder M, path.join(CWD,'state')
   U.reset()
+
+  # 2026-09-28 — best-effort reap on process exit. Any step whose
+  # ledger still says `running` when the runner dies gets flipped to
+  # `died` so the UI doesn't show stale RUNNING forever. This handler
+  # doesn't fire on SIGKILL / OOM — for those the reap-on-read logic
+  # in the ui_server picks up the slack via the `pid` field.
+  process.on 'exit', ->
+    try
+      stateDir = path.join(CWD, 'state')
+      return unless fs.existsSync(stateDir)
+      for name in fs.readdirSync(stateDir) when name.startsWith('step-') and name.endsWith('.json')
+        p = path.join(stateDir, name)
+        try
+          st = JSON.parse(fs.readFileSync(p, 'utf8'))
+        catch
+          continue
+        continue unless st?.status is 'running'
+        st.status = 'died'
+        st.finished_at = new Date().toISOString()
+        st.reason = 'runner process exit'
+        try fs.writeFileSync(p, JSON.stringify(st, null, 2), 'utf8')
+    catch e
+      # exit handler failure is not fatal; nothing to log to at this point
+      null
 
   M.saveThis "env/EXEC", EXEC
   M.saveThis "env/CWD",  CWD

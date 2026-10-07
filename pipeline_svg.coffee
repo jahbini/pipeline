@@ -20,10 +20,30 @@ yaml = require 'js-yaml'
 RESERVED = ['run', 'artifacts', 'pipeline']
 
 # ---------- graph model ----------
+# 2026-09-28 — implicit file inputs.
+# Steps often reference data/params/override files by path via step
+# params (e.g., `library_file: data/jim_story_library.yaml`, and the
+# `source_path` half of `UI_dropdown` entries like
+# `data/jim_story_library.yaml/library/scenes`). These are real
+# inputs but not declared in the recipe's `artifacts:` block, so
+# the graph missed them. Walk each step's raw params, extract any
+# string that looks like a relative file path pointing at data/,
+# params/, or override/, and add an implicit source-only artifact.
+IMPLICIT_INPUT_RE = /^((?:data|params|override)\/[^\/\s"'`\[\]]+\.(?:yaml|yml|txt|json|jsonl|md|csv|tsv|jsonl\.gz|yaml\.gz))(?:\/|$)/
+walkForImplicitInputs = (val, hits) ->
+  if typeof val is 'string'
+    m = val.match IMPLICIT_INPUT_RE
+    hits.add m[1] if m?
+  else if Array.isArray val
+    walkForImplicitInputs item, hits for item in val
+  else if val? and typeof val is 'object'
+    walkForImplicitInputs v, hits for own _, v of val
+  return
+
 buildGraph = (doc) ->
   artifacts = {}
   for name, spec of (doc.artifacts ? {})
-    artifacts[name] = {name, target: spec?.target ? '', producers: [], consumers: []}
+    artifacts[name] = {name, target: spec?.target ? '', producers: [], consumers: [], implicit: false}
   scripts = {}
   for k, v of doc when k not in RESERVED and v?.run?
     scripts[k] = {
@@ -40,6 +60,22 @@ buildGraph = (doc) ->
       artifacts[a].producers.push name
     for a in s.needs when artifacts[a]?
       artifacts[a].consumers.push name
+  # Add implicit file inputs discovered in step params. These become
+  # source-only artifacts (no producers) whose "target" is the path
+  # itself, so the UI can still fetch and display the file.
+  for name, s of scripts
+    hits = new Set()
+    # Skip a few well-known param keys that carry paths but aren't
+    # data inputs (e.g., `run` names the step script itself).
+    for own key, val of s.raw when key not in ['run', 'quantized_model_dir', 'adapter_path', 'adapter_dir', 'grader_model_dir']
+      walkForImplicitInputs val, hits
+    for filePath from hits
+      unless artifacts[filePath]?
+        artifacts[filePath] = {name: filePath, target: filePath, producers: [], consumers: [], implicit: true}
+      unless s.name in artifacts[filePath].consumers
+        artifacts[filePath].consumers.push s.name
+      unless filePath in s.needs
+        s.needs.push filePath
   {scripts, artifacts}
 
 # ---------- layered layout ----------
@@ -194,6 +230,9 @@ artifactNode = (a, pos) ->
   cls = ['node', 'artifact']
   cls.push 'terminal' if a.consumers.length == 0 and a.producers.length > 0
   cls.push 'source'   if a.producers.length == 0
+  # 2026-09-28 — implicit inputs (discovered by param-path scan) get
+  # their own class so the UI can style them (dashed border, etc.).
+  cls.push 'implicit' if a.implicit
   title = esc [a.name, a.target].filter(Boolean).join('\n')
   labelY = pos.y - ART_R - 6
   targetAttr = if a.target then " data-target=\"#{esc a.target}\"" else ''
@@ -238,6 +277,13 @@ STYLE = """
   .pipeline-svg .node.artifact .node-bg { fill: none; stroke: #a89a70; stroke-width: 2; }
   .pipeline-svg .node.artifact.terminal .node-bg { stroke: #c04040; stroke-width: 2.5; }
   .pipeline-svg .node.artifact.source   .node-bg { fill: #cfe8b8; stroke: #4a7a4a; stroke-width: 2.5; }
+  /* 2026-09-28 — implicit source inputs (found by param-path scan;
+     not declared in the recipe's `artifacts:` block). Dashed border
+     signals "the runner reads this but the graph inferred it, not
+     declared". Solid green fill keeps it visually a "source". */
+  .pipeline-svg .node.artifact.source.implicit .node-bg {
+    fill: #cfe8b8; stroke: #4a7a4a; stroke-width: 2; stroke-dasharray: 4 2;
+  }
 
   /* ─── Artifact existence — HOLLOW = empty, SOLID = full ───────────
      produced = file produced (or refreshed) by a step in THIS run   → black
