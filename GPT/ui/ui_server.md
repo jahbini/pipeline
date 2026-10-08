@@ -1,5 +1,12 @@
 Area: `ui_server.coffee` + `ui/index.html`
 
+**2026-10-08 cutover**: `pipeline/ui_server.coffee` is now the ONLY
+ui_server. Puppeteer and writer no longer ship their own; they ship a
+`ui/puppet.coffee` plugin that the library auto-loads. See
+`[[plugin_system]]` for the plugin contract and `[[ipc]]` for the
+broker/memo modules the UI falls back on when the runner is down.
+This document covers behavior shared by all project launches.
+
 Purpose:
 - provide the pipe-local UI for selecting recipes, editing overrides, launching runs, and inspecting outputs/logs
 

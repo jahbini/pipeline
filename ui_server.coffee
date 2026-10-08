@@ -6,8 +6,79 @@ yaml = require 'js-yaml'
 { spawn } = require 'child_process'
 { DatabaseSync } = require 'node:sqlite'
 
+# ── IPC: subscribe to runner broker when available ───────────────
+# When the runner is new enough to publish state/step/event topics,
+# /api/status serves from the in-memory cache instead of re-reading
+# ui-run.json / step-*.json / ui-events.jsonl on every request. If
+# the socket isn't there (older runner), the cache stays empty and
+# every helper falls back to disk — behaviour-preserving.
+ipcStatus = null
+try
+  {StatusSource} = require './ipc/status_source'
+  ipcStatus = new StatusSource()
+  ipcStatus.start()
+catch err
+  console.error "[ui_server] ipc disabled: #{err?.message ? err}" if process.env.IPC_DEBUG
+
+# ── Project plugin (puppeteer/writer-specific overlay) ───────────
+# A project may ship `ui/project.coffee` to add routes, override the
+# default port, or run a pre-startup hook (e.g. puppeteer's sticky
+# `state/current_pipe.txt` chdir) before CWD is captured. The plugin
+# module exports:
+#   { preStartup?:   -> void          # runs here (before CWD capture)
+#     portDefault?:  number           # overrides 4311 when UI_PORT unset
+#     init?:         (ctx) -> {routes, augmentStatus?}
+#   }
+# Routes are {method, path | pathPrefix, handler(req,res,ctx)}.
+# init() returns {routes[], augmentStatus?}. augmentStatus(status) is
+# awaited inside /api/status to inject project-specific fields (eager
+# panel data, extra flags). The request dispatcher consults plugin
+# routes BEFORE any built-in route so a plugin can shadow a library
+# endpoint (puppeteer's /api/switch_pipe does this).
+# See pipeline/GPT/ui/plugin_system.md for the full contract.
+# Plugin resolution: walk up from process.cwd() looking for `ui/project.coffee`.
+# This handles the switch_pipe case — launchd/switch respawn the server
+# with CWD = pipes/<name>, but the plugin lives at the project root
+# (~/puppeteer or ~/writer), two levels up. Stop at $HOME or filesystem
+# root so we never accidentally pick up a stranger's plugin.
+_resolvePluginPath = ->
+  home = process.env.HOME ? ''
+  dir  = process.cwd()
+  seen = 0
+  loop
+    candidate = path.join(dir, 'ui', 'project.coffee')
+    return candidate if fs.existsSync(candidate)
+    parent = path.dirname(dir)
+    break if parent is dir
+    break if home.length and dir is home
+    seen += 1
+    break if seen > 8
+    dir = parent
+  null
+_pluginPath = _resolvePluginPath()
+# Project root hint: when the plugin was found by walking up, its parent
+# dir IS the project root (e.g. ~/puppeteer, ~/writer). BASE_ROOT below
+# uses this as a fallback when the npm `node_modules/@jahbini/pipeline`
+# path heuristic doesn't apply (direct `coffee ~/pipeline/ui_server.coffee`
+# launches). Without this, PIPES_ROOT points at ~/pipeline/pipes which
+# doesn't exist, and the Switch-Pipe dropdown comes up empty.
+_pluginProjectRoot = if _pluginPath then path.dirname(path.dirname(_pluginPath)) else null
+_plugin = null
+if _pluginPath
+  try
+    require('coffeescript/register') unless /\.coffee$/.test(require.main?.filename ? '')
+  catch
+    null
+  try
+    _plugin = require(_pluginPath)
+    try _plugin?.preStartup?()
+    catch err then console.error "[ui_server] project plugin preStartup: #{err?.message ? err}"
+  catch err
+    console.error "[ui_server] project plugin failed to load: #{err?.message ? err}"
+    _plugin = null
+
 CWD = process.env.CWD ? process.cwd()
-PORT = Number(process.env.UI_PORT ? 4311)
+PORT = Number(process.env.UI_PORT ? _plugin?.portDefault ? 4311)
 UI_BIND_MODE = String(process.env.UI_BIND_MODE ? (if process.argv[2] is 'net' then 'net' else 'local'))
 HOST = if UI_BIND_MODE is 'net' then '0.0.0.0' else '127.0.0.1'
 repeatLoop =
@@ -99,7 +170,12 @@ EXEC_ROOT = resolveExecRoot()
 BASE_ROOT = do ->
   marker = "#{path.sep}node_modules#{path.sep}"
   idx = EXEC_ROOT.indexOf(marker)
-  if idx isnt -1 then EXEC_ROOT.slice(0, idx) else EXEC_ROOT
+  return EXEC_ROOT.slice(0, idx) if idx isnt -1
+  # Direct-invocation case (coffee ~/pipeline/ui_server.coffee from a
+  # project root): prefer the project-root hint the plugin walk-up found.
+  # Falls back to EXEC_ROOT (monolith) only when no project plugin exists.
+  return _pluginProjectRoot if _pluginProjectRoot
+  EXEC_ROOT
 
 # Recipe config resolution (mirrors pipeline_runner.resolveConfigPath): project-
 # shared `<BASE_ROOT>/config/<name>.yaml` shadows bundled `<EXEC_ROOT>/config/`.
@@ -1060,7 +1136,13 @@ collectLogFiles = (run) ->
   rows
 
 buildStatus = ->
-  run = normalizeUiRun readJson path.join(CWD, 'state', 'ui-run.json'), {}
+  # Prefer the broker's in-memory snapshot when the runner is publishing;
+  # fall back to disk reads when it isn't. Disk remains authoritative on
+  # crash-restart, so the fallback is always safe.
+  ipcRun    = ipcStatus?.getRun()
+  ipcSteps  = ipcStatus?.getSteps()
+  ipcEvents = ipcStatus?.getEvents()
+  run = normalizeUiRun (ipcRun ? readJson path.join(CWD, 'state', 'ui-run.json'), {})
   mergeRun = readMergeRun()
   pipelineState = readJson path.join(CWD, 'pipeline.json'), null
   expectedOutputs = collectExpectedOutputs(run)
@@ -1068,8 +1150,8 @@ buildStatus = ->
   loraRemaining = readJson path.join(CWD, 'out', 'lora_remaining_count.json'), null
   oracleRemaining = readJson path.join(CWD, 'out', 'oracle_remaining_count.json'), null
   storiesRemaining = if oracleRemaining? then oracleRemaining else loraRemaining
-  events = readJsonlTail path.join(CWD, 'state', 'ui-events.jsonl')
-  steps = collectStepStates()
+  events = ipcEvents ? readJsonlTail path.join(CWD, 'state', 'ui-events.jsonl')
+  steps = ipcSteps ? collectStepStates()
   stem = if run?.logdir? then String(run.logdir) else latestLogStem()
   latestLog = if stem? then readText(path.join(CWD, 'logs', "#{stem}.log")) else ''
   latestErr = if stem? then readText(path.join(CWD, 'logs', "#{stem}.err")) else ''
@@ -1121,7 +1203,8 @@ readViewerFile = (relativePath) ->
   }
 
 sendJson = (res, code, payload) ->
-  body = JSON.stringify(payload, null, 2)
+  # Hot path (polled every second); minified JSON halves bytes + CPU.
+  body = JSON.stringify(payload)
   res.writeHead code,
     'Content-Type': 'application/json; charset=utf-8'
     'Content-Length': Buffer.byteLength(body)
@@ -2058,12 +2141,21 @@ handleSwitchPipe = (req, res) ->
     cwd: targetCwd
     restarting: true
 
-  # Relaunch the target workspace's OWN ui_server.coffee (so a project's edited
-  # UI + its runtime.sqlite are preserved); fall back to the shipped one.
-  uiServerPath = path.join(targetCwd, 'ui_server.coffee')
-  uiServerPath = path.join(EXEC_ROOT, 'ui_server.coffee') unless fs.existsSync(uiServerPath)
+  # Relaunch the same server entry we're running under. Preserves any
+  # project override (if the user explicitly launched a project-tier
+  # ui_server.coffee) and avoids snapping back to a stale project-root
+  # entry when the project is in the middle of a plugin migration.
+  uiServerPath =
+    if typeof require.main?.filename is 'string' and require.main.filename.length
+      require.main.filename
+    else
+      path.join(EXEC_ROOT, 'ui_server.coffee')
 
-  launchArgs = ['-lc', "sleep 1; exec coffee #{JSON.stringify(uiServerPath)}"]
+  # Propagate the `net` argv flag so the respawn rebinds the same
+  # interface (0.0.0.0 vs 127.0.0.1). Without this, a server started
+  # via `coffee ui_server.coffee net` would silently drop to loopback
+  # after switch_pipe — unreachable from any non-local browser.
+  launchArgs = ['-lc', "sleep 1; exec coffee #{JSON.stringify(uiServerPath)} #{if UI_BIND_MODE is 'net' then 'net' else ''}"]
   child = spawn 'bash', launchArgs,
     cwd: targetCwd
     detached: true
@@ -2105,16 +2197,94 @@ handleMergePipe = (req, res) ->
 # `pipeline ui:init` yet. This is what makes the UI a
 # project-customizable surface.
 resolveUiAsset = (rel) ->
-  projectPath = path.join(CWD, 'ui', rel)
-  return projectPath if fs.existsSync(projectPath)
+  # Three-tier fallback: CWD (pipe-owned override) → BASE_ROOT
+  # (project / puppeteer / writer) → EXEC_ROOT (shipped library).
+  # Without the BASE tier, switching into a pipe dir — which rarely
+  # ships its own ui/ — would snap the UI back to the bare library
+  # index and drop every project-specific control (puppeteer's root
+  # option in the pipe dropdown, writer's panels, etc.).
+  cwdPath = path.join(CWD, 'ui', rel)
+  return cwdPath if fs.existsSync(cwdPath)
+  if BASE_ROOT and BASE_ROOT isnt EXEC_ROOT
+    basePath = path.join(BASE_ROOT, 'ui', rel)
+    return basePath if fs.existsSync(basePath)
   path.join(EXEC_ROOT, 'ui', rel)
+
+# Build the plugin context ONCE here, after all helpers are defined.
+# init() may return {routes: [...]}. Routes are tried before any
+# built-in /api/* dispatch so a plugin can shadow a library endpoint.
+_pluginCtx =
+  CWD:              CWD
+  EXEC_ROOT:        EXEC_ROOT
+  BASE_ROOT:        BASE_ROOT
+  fs:               fs
+  path:             path
+  http:             http
+  yaml:             yaml
+  spawn:            spawn
+  sendJson:         (res, code, payload) -> sendJson res, code, payload
+  readRequestBody:  (req) -> readRequestBody req
+  readJson:         (p, fallback) -> readJson p, fallback
+  readText:         (p, fallback) -> readText p, fallback
+  writeText:        (p, text) -> writeText p, text
+  resolveUiAsset:   (rel) -> resolveUiAsset rel
+  listFiles:        (dir) -> listFiles dir
+  describeOutputFile: (rel, start) -> describeOutputFile rel, start
+  normalizeUiRun:   (run) -> normalizeUiRun run
+  UI_BIND_MODE:     UI_BIND_MODE
+  PORT:             PORT
+_pluginRoutes = []
+_pluginAugmentStatus = null
+if _plugin?.init?
+  try
+    initResult = _plugin.init(_pluginCtx)
+    _pluginRoutes = initResult?.routes ? []
+    _pluginAugmentStatus = initResult?.augmentStatus ? null
+    extras = []
+    extras.push "augmentStatus" if _pluginAugmentStatus?
+    tail = if extras.length then " +#{extras.join(',')}" else ''
+    console.log "[ui_server] project plugin: #{_pluginRoutes.length} routes#{tail}" if _pluginRoutes.length or _pluginAugmentStatus
+  catch err
+    console.error "[ui_server] project plugin init failed: #{err?.message ? err}"
+
+tryPluginRoute = (req, res) ->
+  return false unless _pluginRoutes.length
+  url = req.url ? '/'
+  pathname = url.split('?')[0]
+  for route in _pluginRoutes
+    continue unless route?.handler
+    continue if route.method and route.method isnt req.method
+    hit = false
+    if route.path?
+      hit = pathname is route.path
+    else if route.pathPrefix?
+      hit = pathname.startsWith(route.pathPrefix)
+    continue unless hit
+    Promise.resolve(route.handler(req, res, _pluginCtx)).catch (err) ->
+      sendJson res, 500, {ok: false, error: String(err?.message ? err)}
+    return true
+  false
 
 server = http.createServer (req, res) ->
   url = req.url ? '/'
+  return if tryPluginRoute(req, res)
   if url is '/' or url is '/index.html'
     return sendHtml res, resolveUiAsset('index.html')
   if url is '/api/status'
-    return sendJson res, 200, buildStatus()
+    # Allow a plugin to augment the status payload — puppeteer/writer
+    # inject eager panel data (`panels`, `panels_data`) so the pipe-
+    # list panel renders on first paint instead of after a follow-up
+    # /api/panel/* fetch.
+    base = buildStatus()
+    return Promise.resolve(base).then (status) ->
+      if typeof _pluginAugmentStatus is 'function'
+        Promise.resolve(_pluginAugmentStatus(status)).then -> status
+      else
+        status
+    .then (status) ->
+      sendJson res, 200, status
+    .catch (err) ->
+      sendJson res, 500, {ok: false, error: String(err?.message ? err)}
   if url is '/api/find_active_runner'
     # 2026-09-13: scan every pipe's state/ui-run.json for a runner
     # whose pid is alive. Powers the "Attach To Running Pipeline"
@@ -2277,21 +2447,31 @@ server = http.createServer (req, res) ->
         logdir: launch.logdir
     )()).catch (err) ->
       sendJson res, 500, { ok: false, error: String(err?.message ? err) }
-  if url is '/api/pipeline_svg' and req.method is 'GET'
-    # Render the CURRENT pipe's experiment.yaml as a DAG SVG using
-    # pipeline_svg.coffee (self-contained styles, data-step attrs
-    # so downstream JS can toggle .running / .done classes to sync
-    # with #steps-body). No cache: hot-reload the renderer on every
-    # request so edits to pipeline_svg.coffee land without a restart.
-    expPath = path.join(CWD, 'experiment.yaml')
-    unless fs.existsSync expPath
-      res.writeHead 404, { 'Content-Type': 'text/plain; charset=utf-8' }
-      return res.end 'no experiment.yaml yet — run the pipeline once, then reload.'
+  if (url is '/api/pipeline_svg' or url.startsWith('/api/pipeline_svg?')) and req.method is 'GET'
+    # Default: render the CURRENT pipe's experiment.yaml as a DAG SVG.
+    # With ?pipeline=<name>, preview that recipe's graph directly from
+    # config/<name>.yaml (so the UI can show a recipe's DAG before
+    # pressing Run). No cache: hot-reload pipeline_svg.coffee on every
+    # request so renderer edits land without a server restart.
+    query = new URL(url, 'http://127.0.0.1').searchParams
+    requestedPipeline = String(query.get('pipeline') ? '').trim()
     try
+      doc = null
+      if requestedPipeline.length
+        configPath = resolveConfigPath(requestedPipeline)
+        unless configPath? and fs.existsSync(configPath)
+          res.writeHead 404, { 'Content-Type': 'text/plain; charset=utf-8' }
+          return res.end "no config for recipe '#{requestedPipeline}'"
+        doc = readYaml(configPath)
+      else
+        expPath = path.join(CWD, 'experiment.yaml')
+        unless fs.existsSync expPath
+          res.writeHead 404, { 'Content-Type': 'text/plain; charset=utf-8' }
+          return res.end 'no experiment.yaml yet — run the pipeline once, then reload.'
+        doc = yaml.load fs.readFileSync(expPath, 'utf8')
       scriptPath = path.join(EXEC_ROOT, 'pipeline_svg.coffee')
       delete require.cache[require.resolve(scriptPath)] if require.cache[require.resolve(scriptPath)]?
       { renderSvg } = require scriptPath
-      doc = yaml.load fs.readFileSync(expPath, 'utf8')
       svg = renderSvg doc
       res.writeHead 200,
         'Content-Type': 'image/svg+xml; charset=utf-8'

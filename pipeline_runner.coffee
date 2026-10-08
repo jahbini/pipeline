@@ -2033,6 +2033,18 @@ main = ->
   U = createUiRecorder M, path.join(CWD,'state')
   U.reset()
 
+  # ── IPC: in-process broker + memo (additive; disk writes unchanged) ──
+  # Starts a unix-domain pub/sub socket at state/runner.sock so UI servers
+  # can subscribe to step/state/event topics instead of re-reading JSON
+  # files on every poll. Patches S.write / U.saveRun / U.event to publish
+  # AFTER the existing fs.writeFileSync, keeping disk authoritative.
+  try
+    {wireRunner} = require path.join(EXEC, 'ipc', 'wire')
+    ipc = wireRunner S, U, {cwd: CWD}
+  catch err
+    console.error "[ipc] wire failed (continuing without broker): #{err?.message ? err}"
+    ipc = null
+
   # 2026-09-28 — best-effort reap on process exit. Any step whose
   # ledger still says `running` when the runner dies gets flipped to
   # `died` so the UI doesn't show stale RUNNING forever. This handler

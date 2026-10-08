@@ -59,26 +59,31 @@ step lifecycles in real time, and inspect artifacts.
 The UI is split deliberately:
 
 - **The server** (`ui_server.coffee`) stays in the package. It's
-  infrastructure; most projects won't modify it.
-- **The static frontend** (`ui/index.html`) is *project-owned* —
-  copied into your project root at install time so you can
-  customize branding, add panels, swap libraries, whatever — without
-  forking the runner. Updates to the package don't overwrite your
-  edits.
+  infrastructure; projects don't ship their own anymore.
+- **The static frontend** (`ui/index.html`) is *project-owned* — a
+  project drops its own into `./ui/index.html` to customize branding,
+  add panels, swap libraries, whatever.
+- **The project plugin** (`ui/project.coffee`, optional) is also
+  project-owned — adds routes, overrides the port default, runs a
+  pre-startup hook (e.g. sticky-pipe chdir). The library auto-loads
+  it by walking up from `process.cwd()`. See
+  `GPT/ui/plugin_system.md` for the full contract.
 
 ```sh
 # One-time: copy the shipped ui/ into your project root so you
 # can edit it without forking the package.
 cp -r node_modules/@jahbini/pipeline/ui ./ui
 
-# Start the server (default port 4311; override via UI_PORT).
-npx pipeline-ui              # then open http://127.0.0.1:4311
+# Start the server (default port 4311; override via UI_PORT or the
+# plugin's portDefault). Pass `net` as argv for 0.0.0.0 binding.
+npx pipeline-ui              # http://127.0.0.1:4311
+npx pipeline-ui net          # http://0.0.0.0:4311
 ```
 
-The server resolves the static frontend project-first: `CWD/ui/`
-wins, falling back to the package's `ui/` only if you haven't
-copied it yet. So a fresh install works immediately, and your
-edits stick once you've copied.
+The server resolves the static frontend three-tier: `CWD/ui/`
+(pipe-owned override) → `BASE_ROOT/ui/` (project) → `EXEC_ROOT/ui/`
+(shipped). So a fresh install works immediately, project edits
+override, and a pipe can further shadow for one-off experiments.
 
 Two bin commands are installed by `npm install`:
 

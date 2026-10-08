@@ -9,6 +9,7 @@
   },
   "files": [
     "pipeline_runner.coffee",
+    "pipeline_svg.coffee",
     "ui_server.coffee",
     "meta/",
     "mlx/",
@@ -18,6 +19,8 @@
     "config/",
     "tools/",
     "ui/",
+    "panels/",
+    "ipc/",
     "override.test.yaml",
     "requirements.txt",
     "README.md"
