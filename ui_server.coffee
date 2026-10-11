@@ -225,6 +225,67 @@ discoverPipelines = ->
 
 discoverPipelineNames = -> p.name for p in discoverPipelines()
 
+# ── Lifecycle-stage recipe filter ──────────────────────────────
+# Determines where the current pipe is in its lifecycle from on-disk
+# signals (certificate.yaml + certificates/ archive) and reduces the
+# recipe dropdown to the handful of recipes that apply at that stage.
+# Composite recipes (newborn, elementary) replace their constituents.
+# Stages:
+#   newborn            — fresh pipe, no training yet
+#   entrance_pending   — ungraded entrance cert sitting at out/certificate.yaml
+#   elementary_ready   — entrance cert passed; ready to train
+#   sat_pending        — ungraded SAT cert; ready for sat_scan
+#   graduated          — SAT cert passed; produces content
+#   unknown            — fallback (shows the full list)
+detectLifecycleStage = ->
+  certPath = path.join(CWD, 'out', 'certificate.yaml')
+  archiveDir = path.join(CWD, 'out', 'certificates')
+  if fs.existsSync(certPath)
+    try
+      cert = yaml.load(fs.readFileSync(certPath, 'utf8')) ? {}
+      verdict = String(cert?.grade?.verdict ? '').trim().toLowerCase()
+      stage   = String(cert?.stage ? '').trim().toLowerCase()
+      if not verdict.length
+        return 'entrance_pending' if stage is 'newborn'
+        return 'sat_pending'      if stage is 'elementary'
+    catch
+      null
+  archived = []
+  if fs.existsSync(archiveDir) and fs.statSync(archiveDir).isDirectory()
+    try archived = fs.readdirSync(archiveDir).filter (n) -> n.endsWith('.yaml')
+    catch then archived = []
+  hasElementaryPass = archived.some (n) -> n.startsWith('elementary-')
+  hasNewbornPass    = archived.some (n) -> n.startsWith('newborn-')
+  return 'graduated'        if hasElementaryPass
+  return 'elementary_ready' if hasNewbornPass
+  'newborn'
+
+# Recipe set per lifecycle stage. Composites supersede constituents:
+# newborn runs reset+download+quantize+marker internally, so neither
+# `reset` nor `download_model` appears alongside it. Same for
+# `elementary` vs its sub-steps. `unknown` shows the full list as a
+# fallback. The resulting dropdown is small (1-N items) so the human
+# sees only recipes that apply to where the pipe is right now.
+STAGE_RECIPES =
+  newborn:          ['newborn']
+  entrance_pending: ['storacle', 'newborn']
+  elementary_ready: ['elementary']
+  sat_pending:      ['sat_scan', 'sat_ladder', 'storacle']
+  graduated: [
+    'story','spystory','heckled_story','diary_ite','diary_translate_ite'
+    'spine_story','spine_diary','spine_spystory','spine_voyage'
+    'celarien_run','broadcast','prompt_llm','prompt_ite','chat_llm'
+    'compare_adapters_ite','voice_test','sat_tournament'
+  ]
+  unknown: null
+
+filterPipelinesByStage = (allEnriched, stage) ->
+  allowed = STAGE_RECIPES[stage]
+  return allEnriched unless allowed?
+  byName = {}
+  byName[p.name] = p for p in allEnriched
+  (byName[n] for n in allowed when byName[n]?)
+
 RUNNER = path.join(EXEC_ROOT, 'pipeline_runner.coffee')
 MERGE_SCRIPT = path.join(EXEC_ROOT, 'merge_sqlite_dbs.coffee')
 
@@ -304,6 +365,12 @@ isProcessAlive = (pid) ->
   catch
     false
 
+# 2026-10-09 — reap-on-read is a meta/pid_reap concern. The device
+# owns the single reconciliation path; any reader going through
+# the Memo gets reaped data automatically. This ui_server imports
+# the plain helper so direct fs reads here see the same fresh data.
+{reapOnDisk: _reapPidState} = require path.join(EXEC_ROOT, 'meta', 'pid_reap')
+
 normalizeUiRun = (run) ->
   current = if run? and typeof run is 'object' and not Array.isArray(run) then Object.assign({}, run) else {}
   pid = Number(current.pid ? 0)
@@ -316,6 +383,12 @@ normalizeUiRun = (run) ->
     current.is_process_alive = true
     return current
 
+  # Belt-and-suspenders: if pid is dead but we somehow saw an
+  # alive-ish status at this layer (reap on disk hadn't run yet),
+  # still correct the in-memory record so the response is truthful.
+  if not alive and pid > 0 and current.status in ['launching', 'running', 'skipped', 'killing']
+    current.status = 'died'
+    current.exit_detected_at ?= new Date().toISOString()
   current.is_attached = false
   current.is_process_alive = alive
   current
@@ -766,6 +839,32 @@ loadDropdownOptions = (specPath) ->
       return fallbackRows
     finally
       try db?.close() catch then null
+  # 2026-10-10 — missing handler. storacle.yaml and other story-
+  # scoped recipes declare `[ UI_dropdown, db/story_titles, "" ]` to
+  # populate a story_id picker from the pipe's runtime.sqlite stories
+  # table. Without this case the path fell through to the generic
+  # 3+-part yaml loader and returned []. Result: every story_id
+  # dropdown showed only the default empty option.
+  if specPath is 'db/story_titles'
+    dbPath = path.join CWD, 'runtime.sqlite'
+    return [] unless fs.existsSync dbPath
+    db = null
+    try
+      db = new DatabaseSync dbPath
+      rows = db.prepare("""
+        SELECT story_id, title
+        FROM stories
+        ORDER BY story_id ASC
+      """).all()
+      mapped = ({
+        key:   String(row.story_id)
+        label: if row.title and String(row.title).length then "#{row.title} — #{row.story_id}" else String(row.story_id)
+      } for row in rows when row?.story_id?)
+      return mapped
+    catch
+      return []
+    finally
+      try db?.close() catch then null
   parts = specPath.split('/')
   return [] unless parts.length >= 3
   filePath = path.join CWD, parts[0], parts[1]
@@ -1045,7 +1144,11 @@ buildControls = ->
     # Enriched form: [{name, source}] with source in
     # {'pipe','project','shipped'}. UI italicizes non-shipped
     # entries so the human can see which recipes are local overlays.
-    pipelines_enriched: discoverPipelines()
+    # Filtered to lifecycle_stage; `pipelines_all` carries the
+    # unfiltered set so a client toggle can expose it.
+    pipelines_enriched: filterPipelinesByStage(discoverPipelines(), detectLifecycleStage())
+    pipelines_all:      discoverPipelines()
+    lifecycle_stage:    detectLifecycleStage()
     scene_options: makeOptions 'scenes'
     arrival_options: makeOptions 'characters'
     disturbance_options: makeOptions 'disturbances'
@@ -1136,6 +1239,12 @@ collectLogFiles = (run) ->
   rows
 
 buildStatus = ->
+  # Reap-on-read via the meta/pid_reap device: single source of truth
+  # for pid-liveness reconciliation. Walks state/{ui-run,step-*}.json,
+  # flips any 'running'/'killing' record with a dead pid to 'died',
+  # persists. Pipeline graph, Steps panel, and augmentStatus panels
+  # all read these files; one call keeps every surface honest.
+  _reapPidState path.join(CWD, 'state')
   # Prefer the broker's in-memory snapshot when the runner is publishing;
   # fall back to disk reads when it isn't. Disk remains authoritative on
   # crash-restart, so the fallback is always safe.
@@ -1638,6 +1747,23 @@ handleKill = (req, res) ->
 
   return sendJson(res, 400, { ok: false, error: 'no active run pid recorded' }) unless pid > 0
 
+  # 2026-10-09 — if the recorded pid is already dead, treat Kill as
+  # "clean up the lying state file" instead of returning 500. The
+  # old behavior left ui-run.json showing 'killing' forever on a
+  # pid that had died unclean (OOM / SIGKILL / power loss) and the
+  # Kill button couldn't be used to clear it.
+  unless isProcessAlive(pid)
+    next = Object.assign {}, run,
+      status:              'died'
+      exit_detected_at:    new Date().toISOString()
+      kill_requested_at:   new Date().toISOString()
+      reason:              run?.reason ? "pid #{pid} already dead when Kill clicked"
+      loop_enabled:        false
+      countdown_seconds:   null
+      next_launch_at:      null
+    writeText runPath, JSON.stringify(next, null, 2)
+    return sendJson res, 200, ok: true, pid: pid, target_kind: targetKind, already_dead: true
+
   # Kill the whole PROCESS GROUP (negative pid), then escalate to
   # SIGKILL if the runner doesn't exit within 1s. The runner is
   # spawned detached (see startRunner), so it's its own process-
@@ -1658,9 +1784,17 @@ handleKill = (req, res) ->
   try
     killGroup pid, 'SIGTERM'
   catch err
-    return sendJson res, 500,
-      ok: false
-      error: String(err?.message ? err)
+    # Rare: process died between the liveness probe above and the
+    # SIGTERM. Still a success — the file gets written below.
+    if err?.code is 'ESRCH'
+      next = Object.assign {}, run,
+        status:            'died'
+        exit_detected_at:  new Date().toISOString()
+        kill_requested_at: new Date().toISOString()
+        reason:            "pid #{pid} died during kill race"
+      writeText runPath, JSON.stringify(next, null, 2)
+      return sendJson res, 200, ok: true, pid: pid, target_kind: targetKind, already_dead: true
+    return sendJson res, 500, ok: false, error: String(err?.message ? err)
 
   setTimeout (->
     try

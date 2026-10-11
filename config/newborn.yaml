@@ -34,12 +34,8 @@ artifacts:
     source: data/stories.md
   story_seed_ids:
     target: out/story_seed_ids.json
-  storacle_raw:
-    target: out/storacle_raw.txt
-  storacle_meta:
-    target: out/storacle_meta.json
-  storacle_text:
-    target: out/storacle_text.txt
+  entrance_certificate:
+    target: out/certificate.yaml
 
 # ------ reset stage ------
 reset_base_environment_ite:
@@ -70,17 +66,14 @@ quantize_model:
   quantized_dir: ${run.quantized_dir}
   q_bits: 4
 
-# ------ audition stage ------
-storacle:
-  run: storacle/storacle.coffee
+# ------ hand-off to human-driven entrance test ------
+# 2026-10-11 — storacle audition removed from newborn. A newborn now
+# ends by writing an ungraded entrance certificate. The puppeteer's
+# certificate_scan_ite flips the pipe into cert_pending, and the writer
+# UI surfaces a "launch entrance test" link that fires standalone
+# storacle on demand (so prompt/story can be adjusted per candidate).
+mark_entrance_pending_ite:
+  run: base_ite/mark_entrance_pending_ite.coffee
   depends_on: [quantize_model]
   needs: []
-  makes: [storacle_raw, storacle_meta, storacle_text]
-  quantized_model_dir: ${run.quantized_dir}
-  # Canonical audition — same story + prompt for every newborn, so a
-  # human comparing candidates isn't rating them on different tests.
-  story_id: anna-played-piana-md
-  prompt_text: "Who does Anna love in {{{STORY}}}?"
-  llm:
-    maxTokens: 200
-    temperature: 0.7
+  makes: [entrance_certificate]

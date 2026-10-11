@@ -95,6 +95,8 @@ artifacts:
     target: out/lora_run_record.json
   trained_story_ids:
     target: out/trained_story_ids.json
+  sat_pending_certificate:
+    target: out/certificate.yaml
 
 # =====================================================================
 # Steps (linear dependency chain — see reset.yaml for the rationale
@@ -269,11 +271,14 @@ record_lora_training_ite:
   needs: [lora_run_record]
   makes: [trained_story_ids]
 
-# NOTE: elementary ends here. On successful completion queue_run_ite
-# auto-flips the pipe state to `SAT` (Scholastic Aptitude Test) — a
-# human then runs the augmented `storacle` recipe from the writer UI
-# to evaluate the trained model, and manually flips the state to
-# `graduated` / `rejected` / back to `continue` based on the outcome.
-#
-# The previous end-of-elementary `achievement_test` step is removed
-# by user directive 2026-09-12 in favor of human-driven SAT testing.
+# ------ hand-off to human-driven SAT scan ------
+# 2026-10-11 — elementary ends by writing an ungraded SAT certificate.
+# The puppeteer's certificate_scan_ite flips the pipe into cert_pending,
+# the writer UI shows "launch SAT scan", and the human fires sat_scan
+# (param/adapter/chunk ablation) on demand. On grade=pass the pipe
+# moves to graduated; hospital/graveyard route elsewhere.
+mark_sat_pending_ite:
+  run: base_ite/mark_sat_pending_ite.coffee
+  depends_on: [record_lora_training_ite]
+  needs: []
+  makes: [sat_pending_certificate]

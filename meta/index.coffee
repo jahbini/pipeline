@@ -37,12 +37,25 @@ path = require 'path'
 module.exports = (M, opts = {}) ->
   baseDir = __dirname
 
+  # Load order:
+  #   1. sqlite.coffee  — compound request-key rules; must win against
+  #                        broader filename-shape rules.
+  #   2. pid_reap.coffee — narrow state-file rule; must win against
+  #                        the plain .json catch-all so reaped reads
+  #                        of state/ui-run.json and state/step-*.json
+  #                        reach the reap handler.
+  #   rest alphabetical, with slash.coffee (naked path) last by its
+  #   own convention.
+  priority = (name) ->
+    return 0 if name is 'sqlite.coffee'
+    return 1 if name is 'pid_reap.coffee'
+    2
   files = fs.readdirSync(baseDir)
     .filter (f) ->
       f.endsWith('.coffee') and f isnt 'index.coffee'
     .sort (a, b) ->
-      return -1 if a is 'sqlite.coffee' and b isnt 'sqlite.coffee'
-      return 1 if b is 'sqlite.coffee' and a isnt 'sqlite.coffee'
+      pa = priority(a); pb = priority(b)
+      return pa - pb if pa isnt pb
       a.localeCompare b
 
   for f in files
