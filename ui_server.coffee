@@ -2399,11 +2399,59 @@ tryPluginRoute = (req, res) ->
     return true
   false
 
+handleRecipeFlowchart = (req, res) ->
+  # /api/recipe_flowchart?recipe=<name> — serve <project>/flowchart/<recipe>.md
+  # with a sibling <recipe>.diagrams.md prepended if present. Three-tier
+  # resolution: CWD → BASE_ROOT → EXEC_ROOT. Formerly lived in the
+  # puppeteer plugin; promoted to shared because the convention is
+  # project-agnostic (writer and pipeline both have flowchart/ dirs).
+  url = req.url ? ''
+  query = new URL(url, 'http://127.0.0.1').searchParams
+  recipeName = String(query.get('recipe') ? '').trim()
+  return sendJson(res, 400, {ok: false, error: 'recipe query param required (word chars only)'}) unless recipeName.length and /^[A-Za-z0-9_.-]+$/.test(recipeName)
+  candidatePaths = [
+    path.join(CWD,       'flowchart', "#{recipeName}.md")
+    path.join(BASE_ROOT, 'flowchart', "#{recipeName}.md")
+    path.join(EXEC_ROOT, 'flowchart', "#{recipeName}.md")
+  ]
+  seen = new Set()
+  candidatePaths = (p for p in candidatePaths when not seen.has(p) and (seen.add(p) or true))
+  flowchartPath = null
+  for p in candidatePaths when fs.existsSync(p)
+    flowchartPath = p
+    break
+  unless flowchartPath?
+    return sendJson res, 404,
+      ok: false
+      error: "no flowchart for '#{recipeName}' (tried: #{candidatePaths.join(', ')})"
+      tried: candidatePaths
+  try
+    markdown = fs.readFileSync(flowchartPath, 'utf8')
+    diagramsPath = flowchartPath.replace(/\.md$/, '.diagrams.md')
+    diagramsFound = null
+    if fs.existsSync(diagramsPath)
+      try
+        diagramsMd = fs.readFileSync(diagramsPath, 'utf8')
+        markdown = "#{diagramsMd}\n\n#{markdown}"
+        diagramsFound = diagramsPath
+      catch e
+        console.warn "[recipe_flowchart] failed to read #{diagramsPath}: #{e?.message ? e}"
+    sendJson res, 200,
+      ok:            true
+      recipe:        recipeName
+      markdown:      markdown
+      path:          flowchartPath
+      diagrams_path: diagramsFound
+  catch e
+    sendJson res, 500, {ok: false, error: String(e?.message ? e), path: flowchartPath}
+
 server = http.createServer (req, res) ->
   url = req.url ? '/'
   return if tryPluginRoute(req, res)
   if url is '/' or url is '/index.html'
     return sendHtml res, resolveUiAsset('index.html')
+  if url.startsWith('/api/recipe_flowchart')
+    return handleRecipeFlowchart(req, res)
   if url is '/api/status'
     # Allow a plugin to augment the status payload — puppeteer/writer
     # inject eager panel data (`panels`, `panels_data`) so the pipe-

@@ -455,9 +455,70 @@
       .hero { flex-direction: column; align-items: start; }
       .yaml-grid { grid-template-columns: 1fr; }
     }
+    /* Project-scope visibility seam. Projects publish controls.scope =
+       'project-root' | 'pipe-scope' in /api/status; shared UI stamps
+       body.scope-<value>. Panels / plugin slots gate on data-visible-when. */
+    body.scope-project-root [data-visible-when="pipe-scope"]    { display: none; }
+    body.scope-pipe-scope   [data-visible-when="project-root"]  { display: none; }
+
+    /* Recipe flowchart panel — reads <project>/flowchart/<recipe>.md via
+       /api/recipe_flowchart. Mermaid fenced blocks render via mermaid.js
+       loaded from CDN; graceful degradation when the CDN is blocked. */
+    .recipe-flowchart-section {
+      border: 1px solid #d0d0d0; border-radius: 6px;
+      padding: 6px 10px 10px; margin-bottom: 12px; background: #fafafa;
+    }
+    .recipe-flowchart-section > summary { cursor: pointer; font-weight: 600; padding: 4px 0; user-select: none; }
+    .recipe-flowchart-body { font-size: 13px; line-height: 1.5; }
+    .recipe-flowchart-body h1, .recipe-flowchart-body h2, .recipe-flowchart-body h3 { margin: 12px 0 6px; line-height: 1.25; }
+    .recipe-flowchart-body h1 { font-size: 18px; }
+    .recipe-flowchart-body h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.03em; color: #555; margin-top: 14px; }
+    .recipe-flowchart-body h3 { font-size: 14px; }
+    .recipe-flowchart-body p  { margin: 6px 0; }
+    .recipe-flowchart-body table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin: 8px 0; }
+    .recipe-flowchart-body th, .recipe-flowchart-body td { border: 1px solid #d0d0d0; padding: 4px 8px; text-align: left; vertical-align: top; }
+    .recipe-flowchart-body th { background: #eee; }
+    .recipe-flowchart-body code { font-family: "SF Mono", Menlo, Consolas, monospace; background: #ececec; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+    .recipe-flowchart-body pre { background: #f0f0f0; padding: 10px; border-radius: 5px; overflow-x: auto; font-size: 12px; }
+    .recipe-flowchart-body pre.mermaid { background: transparent; overflow-x: auto; }
+    .recipe-flowchart-body pre.mermaid svg { max-width: 100%; height: auto; }
+    .recipe-flowchart-body pre.mermaid .node.clickable { cursor: pointer; }
+    .recipe-flowchart-body pre.mermaid .node.clickable rect,
+    .recipe-flowchart-body pre.mermaid .node.clickable polygon,
+    .recipe-flowchart-body pre.mermaid .node.clickable circle { transition: filter 0.15s ease; }
+    .recipe-flowchart-body pre.mermaid .node.clickable:hover rect,
+    .recipe-flowchart-body pre.mermaid .node.clickable:hover polygon,
+    .recipe-flowchart-body pre.mermaid .node.clickable:hover circle { filter: brightness(1.1); }
+    /* <details data-flow-node> are DATA SOURCES for the click popup, not visible UI. */
+    .recipe-flowchart-body details[data-flow-node] { display: none; }
+    .flowchart-popup {
+      position: fixed; max-width: 420px; background: #fefdf6;
+      border: 1px solid #b8a76b; border-left: 4px solid #C9532C;
+      border-radius: 6px; padding: 10px 14px 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+      z-index: 20; font-size: 13px; line-height: 1.5;
+    }
+    .flowchart-popup-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 6px; }
+    .flowchart-popup-title { font-weight: 600; color: #1A1D1F; }
+    .flowchart-popup-close { background: transparent; border: none; cursor: pointer; font-size: 20px; line-height: 1; padding: 0 4px; color: #6B6559; }
+    .flowchart-popup-close:hover { color: #C9532C; }
+    .flowchart-popup-body { color: #2C2A24; }
+    .flowchart-popup-body p:first-child { margin-top: 0; }
+    .flowchart-popup-body p:last-child { margin-bottom: 0; }
+    .flowchart-popup-body table { font-size: 12px; margin: 6px 0; }
+    .recipe-flowchart-body ul { padding-left: 20px; }
+    .recipe-flowchart-body details { border: 1px solid #d6d0be; border-radius: 5px; padding: 4px 10px; margin: 4px 0; background: #f9f6ec; }
+    .recipe-flowchart-body details > summary { cursor: pointer; font-weight: 500; padding: 4px 0; list-style: none; user-select: none; }
+    .recipe-flowchart-body details > summary::before { content: "▸ "; display: inline-block; width: 1em; transition: transform 0.15s ease; }
+    .recipe-flowchart-body details[open] > summary::before { content: "▾ "; }
   </style>
 </head>
 <body>
+  <!-- Plugin seam: top-level slots a project plugin can fill. See
+       REFACTOR_UI.md. Hidden by default via scope CSS until the shared
+       UI sets body.scope-* from /api/status.controls.scope. -->
+  <div id="project-root-plugin-slot" data-visible-when="project-root"></div>
+  <div id="pipe-scope-plugin-slot"   data-visible-when="pipe-scope"></div>
   <div class="wrap">
     <div class="hero">
       <div>
@@ -466,6 +527,14 @@
       </div>
       <div id="run-status" class="status">unknown</div>
     </div>
+
+    <section class="panel" id="recipe-flowchart-section" data-default-collapsed="0">
+      <h2>Recipe Flowchart</h2>
+      <div id="recipe-flowchart-body" class="recipe-flowchart-body">
+        <p class="hint" style="margin:8px 0;">Select a recipe to view its flowchart.</p>
+      </div>
+      <div id="recipe-flowchart-status" class="hint mono" style="margin-top:4px;font-size:0.8em;"></div>
+    </section>
 
     <section class="panel pipeline-graph-panel">
       <h2>Pipeline Graph</h2>
@@ -580,6 +649,10 @@
             <div class="controls-group">
               <h3>Pipe</h3>
               <div id="pipe-current" class="mono"></div>
+              <!-- Plugin seam: project plugins fill this with pipe-scoped
+                   controls (links, buttons, status). Shared UI never
+                   writes into it. See REFACTOR_UI.md. -->
+              <div id="pipe-plugin-slot" class="mono" style="font-size:12px;margin-top:4px;"></div>
               <label>
                 Switch UI To Pipe
                 <select id="pipe-select"></select>
@@ -737,6 +810,27 @@
 
   <script>
     const byId = (id) => document.getElementById(id);
+    // Plugin seam: no-op defaults. A project plugin loaded via
+    // controls.ui_plugin overwrites these to receive hook callbacks.
+    // See REFACTOR_UI.md for the hook contract.
+    //   init(ctx)                                — one-shot after first /api/status
+    //   decorateArtifact(name, nodeEl, ctx)      — artifact-node click/hover override
+    //     returns { onclick?, onhoverEnrich?, cursor? } or null
+    //   decorateFileModal(path, fileMeta, textEl) — file-modal rendering override
+    //     returns { rendered: true } to suppress default text; else null
+    //   renderDynamicPanel(key, target, value)    — dynamic-panel renderer override
+    //     returns true if rendered; false to fall through to defaults
+    window.PipelinePluginUI = window.PipelinePluginUI || {
+      init() {},
+      decorateArtifact() { return null; },
+      decorateFileModal() { return null; },
+      renderDynamicPanel() { return false; },
+      // Returns HTML for additional <option>s prepended to the pipe-select
+      // dropdown. Values of these options are treated as valid pipe
+      // names by renderPipeControls (e.g. empty string → "no pipe —
+      // project root" for puppeteer). Default: no extra options.
+      pipeSelectPrefixOptions() { return ''; },
+    };
     let launchBusy = false;
     let controlsDirty = false;
     let controlsInitialized = false;
@@ -896,17 +990,27 @@
 	      const switchButton = byId('switch-pipe-button');
 	      const pipes = pipe?.pipes || [];
 	      const current = pipe?.current || '';
-      const availableNames = pipes.map((row) => row.name);
-      let desired = selectedPipeName || pipeSelect.value || current;
+      // Plugin seam: project plugin can prepend extra <option>s (e.g.
+      // puppeteer's "no pipe — project root" sentinel). Parse the HTML
+      // to pick up option values so desired-selection logic allows them.
+      const prefixHtml = (() => {
+        try { return window.PipelinePluginUI?.pipeSelectPrefixOptions?.() || ''; }
+        catch (e) { console.warn('[plugin] pipeSelectPrefixOptions threw:', e); return ''; }
+      })();
+      const prefixValues = Array.from(prefixHtml.matchAll(/value="([^"]*)"/g)).map(m => m[1]);
+      const availableNames = pipes.map((row) => row.name).concat(prefixValues);
+      let desired = selectedPipeName != null ? selectedPipeName : (pipeSelect.value || current);
       if (!availableNames.includes(desired)) desired = current;
 	      currentPipeName = current;
 	      byId('pipe-current').textContent = current ? `active: ${current}` : 'active: (not in pipes)';
-	      pipeSelect.innerHTML = pipes.map((row) => `
+	      // Plugin seam: #pipe-plugin-slot is managed by the project
+	      // plugin (if loaded) via a MutationObserver on #pipe-current.
+	      pipeSelect.innerHTML = prefixHtml + pipes.map((row) => `
 	        <option value="${row.name}" ${row.name === desired ? 'selected' : ''}>${row.name}${row.is_active ? ' (active)' : ''}</option>
 	      `).join('');
       pipeSelect.value = desired;
       selectedPipeName = desired;
-	      pipeSelect.disabled = pipes.length === 0;
+	      pipeSelect.disabled = (pipes.length === 0 && prefixValues.length === 0);
 	      switchButton.disabled = false;
 	    }
 
@@ -1118,6 +1222,98 @@
         renderRunDetail(data);
       } catch (err) {
         renderRunDetail({ ok: false, error: String(err.message || err) });
+      }
+    }
+
+    // ── Dynamic panel dispatcher ─────────────────────────────────
+    // Iterates status.panels, picks a host via the panel's `column`
+    // field (falls back to #dynamic-panels), builds a <section> slot
+    // per panel, and dispatches rendering by render_hint. Custom
+    // panels delegate to window.PANEL_CUSTOM_RENDERERS[name]. Lazy
+    // panels (eager:false, e.g. puppeteer's peer_pipes) get value:
+    // null — their hook is responsible for its own data path.
+    function panelHost(meta) {
+      const col = meta && meta.column;
+      if (col && col !== 'left' && col !== 'right') {
+        const explicit = document.getElementById(`dynamic-panels-${col}`);
+        if (explicit) return explicit;
+      }
+      return document.getElementById('dynamic-panels');
+    }
+    function renderDynamicPanels(data) {
+      let panels = Array.isArray(data.panels) ? data.panels.slice() : [];
+      // Use panel meta's own sort_order (set by panel exports); fall
+      // back to 100 (end). No framework-side hardcoded ordering.
+      panels.sort((a, b) => {
+        const ao = (a && typeof a.sort_order === 'number') ? a.sort_order : 100;
+        const bo = (b && typeof b.sort_order === 'number') ? b.sort_order : 100;
+        return ao - bo;
+      });
+      const dataByName = data.panels_data || {};
+      const seenByHost = new Map();
+      for (const meta of panels) {
+        const host = panelHost(meta);
+        if (!host) continue;
+        if (!seenByHost.has(host)) seenByHost.set(host, new Set());
+        seenByHost.get(host).add(meta.name);
+        const slotId = `panel-slot-${meta.name}`;
+        let slot = document.getElementById(slotId);
+        if (!slot) {
+          slot = document.createElement('section');
+          slot.className = 'panel';
+          slot.id = slotId;
+          slot.dataset.panelName = meta.name;
+          slot.innerHTML = `<h2>${escapeHtml(meta.title || meta.name)}</h2><div class="panel-body"></div>`;
+          host.appendChild(slot);
+        }
+        renderPanelBody(slot.querySelector('.panel-body'), meta, dataByName[meta.name]);
+      }
+      // Sweep slots no longer backed by a panel entry (per host).
+      for (const [host, seen] of seenByHost) {
+        host.querySelectorAll('section[data-panel-name]').forEach((s) => {
+          if (!seen.has(s.dataset.panelName)) s.remove();
+        });
+      }
+    }
+    function renderPanelBody(target, meta, value) {
+      // Custom-hint panels must ALWAYS run their hook; lazy panels get
+      // null and are responsible for their own data path.
+      if (meta.render_hint !== 'custom' && value == null) {
+        target.innerHTML = '<div class="hint mono">(no data)</div>';
+        return;
+      }
+      switch (meta.render_hint) {
+        case 'text':
+          target.innerHTML = `<div class="mono" style="white-space:pre-wrap;">${escapeHtml(String(value.text ?? value))}</div>`; return;
+        case 'code':
+          target.innerHTML = `<pre>${escapeHtml(String(value.text ?? ''))}</pre>`; return;
+        case 'key_value': {
+          const items = Array.isArray(value.items) ? value.items : [];
+          target.innerHTML = items.length
+            ? `<dl class="kv">${items.map((i) => `<dt class="mono">${escapeHtml(i.key)}</dt><dd class="mono">${escapeHtml(String(i.value))}</dd>`).join('')}</dl>`
+            : '<div class="hint mono">(empty)</div>';
+          return;
+        }
+        case 'file_list':
+          if (typeof renderFiles === 'function') return renderFiles(target, value.files || value);
+          target.innerHTML = '<div class="hint mono">(file_list without renderer)</div>'; return;
+        case 'table': {
+          const cols = Array.isArray(value.columns) ? value.columns : [];
+          const rows = Array.isArray(value.rows) ? value.rows : [];
+          target.innerHTML = cols.length
+            ? `<table class="steps"><thead><tr>${cols.map((c) => `<th>${escapeHtml(c.label || c.key)}</th>`).join('')}</tr></thead>`
+              + `<tbody>${rows.map((r) => `<tr>${cols.map((c) => `<td>${escapeHtml(String(r[c.key] ?? ''))}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+            : '<div class="hint mono">(empty table)</div>';
+          return;
+        }
+        case 'custom': {
+          const hook = window.PANEL_CUSTOM_RENDERERS && window.PANEL_CUSTOM_RENDERERS[meta.name];
+          if (typeof hook === 'function') return hook(target, value);
+          target.innerHTML = `<pre class="mono">${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
+          return;
+        }
+        default:
+          target.innerHTML = `<div class="hint mono">unknown render_hint: ${escapeHtml(meta.render_hint)}</div>`;
       }
     }
 
@@ -1365,6 +1561,43 @@
       console.debug('[ui] refresh:start');
       const res = await fetch('/api/status', { cache: 'no-store' });
       const data = await res.json();
+      // Stash so the file modal (and any plugin) can read workspace
+      // context without re-fetching status.
+      window.__lastStatus = data;
+      // Plugin seam: stamp scope on body, then one-shot load the
+      // project plugin JS when the backend declares controls.ui_plugin.
+      // Plugin fills window.PipelinePluginUI (defaults below are no-ops).
+      try {
+        const scope = data?.controls?.scope;
+        if (scope === 'project-root' || scope === 'pipe-scope') {
+          document.body.classList.remove('scope-project-root', 'scope-pipe-scope');
+          document.body.classList.add('scope-' + scope);
+        }
+        const pluginName = data?.controls?.ui_plugin;
+        if (pluginName && !window.__pipelinePluginLoading && !window.__pipelinePluginLoaded) {
+          window.__pipelinePluginLoading = true;
+          const s = document.createElement('script');
+          s.src = `/api/${encodeURIComponent(pluginName)}/ui.js`;
+          s.onload = () => {
+            window.__pipelinePluginLoaded = true;
+            try { window.PipelinePluginUI?.init?.({ status: data, byId }); }
+            catch (e) { console.warn('[plugin] init failed', e); }
+            // The 2s refresh loop only starts when a pipeline is active
+            // (startRefreshLoop gates on run status). On an idle pipe,
+            // refresh() ran ONCE before this script arrived — so hooks
+            // like pipeSelectPrefixOptions never got a chance to render.
+            // Fire one more refresh here so plugin-contributed options
+            // (e.g. puppeteer's BASE sentinel) show up without needing
+            // the user to launch a run.
+            try { refresh().catch(() => {}); }
+            catch (e) { console.warn('[plugin] post-load refresh failed', e); }
+          };
+          s.onerror = () => console.warn('[plugin] load failed:', s.src);
+          document.head.appendChild(s);
+        }
+      } catch (e) {
+        console.warn('[plugin] seam setup failed', e);
+      }
       const run = data.run || {};
       const mergeRun = data.merge_run || {};
       const pipelineState = data.pipeline_state || {};
@@ -1438,6 +1671,7 @@
       byId('latest-log').textContent = data.latest_log || '';
       byId('latest-err').textContent = data.latest_err || '';
       refreshPipelineGraph(data.steps, data.out_files).catch(console.error);
+      renderDynamicPanels(data);
       // SQLite panels fire once per refresh tick. They're independent of the
       // /api/status payload — each issues its own request-keyed query.
       refreshSqlitePanels().catch((err) => console.error('[sqlite-panels]', err));
@@ -1473,22 +1707,37 @@
             // on pipe/recipe change, so listeners rebind automatically
             // and we don't need to un-bind stale ones.
             svgEl.querySelectorAll('.node.artifact[data-target]').forEach((n) => {
-              n.style.cursor = 'pointer';
-              n.addEventListener('click', async (ev) => {
-                ev.stopPropagation();
-                const target = n.getAttribute('data-target');
-                if (!target) return;
-                // Absent files: openFileModal throws with server's
-                // 404 message. Show it inline in the panel status
-                // area instead of a browser dialog.
-                try {
-                  await openFileModal(target);
-                } catch (err) {
-                  const msg = String(err?.message || err);
-                  statusEl.textContent = `${target}: ${msg}`;
-                  console.debug('[pipeline-graph] artifact open failed', target, err);
-                }
-              });
+              const target = n.getAttribute('data-target') || '';
+              const artifactName = n.getAttribute('data-artifact') || '';
+              // Plugin seam: ask the project plugin first. If it returns
+              // a decorator, use its onclick / onhoverEnrich / cursor.
+              // Otherwise fall back to the shared default: openFileModal.
+              const dec = window.PipelinePluginUI?.decorateArtifact?.(artifactName, n, { target }) || null;
+              n.style.cursor = dec?.cursor || 'pointer';
+              if (dec?.onclick) {
+                n.addEventListener('click', dec.onclick);
+              } else {
+                n.addEventListener('click', async (ev) => {
+                  ev.stopPropagation();
+                  if (!target) return;
+                  try {
+                    await openFileModal(target);
+                  } catch (err) {
+                    const msg = String(err?.message || err);
+                    statusEl.textContent = `${target}: ${msg}`;
+                    console.debug('[pipeline-graph] artifact open failed', target, err);
+                  }
+                });
+              }
+              if (dec?.onhoverEnrich) {
+                let enriched = false;
+                n.addEventListener('mouseenter', async () => {
+                  if (enriched) return;
+                  enriched = true;
+                  try { await dec.onhoverEnrich(); }
+                  catch (e) { console.debug('[plugin] hover enrich failed', artifactName, e); }
+                });
+              }
             });
             // Script circles → step-detail modal with a Restart button.
             svgEl.querySelectorAll('.node.script[data-step]').forEach((n) => {
@@ -1667,7 +1916,20 @@
 	      byId('file-modal-title').textContent = file.path || '';
 	      byId('file-modal-meta').textContent = `${file.size ?? 0} bytes  ${formatLocalTime(file.mtime || '')}`;
 	      byId('file-modal-copy-status').textContent = '';
-	      byId('file-modal-text').textContent = file.text || '';
+	      const textEl = byId('file-modal-text');
+	      // Reset any plugin-induced styling from a prior open so plain
+	      // files get the default <pre> treatment.
+	      textEl.classList.remove('is-plot');
+	      textEl.style.cssText = '';
+	      // Plugin seam: let the project plugin render the body first.
+	      // Returning {rendered:true} suppresses the default text pane.
+	      let pluginRes = null;
+	      try {
+	        pluginRes = await window.PipelinePluginUI?.decorateFileModal?.(file.path || '', file, textEl);
+	      } catch (e) {
+	        console.warn('[plugin] decorateFileModal threw:', e);
+	      }
+	      if (!pluginRes || !pluginRes.rendered) textEl.textContent = file.text || '';
 	      byId('file-modal-shell').classList.add('open');
 	    }
 
@@ -2121,6 +2383,202 @@
     }
 
     setupPaneExpanders();
+
+    // ── Recipe-flowchart panel ─────────────────────────────────────
+    // Fetches <project>/flowchart/<recipe>.md via /api/recipe_flowchart
+    // (shared endpoint; CWD → BASE_ROOT → EXEC_ROOT fallback). Renders
+    // minimal Markdown (H1-H3, paragraphs, GFM tables, inline code,
+    // fenced code, <details> passthrough) and hands Mermaid code blocks
+    // to mermaid.js when it loads from CDN. Graceful degradation: no
+    // CDN → mermaid blocks render as plain code; 404 → "no flowchart"
+    // hint with the tried paths. Click callbacks on mermaid nodes
+    // (click NODE showFlowchartDetail) open the matching
+    // <details data-flow-node="…"> as a floating card.
+    window._lastFlowClickXY = null;
+    document.addEventListener('mousedown', (e) => {
+      const body = document.getElementById('recipe-flowchart-body');
+      if (!body) return;
+      if (!body.contains(e.target)) return;
+      const node = e.target.closest && e.target.closest('.node.clickable, g.node');
+      if (!node) return;
+      window._lastFlowClickXY = { x: e.clientX, y: e.clientY };
+    }, true);
+
+    window.showFlowchartDetail = function (nodeId) {
+      const body = document.getElementById('recipe-flowchart-body');
+      if (!body) return;
+      const det = body.querySelector('details[data-flow-node="' + CSS.escape(String(nodeId || '')) + '"]');
+      if (!det) return;
+      body.querySelectorAll('.flowchart-popup').forEach((n) => n.remove());
+      const summary = det.querySelector('summary');
+      const title = summary ? summary.textContent.trim() : nodeId;
+      const bodyClone = document.createElement('div');
+      Array.from(det.childNodes).forEach((n) => {
+        if (n.nodeType === 1 && n.tagName === 'SUMMARY') return;
+        bodyClone.appendChild(n.cloneNode(true));
+      });
+      const pop = document.createElement('div');
+      pop.className = 'flowchart-popup';
+      pop.innerHTML =
+        '<div class="flowchart-popup-header">' +
+        '<span class="flowchart-popup-title"></span>' +
+        '<button type="button" class="flowchart-popup-close" aria-label="close">×</button>' +
+        '</div>' +
+        '<div class="flowchart-popup-body"></div>';
+      pop.querySelector('.flowchart-popup-title').textContent = title;
+      pop.querySelector('.flowchart-popup-body').appendChild(bodyClone);
+      pop.style.position = 'fixed';
+      const xy = window._lastFlowClickXY;
+      if (xy && Number.isFinite(xy.x) && Number.isFinite(xy.y)) {
+        let left = xy.x + 48;
+        let top = xy.y - 48;
+        const maxLeft = Math.max(8, window.innerWidth - 440);
+        left = Math.min(left, maxLeft);
+        top = Math.max(8, top);
+        pop.style.left = left + 'px';
+        pop.style.top = top + 'px';
+        pop.style.right = 'auto';
+      } else {
+        pop.style.top = '20px';
+        pop.style.right = '20px';
+        pop.style.left = 'auto';
+      }
+      document.body.appendChild(pop);
+      pop.querySelector('.flowchart-popup-close').addEventListener('click', () => pop.remove());
+      const onKey = (e) => { if (e.key === 'Escape') { pop.remove(); document.removeEventListener('keydown', onKey); } };
+      document.addEventListener('keydown', onKey);
+      const onClickOutside = (e) => {
+        if (!pop.contains(e.target) && !e.target.closest('.node')) {
+          pop.remove();
+          document.removeEventListener('mousedown', onClickOutside);
+        }
+      };
+      setTimeout(() => document.addEventListener('mousedown', onClickOutside), 0);
+    };
+
+    function ensureMermaid() {
+      if (ensureMermaid._p) return ensureMermaid._p;
+      ensureMermaid._p = new Promise((resolve) => {
+        if (window.mermaid) return resolve(window.mermaid);
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+        s.onload = () => {
+          try {
+            // 'loose' so `click NODE callback` can fire a window.<callback>.
+            // Only names on window are callable; no eval, no URL injection.
+            window.mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+          } catch (_) {}
+          resolve(window.mermaid);
+        };
+        s.onerror = () => resolve(null);
+        document.head.appendChild(s);
+      });
+      return ensureMermaid._p;
+    }
+    function _flowEscHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function _flowInlineMd(s) {
+      let out = _flowEscHtml(s);
+      out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+      out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      return out;
+    }
+    function _flowRenderMarkdownLite(md) {
+      // Fenced code, H1-H3, GFM tables, bullet lists, inline code, bold,
+      // paragraphs. <details>/<summary> lines pass through verbatim so
+      // flowchart nodes can carry data-flow-node attributes.
+      const rawTagRe = /^(\s*)(<\/?details(?:\s[^>]*)?>|<\/?summary>|<summary>.*<\/summary>)(\s*)$/i;
+      const lines = md.split('\n');
+      const out = [];
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+        if (rawTagRe.test(line)) { out.push(line); i++; continue; }
+        const fence = line.match(/^```(\w*)\s*$/);
+        if (fence) {
+          const lang = fence[1] || '';
+          const buf = [];
+          i++;
+          while (i < lines.length && !/^```\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+          i++;
+          if (lang === 'mermaid') {
+            out.push(`<pre class="mermaid">${_flowEscHtml(buf.join('\n'))}</pre>`);
+          } else {
+            out.push(`<pre><code>${_flowEscHtml(buf.join('\n'))}</code></pre>`);
+          }
+          continue;
+        }
+        const h = line.match(/^(#{1,3})\s+(.+)$/);
+        if (h) { const n = h[1].length; out.push(`<h${n}>${_flowInlineMd(h[2])}</h${n}>`); i++; continue; }
+        if (/^\s*\|/.test(line) && i+1 < lines.length && /^\s*\|?\s*-{2,}/.test(lines[i+1].replace(/\|/g,''))) {
+          const header = line.split('|').map((c) => c.trim()).filter((c,idx,arr)=>!(idx===0&&c==='')&&!(idx===arr.length-1&&c===''));
+          i += 2;
+          const rows = [];
+          while (i < lines.length && /^\s*\|/.test(lines[i])) {
+            const row = lines[i].split('|').map((c)=>c.trim()).filter((c,idx,arr)=>!(idx===0&&c==='')&&!(idx===arr.length-1&&c===''));
+            rows.push(row); i++;
+          }
+          out.push('<table><thead><tr>' + header.map((c)=>`<th>${_flowInlineMd(c)}</th>`).join('') + '</tr></thead><tbody>' +
+                   rows.map((r)=>'<tr>'+r.map((c)=>`<td>${_flowInlineMd(c)}</td>`).join('')+'</tr>').join('') + '</tbody></table>');
+          continue;
+        }
+        if (/^\s*[-*]\s+/.test(line)) {
+          const buf = [];
+          while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+            buf.push(lines[i].replace(/^\s*[-*]\s+/, ''));
+            i++;
+          }
+          out.push('<ul>' + buf.map((b)=>`<li>${_flowInlineMd(b)}</li>`).join('') + '</ul>');
+          continue;
+        }
+        if (line.trim() === '') { i++; continue; }
+        const buf = [line];
+        i++;
+        while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,3}\s|```|\s*\||[-*]\s)/.test(lines[i]) && !rawTagRe.test(lines[i])) { buf.push(lines[i]); i++; }
+        out.push(`<p>${_flowInlineMd(buf.join(' '))}</p>`);
+      }
+      return out.join('\n');
+    }
+    async function refreshRecipeFlowchart(recipeName) {
+      const body = byId('recipe-flowchart-body');
+      const status = byId('recipe-flowchart-status');
+      if (!body) return;
+      if (!recipeName) {
+        recipeName = byId('pipeline-select')?.value || 'pipeline_runner';
+      }
+      status.textContent = `loading flowchart for ${recipeName}…`;
+      try {
+        const res = await fetch(`/api/recipe_flowchart?recipe=${encodeURIComponent(recipeName)}`, { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!data.ok) {
+          const triedList = Array.isArray(data.tried) ? data.tried : [];
+          const triedHtml = triedList.length
+            ? '<ul>' + triedList.map((p) => `<li><code>${_flowEscHtml(p)}</code></li>`).join('') + '</ul>'
+            : '';
+          body.innerHTML = `<p class="hint" style="margin:8px 0;">No flowchart for <code>${_flowEscHtml(recipeName)}</code> yet. Tried:</p>${triedHtml}`;
+          status.textContent = data.error || `HTTP ${res.status}`;
+          return;
+        }
+        body.innerHTML = _flowRenderMarkdownLite(data.markdown || '');
+        status.textContent = data.path || '';
+        const mermaidNodes = body.querySelectorAll('pre.mermaid');
+        if (mermaidNodes.length) {
+          const m = await ensureMermaid();
+          if (m && m.run) {
+            try { await m.run({ nodes: mermaidNodes }); } catch (_) {}
+          }
+        }
+      } catch (e) {
+        status.textContent = String(e && e.message || e);
+      }
+    }
+    (function () {
+      const s = byId('pipeline-select');
+      if (!s) return;
+      refreshRecipeFlowchart(s.value || '');
+      s.addEventListener('change', () => refreshRecipeFlowchart(byId('pipeline-select').value));
+    })();
 
     refresh().catch(console.error);
     byId('pipeline-select').addEventListener('change', async () => {

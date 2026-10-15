@@ -101,9 +101,30 @@ CWD  = process.cwd()
 # stable place to keep `./.venv`. In the old monolith layout (runner lives at
 # the project root, no node_modules ancestor) BASE == EXEC.
 BASE = do ->
+  # First try the classic EXEC-based lookup: when the runner is a plain
+  # npm install, EXEC literally contains `/node_modules/`.
   marker = "#{path.sep}node_modules#{path.sep}"
   idx = EXEC.indexOf(marker)
-  if idx isnt -1 then EXEC.slice(0, idx) else EXEC
+  return EXEC.slice(0, idx) if idx isnt -1
+  # 2026-10-15 — EXEC-based lookup fails when the runner is reached
+  # through a symlink that resolves OUT of the project (common in pnpm
+  # and in dev setups like notebookie where `node_modules/@jahbini/pipeline`
+  # points at the shared pipeline checkout). `__filename` resolves
+  # symlinks, so EXEC ends up at the pipeline checkout — no node_modules
+  # ancestor there. Walk up from CWD looking for `node_modules/@jahbini/pipeline`;
+  # that directory IS the project root.
+  dir = CWD
+  home = process.env.HOME ? ''
+  guard = 0
+  while guard < 8
+    guard += 1
+    probe = path.join(dir, 'node_modules', '@jahbini', 'pipeline')
+    return dir if fs.existsSync(probe)
+    parent = path.dirname(dir)
+    break if parent is dir
+    break if home.length and dir is home
+    dir = parent
+  EXEC
 
 ###
 Small utilities used throughout. `banner` is the loud section divider in
