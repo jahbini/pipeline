@@ -1,8 +1,10 @@
 Area: `ui_server.coffee` + `ui/index.html`
 
-**2026-10-08 cutover**: `pipeline/ui_server.coffee` is now the ONLY
-ui_server. Puppeteer and writer no longer ship their own; they ship a
-`ui/puppet.coffee` plugin that the library auto-loads. See
+**2026-10-08 cutover; 2026-10-16 cleanup**: `pipeline/ui_server.coffee`
+is the ONLY ui_server that is ever spawned. All project-level forks
+(writer, puppeteer, pipeline-demo, analist, pipeline-pipes, writediary,
+writers-guild, publicist) have been deleted. Projects contribute via
+`${CWD}/ui/project.coffee` plugins that the library auto-loads. See
 `[[plugin_system]]` for the plugin contract and `[[ipc]]` for the
 broker/memo modules the UI falls back on when the runner is down.
 This document covers behavior shared by all project launches.
@@ -25,10 +27,10 @@ UI lifecycle controls (restart + kill switch):
 - `POST /api/switch_pipe` (`handleSwitchPipe`, "Switch Pipe UI" button) is the
   canonical RESTART action. A real pipe name switches+relaunches into
   `pipes/<name>/`; an EMPTY pipe restarts the current workspace IN PLACE
-  (critical for non-`pipes/` workspaces like the repo root). It relaunches the
-  TARGET workspace's own `ui_server.coffee` (falls back to `EXEC_ROOT`'s),
-  preserving a project's edited UI + its `runtime.sqlite`. The button is never
-  disabled.
+  (critical for non-`pipes/` workspaces like the repo root). The respawn
+  always re-execs `pipeline/ui_server.coffee` (via `require.main.filename`,
+  which post-cutover resolves to the shared library file in every project).
+  The button is never disabled.
 - `POST /api/shutdown_ui` (`handleShutdownUi`, "Shutdown UI Server" button) is
   the KILL SWITCH. A relaunched server is `detached` + `unref`'d, so the
   browser is the only handle on it; this endpoint responds then
