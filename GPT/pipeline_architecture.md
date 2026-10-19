@@ -35,9 +35,15 @@ The substrate (the parts that should *not* change per project):
 
 - **DAG scheduler.** Steps declare `needs:` (inputs) and `makes:` (outputs).
   The runner builds the topology, runs steps in dependency order, and skips
-  steps whose outputs are already current.
+  steps whose outputs are already current. A third keyword, `uses:`
+  (added 2026-10-19), declares artifacts a step reads at runtime without
+  creating a scheduling edge — the step owns the wait-vs-proceed decision.
+  See `pipeline_runner.md` § "needs / makes / uses".
 - **The Memo.** A reactive in-memory artifact store. Steps publish via
   `L.make 'artifact_name', value`; downstream steps `await L.need 'artifact_name'`.
+  `L.use 'artifact_name'` is a synchronous, non-blocking lookup that
+  returns the memo entry — never throws, rehydrates from the artifact's
+  target file when a prior-run producer was skipped.
 - **Per-step state files.** Each step writes `state/step-<name>.json`
   recording status, timing, and a summary. If a step in the middle of a
   DAG dies, `state/` plus `params/` tell the next launch where to resume.

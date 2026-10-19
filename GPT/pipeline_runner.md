@@ -158,6 +158,80 @@ threw with the step name. A prescreen like `throw unless typeof raw is 'string'`
 produces nothing the natural error wouldn't and violates the no-prechecks rule
 above.
 
+## `needs:` / `makes:` / `uses:` — scheduling vs opportunistic reads
+
+A step's YAML declares its artifact traffic via three keywords. The runner
+treats them as three distinct concerns:
+
+- **`needs:`** — DAG edge. The scheduler will not start the step until every
+  key here is produced by its declared producer. The step reads via
+  `await L.need(key)`; `L.need` throws if the artifact is missing after
+  resolution, because the DAG promised it would be there.
+- **`makes:`** — DAG edge. The step publishes these artifacts via
+  `L.make(key, value)`; downstream steps' `needs:` edges attach here.
+  Exactly one step may `make` a given key.
+- **`uses:`** — **no DAG edge.** The scheduler ignores `uses:`. The keyword
+  is advisory metadata: it lets the runner record (in `params/<step>.yaml`
+  and in the artifact ledger) that this step reads the key at runtime,
+  without creating a dependency the scheduler must satisfy. The step reads
+  via `L.use(key)` and owns the wait-vs-proceed decision itself.
+
+`L.use` behavior (added 2026-10-19):
+
+- **Synchronous.** Returns the memo ENTRY (`{value, notifier, …}`) — not
+  just the value — so the step can inspect state, default, or `await
+  entry.notifier` if it chooses.
+- **Never throws for missing.** `entry.value === undefined` is a legitimate
+  outcome; absent is a state the script reasons about.
+- **Rehydrates like `peek`.** Resolution order is memo entry under
+  `artifactKey` → `spec.source` key → `spec.target` file. The target-file
+  rehydration is the load-bearing one: a step whose upstream producer was
+  marked `done` from a prior launch (and therefore skipped this launch)
+  can still read the artifact from its persisted target. `L.theLowdown`
+  alone does NOT do this — it is a plain memo peek — so steps that need
+  to tolerate "producer skipped" must use `L.use`, not `L.theLowdown`.
+- **Emits a UI event** (`type: 'use'`, `phase: 'resolved' | 'absent'`)
+  tagged with whether the key was declared. The artifact watchdog log
+  records `USE` events alongside `NEED` / `MAKE` / `PEEK`.
+- **Declaration is advisory.** `uses:`, `needs:`, and `makes:` all let
+  `L.use` resolve without warning; an undeclared read works too but gets
+  `declared: false` in the ledger event.
+
+### When to pick which
+
+- Upstream MUST finish before this step runs → `needs:` + `L.need`.
+- Upstream usually finishes but this step can tolerate a skipped or
+  stale producer and wants to inspect `.value`/`.notifier` itself →
+  `needs:` + `L.use` (DAG edge, but step owns the read semantics).
+  This is the correct shape for `queue_run_ite`'s `queue_from`
+  parameter — the artifact `L.theLowdown` returned `undefined` when
+  the generator was skipped from a prior run; swapping to `L.use`
+  rehydrates from the target file transparently.
+- Step opportunistically reads an artifact that may or may not exist,
+  with no scheduling guarantee → `uses:` + `L.use`.
+- Step writes an artifact → `makes:` + `L.make`.
+
+### Example
+
+```yaml
+# recipe
+queue_run_ite:
+  needs: [hf_queue_entries]       # DAG edge — upstream must produce it
+  queue_from: hf_queue_entries
+```
+
+```coffee
+# step
+entry = L.use(queueFromKey)       # synchronous; rehydrates from target
+queue = entry?.value
+if Array.isArray(queue) and queue.length
+  # proceed
+else if queue?
+  throw new Error "[#{L.stepName}] queue_from resolved to non-array"
+else
+  console.log "nothing to drive"; L.done(); return
+```
+
 ## Artifact access ledger — opt-in accountability for needs/makes
 
 When `debug_s` is given as an ARRAY of artifact keys (anywhere in the

@@ -1214,6 +1214,11 @@ step is allowed to do:
     L.param(key, default?)        — read a param (step → global → default)
     L.need(artifactKey)           — read a declared input; awaits if absent
     L.peek(artifactKey, default?) — read maybe-present input, never blocks
+    L.use(artifactKey)            — load an artifact's memo ENTRY (no DAG
+                                    edge, no block, no throw); the step
+                                    inspects .value and decides to proceed
+                                    or await .notifier. Declare under
+                                    `uses:` for observability only.
     L.make(artifactKey, value)    — write a declared output
     L.done()                      — mark step success (idempotent)
     L.fail(err)                   — mark step failure (re-throws)
@@ -1410,7 +1415,8 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
     stepP = memo.theLowdown("params/#{stepName}.yaml")?.value ? {}
     needs = normalizeArtifactKeys(stepP.needs ? [])
     makes = normalizeArtifactKeys(stepP.makes ? [])
-    { needs, makes }
+    uses  = normalizeArtifactKeys(stepP.uses ? [])
+    { needs, makes, uses }
 
   debugEnabled = ->
     memo.getStepParam(stepName, 'debug_s') is true
@@ -1611,6 +1617,53 @@ createStepLedger = (memo, stepName, resolveArtifact, artifactSpecFor, uiRecorder
       ui type:'peek', phase:'resolved', artifact:artifactKey, artifact_detail:describeArtifact(artifactKey), value_summary:summarizeValue(value)
       recordWatchdogEvent stepName, 'PEEK', artifactKey, value
       value
+
+    # 2026-10-19: L.use — synchronous, non-blocking Memo lookup.
+    #
+    #   Returns the MEMO ENTRY ({value, notifier, ...}) — not just the
+    #   value — so the step can inspect state and decide for itself
+    #   whether to proceed, default, or await entry.notifier.
+    #
+    #   Resolution order (same as L.peek, minus the needs/makes gate):
+    #     1. memo.theLowdown(artifactKey)   # producer-written entry
+    #     2. spec.source key                # source-backed artifacts
+    #     3. spec.target file               # rehydrate from disk
+    #
+    #   NEVER throws on missing — missing is a legitimate .value===undefined
+    #   outcome. NEVER creates a DAG edge; the recipe-side `uses:` keyword
+    #   is advisory metadata, not a scheduling signal.
+    use: (artifactKey) ->
+      { needs, makes, uses } = getDecls()
+      declared = needs.includes(artifactKey) or makes.includes(artifactKey) or uses.includes(artifactKey)
+      debug "use request", describeArtifact(artifactKey), "declared=", declared
+
+      entry = memo.theLowdown artifactKey
+
+      # If the producer wrote directly to artifactKey the entry already
+      # carries .value. Otherwise fall back through source/target like peek.
+      if not entry? or entry.value is undefined
+        spec = artifactSpecFor artifactKey
+        source = if isPlainObject(spec) then spec.source ? spec.key else spec
+        target = if isPlainObject(spec) then spec.target else null
+
+        if typeof source is 'string'
+          srcEntry = memo.theLowdown source
+          if srcEntry?.value isnt undefined
+            memo.saveThis artifactKey, srcEntry.value
+            entry = memo.theLowdown artifactKey
+            debug "use resolved from source", source
+
+        if (not entry? or entry.value is undefined) and typeof target is 'string'
+          targetEntry = memo.theLowdown target
+          if targetEntry?.value isnt undefined
+            memo.saveThis artifactKey, targetEntry.value
+            entry = memo.theLowdown artifactKey
+            debug "use resolved from target", target
+
+      phase = if entry?.value is undefined then 'absent' else 'resolved'
+      ui type:'use', phase:phase, artifact:artifactKey, artifact_detail:describeArtifact(artifactKey), declared:declared, value_summary:summarizeValue(entry?.value)
+      recordWatchdogEvent stepName, 'USE', artifactKey, entry?.value
+      entry
 
     make: (artifactKey, value) ->
       { makes } = getDecls()
@@ -2244,6 +2297,11 @@ main = ->
       throw new Error "Step '#{n}' must declare makes: []"
     steps[n].needs = normalizeArtifactKeys(steps[n].needs).sort()
     steps[n].makes = normalizeArtifactKeys(steps[n].makes).sort()
+    # `uses:` (optional) — declares artifacts the step reads at runtime
+    # via L.use(). Unlike `needs`, this creates NO DAG edge: the scheduler
+    # does not wait for a producer, and the step owns the wait-vs-proceed
+    # decision. Normalize so L.use can log whether the key was declared.
+    steps[n].uses = normalizeArtifactKeys(steps[n].uses ? []).sort()
     for k in steps[n].makes
       throw new Error "Artifact '#{k}' is produced by multiple steps: #{producedBy[k]} and #{n}" if producedBy[k]?
       producedBy[k] = n

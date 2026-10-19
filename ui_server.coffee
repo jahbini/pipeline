@@ -1261,7 +1261,13 @@ buildStatus = ->
   storiesRemaining = if oracleRemaining? then oracleRemaining else loraRemaining
   events = ipcEvents ? readJsonlTail path.join(CWD, 'state', 'ui-events.jsonl')
   steps = ipcSteps ? collectStepStates()
-  stem = if run?.logdir? then String(run.logdir) else latestLogStem()
+  # 2026-10-17 — don't trust a stale run.logdir. If the file it names
+  # isn't on disk (crashed run, cleared logs, out-of-sync run.json),
+  # fall through to latestLogStem() so Latest Log/Err show the newest
+  # actual log instead of empty.
+  stem = if run?.logdir? and fs.existsSync(path.join(CWD, 'logs', "#{run.logdir}.log"))
+    then String(run.logdir)
+    else latestLogStem()
   latestLog = if stem? then readText(path.join(CWD, 'logs', "#{stem}.log")) else ''
   latestErr = if stem? then readText(path.join(CWD, 'logs', "#{stem}.err")) else ''
 
