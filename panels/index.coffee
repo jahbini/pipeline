@@ -81,6 +81,7 @@ loadPanel = (name, filePath) ->
       column:        String(panel.column ? 'left')
       eager:         panel.eager is true
       poll_seconds:  Number(panel.poll_seconds ? 5)
+      sort_order:    if typeof panel.sort_order is 'number' then panel.sort_order else null
       applies:       if typeof panel.applies is 'function' then panel.applies else null
       endpoint:      panel.endpoint
       _path:         filePath
@@ -113,9 +114,14 @@ exports.load = ({CWD, BASE, EXEC, helpers}) ->
 
   registry =
     list: ->
+      # sort_order IS serialized (2026-10-21): the client's
+      # renderDynamicPanels() sorts by meta.sort_order, but it was never
+      # sent — so every panel defaulted to 100 and ordering fell back to
+      # load order. Panels without sort_order still default to 100 on the
+      # client, so this only affects panels that declare one.
       for name, p of panels
         {name, title: p.title, render_hint: p.render_hint, column: p.column,
-         eager: p.eager, poll_seconds: p.poll_seconds, tier: p.tier}
+         eager: p.eager, poll_seconds: p.poll_seconds, sort_order: p.sort_order, tier: p.tier}
 
     get: (name) -> panels[name] ? null
 

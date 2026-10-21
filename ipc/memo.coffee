@@ -2,7 +2,9 @@
 path = require 'path'
 fs   = require 'fs'
 
-DEFAULT_PATH = "#{process.env.HOME}/pipeline/state/memo.sqlite"
+# MEMO_DB overrides the sqlite path (scratch DB for tests; the future
+# switchboard's configurable store). Default unchanged.
+DEFAULT_PATH = process.env.MEMO_DB ? "#{process.env.HOME}/pipeline/state/memo.sqlite"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memo (
@@ -25,7 +27,9 @@ CREATE INDEX IF NOT EXISTS memo_prefix ON memo(key);
 
 HISTORIED  = [/^ui\/intent\//, /^run\/[^\/]+\/verdict$/, /^pipe\/[^\/]+\/schedule\//]
 HISTORY_N  = 20
-NOTIFIED   = [/^ui\//, /^sys\//, /^pipe\/[^\/]+\/schedule\//]
+# story/* (spine library) and run/*/preview|progress (live step output)
+# are UI-reactive per UI_MEMO.md's key table — they must publish on write.
+NOTIFIED   = [/^ui\//, /^sys\//, /^pipe\/[^\/]+\/schedule\//, /^story\//, /^run\/[^\/]+\/(preview|progress)$/]
 
 keyMatches = (patterns, key) ->
   for p in patterns when p.test key then return true
@@ -131,7 +135,16 @@ class Memo
 
   _notify: (key, value, version, who) ->
     return unless @broker and keyMatches NOTIFIED, key
-    @broker.publish "memo/#{key}", {value, version, updated_by: who, ts: Date.now()}, retain: value isnt null
+    if value is null
+      # Deletion (or put of literal null): the broker only clears its
+      # retained record when the PAYLOAD is null and retain is true —
+      # a {value:null,…} envelope with retain:false leaves the dead
+      # value replaying to every new subscriber. Clear first, then a
+      # volatile tombstone so live subscribers learn version/author.
+      @broker.publish "memo/#{key}", null, retain: true
+      @broker.publish "memo/#{key}", {value: null, version, updated_by: who, ts: Date.now()}, retain: false
+    else
+      @broker.publish "memo/#{key}", {value, version, updated_by: who, ts: Date.now()}, retain: true
 
   rehydrate: ->
     return 0 unless @broker

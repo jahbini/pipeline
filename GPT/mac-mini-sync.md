@@ -147,3 +147,32 @@ ssh theaiguy@mac-mini.local '
 startup — see `GPT/pipeline_runner.md` § "Python / MLX env — validate,
 never fix"). The runner will not attempt any repair; it only errors
 loudly with the paths it tried.
+
+## @frost-beta cross-host symlink leak (2026-10-21)
+
+**Symptom:** MLX recipes launched on the mini via the runner
+(`broadcast`, `storacle`, `voice_test`, …) die with
+`Cannot find module '@frost-beta/llm'` — even though the writer's
+node_modules has it.
+
+**Root cause:** `~/pipeline/node_modules/@frost-beta` was an **absolute**
+symlink → `/Users/jahbini/writer/node_modules/@frost-beta` (the
+**laptop's** path, mtime Aug 26). It resolves on the laptop but
+**dangles on the mini** (no `/Users/jahbini/writer` there — the mini is
+`/Users/theaiguy`). The runner only hits it when dep resolution goes
+through `~/pipeline` — i.e. once the `writer/node_modules/@jahbini/
+pipeline → ~/pipeline` symlink (which `/sync-mini` re-establishes) is
+in place. Before that, resolution went via the `.pnpm` copy, which has
+`@frost-beta/llm` intact, so the leak was masked.
+
+**Fix (applied both machines):** make it a **relative** symlink so it
+resolves to each host's own writer:
+```
+cd ~/pipeline/node_modules && rm @frost-beta && \
+  ln -s ../../writer/node_modules/@frost-beta @frost-beta
+```
+`../../writer/...` → `/Users/<me>/writer/node_modules/@frost-beta` on
+either host. The parked `@frost-beta.dev-original` holds the original
+0.4.1 `llm`/`mlx` `.pnpm` symlinks (migration artifact); the live
+`@frost-beta` points into the writer's pnpm store. Same
+never-bake-a-host-absolute-path lesson as the MODELS glob rule.

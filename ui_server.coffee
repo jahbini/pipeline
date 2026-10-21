@@ -20,6 +20,12 @@ try
 catch err
   console.error "[ui_server] ipc disabled: #{err?.message ? err}" if process.env.IPC_DEBUG
 
+# Reconnect throttle for GET /api/events. EventSource auto-reconnects
+# aggressively on disconnect; a wifi flap can flood the server. Reject a
+# second connect from the same remote within 1s. Module-scope so it
+# outlives individual requests.
+_sseThrottle = new Map()
+
 # ── Project plugin (puppeteer/writer-specific overlay) ───────────
 # A project may ship `ui/project.coffee` to add routes, override the
 # default port, or run a pre-startup hook (e.g. puppeteer's sticky
@@ -420,6 +426,14 @@ workspacePipeName = (workspacePath = CWD) ->
   return null if not rel? or rel.startsWith('..') or path.isAbsolute(rel) or rel is ''
   rel.split(path.sep)[0] ? null
 
+# Scope the IPC status cache to this workspace's pipe. Unfiltered, the
+# cache serves whichever pipe last published — another pipe's run shown
+# as this pipe's /api/status. Safe to set here: the module evaluates
+# synchronously, so no broker message can arrive before this line runs.
+# null (CWD not under pipes/) keeps the accept-all behavior, matching
+# wire.coffee's derivePipe fallback for top-level single-pipeline runs.
+ipcStatus?.filterPipe = workspacePipeName(CWD)
+
 inferModelIdFromPipeName = (pipeName) ->
   name = String(pipeName ? '').trim()
   return '' unless name.length
@@ -507,6 +521,12 @@ listArtifactsOnDisk = (dir = 'out') ->
 KNOWN_ENDPOINTS = [
   { method: 'GET',  path: '/api/manifest',                         summary: 'this manifest — agent bootstrap' }
   { method: 'GET',  path: '/api/status',                           summary: 'live run/pipe/steps state for the active pipe' }
+  { method: 'GET',  path: '/api/ipc_health',                       summary: 'broker/memo wedge health: broker_connected, cache_ready, lifecycle, filter_pipe, memo_rows (2026-10-21)' }
+  { method: 'GET',  path: '/api/events',                           summary: 'SSE stream: run/step/event/lifecycle/memo pushes; hello + 20s heartbeat; survives broker-down (2026-10-21)' }
+  { method: 'GET',  path: '/api/memo/<key>',                       summary: 'read a memo key → {value,version,updated_at,updated_by}; 404 if absent; disk-fallback tagged source:disk when broker down (2026-10-21)' }
+  { method: 'POST', path: '/api/memo/<key>',                       summary: 'write a memo key; body {value, if_version?}; if_version → CAS (409 on mismatch); broker-down → 503 (2026-10-21)' }
+  { method: 'DELETE', path: '/api/memo/<key>',                     summary: 'delete a memo key; 404 if absent; broker-down → 503 (2026-10-21)' }
+  { method: 'GET',  path: '/api/memo?prefix=<p>',                  summary: 'list memo keys under a prefix → {entries:[...]}; disk-fallback when broker down (2026-10-21)' }
   { method: 'GET',  path: '/api/find_active_runner',               summary: 'scan every pipe for a live pipeline_runner; returns pipes hosting one (2026-09-13)' }
   { method: 'GET',  path: '/api/adapters',                         summary: 'list adapters usable by the active pipe (base sentinel + trained + checkpoints + good_adapters) (2026-09-13)' }
   { method: 'GET',  path: '/api/sqlite/<request-key>',             summary: 'dispatch a meta/sqlite request key through the active pipe' }
@@ -1265,9 +1285,11 @@ buildStatus = ->
   # isn't on disk (crashed run, cleared logs, out-of-sync run.json),
   # fall through to latestLogStem() so Latest Log/Err show the newest
   # actual log instead of empty.
-  stem = if run?.logdir? and fs.existsSync(path.join(CWD, 'logs', "#{run.logdir}.log"))
-    then String(run.logdir)
-    else latestLogStem()
+  stem =
+    if run?.logdir? and fs.existsSync(path.join(CWD, 'logs', "#{run.logdir}.log"))
+      String(run.logdir)
+    else
+      latestLogStem()
   latestLog = if stem? then readText(path.join(CWD, 'logs', "#{stem}.log")) else ''
   latestErr = if stem? then readText(path.join(CWD, 'logs', "#{stem}.err")) else ''
 
@@ -2451,6 +2473,113 @@ handleRecipeFlowchart = (req, res) ->
   catch e
     sendJson res, 500, {ok: false, error: String(e?.message ? e), path: flowchartPath}
 
+# ── /api/memo/* — operator key/value store (IPC memo over broker RPC) ──
+# Thin HTTP front over `ipcStatus.memoRequest` (RPC to the runner's memo
+# handler). The browser never speaks the broker protocol; this server
+# multiplexes. Broker-down policy: WRITES → 503 {error:'runner_down'};
+# READS fall back to a read-only open of state/memo.sqlite, tagged
+# "source":"disk" so a caller never mistakes stale disk data for live
+# broker data. Keys are validated by memo.coffee's own validateKey — a
+# thrown `bad_key` maps to 400. See REFACTOR_MEMO.md stage 4 / UI_MEMO.md.
+# MEMO_DB overrides the sqlite path (matches memo.coffee / wire.coffee);
+# default is the runner's canonical store. Keeps the disk-fallback reads
+# below and the Stage-1 /api/ipc_health count pointed at the same file
+# the broker's memo writes.
+MEMO_DB_PATH = process.env.MEMO_DB ? path.join((process.env.HOME ? ''), 'pipeline', 'state', 'memo.sqlite')
+
+_brokerUp = -> ipcStatus? and ipcStatus.connected
+
+_memoDiskGet = (key) ->
+  # Mirror of memo.coffee::get, read-only. Returns null if absent/unreadable.
+  return null unless fs.existsSync MEMO_DB_PATH
+  db = null
+  try
+    db = new DatabaseSync MEMO_DB_PATH, { readOnly: true }
+    row = db.prepare('SELECT value, version, updated_at, updated_by FROM memo WHERE key = ?').get key
+    return null unless row
+    {value: JSON.parse(row.value), version: row.version, updated_at: row.updated_at, updated_by: row.updated_by}
+  catch
+    null
+  finally
+    try db?.close() catch then null
+
+_memoDiskPrefix = (prefix, limit=1000) ->
+  # Mirror of memo.coffee::getPrefix, read-only. '~' is the half-open
+  # upper bound (greater than any legal key char).
+  return [] unless fs.existsSync MEMO_DB_PATH
+  db = null
+  try
+    db = new DatabaseSync MEMO_DB_PATH, { readOnly: true }
+    rows = db.prepare('SELECT key, value, version, updated_at FROM memo WHERE key >= ? AND key < ? ORDER BY key').all prefix, prefix + '~'
+    rows = rows.slice 0, limit
+    ({key: r.key, value: JSON.parse(r.value), version: r.version, updated_at: r.updated_at} for r in rows)
+  catch
+    []
+  finally
+    try db?.close() catch then null
+
+handleMemo = (req, res, url) ->
+  pathname = url.split('?')[0]
+  # GET /api/memo?prefix=<p> — prefix listing
+  if pathname is '/api/memo'
+    return sendJson res, 405, {ok: false, error: 'method_not_allowed'} unless req.method is 'GET'
+    query  = new URL(url, 'http://127.0.0.1').searchParams
+    prefix = query.get('prefix') ? ''
+    if _brokerUp()
+      try
+        entries = await ipcStatus.memoRequest 'get_prefix', {prefix, limit: 1000}
+        return sendJson res, 200, {entries}
+      catch err
+        return sendJson res, 400, {ok: false, error: 'bad_prefix'} if String(err?.message ? err) is 'bad_prefix'
+        # transport error → fall through to disk
+    return sendJson res, 200, {entries: _memoDiskPrefix(prefix), source: 'disk'}
+  # /api/memo/<key> — GET | POST | DELETE
+  rawKey = decodeURIComponent pathname.slice('/api/memo/'.length)
+  switch req.method
+    when 'GET'
+      if _brokerUp()
+        try
+          row = await ipcStatus.memoRequest 'get', {key: rawKey}
+          return sendJson res, 404, {ok: false, error: 'not_found'} unless row?
+          return sendJson res, 200, row
+        catch err
+          return sendJson res, 400, {ok: false, error: 'bad_key'} if String(err?.message ? err) is 'bad_key'
+          # transport error → fall through to disk
+      diskRow = _memoDiskGet rawKey
+      return sendJson res, 404, {ok: false, error: 'not_found'} unless diskRow?
+      return sendJson res, 200, Object.assign({}, diskRow, {source: 'disk'})
+    when 'POST'
+      bodyText = await readRequestBody req
+      body = {}
+      try body = JSON.parse(bodyText ? '{}')
+      catch then return sendJson res, 400, {ok: false, error: 'invalid json body'}
+      return sendJson res, 503, {ok: false, error: 'runner_down'} unless _brokerUp()
+      try
+        if body.if_version?
+          # CAS: if_version:0 means create-if-absent; otherwise compare.
+          out = await ipcStatus.memoRequest 'cas', {key: rawKey, value: body.value, if_version: body.if_version}
+          return sendJson res, 409, {ok: false, error: 'version_mismatch'} if out?.ok is false
+          return sendJson res, 200, out
+        else
+          out = await ipcStatus.memoRequest 'put', {key: rawKey, value: body.value}
+          return sendJson res, 200, out
+      catch err
+        msg = String(err?.message ? err)
+        return sendJson res, 400, {ok: false, error: 'bad_key'} if msg is 'bad_key'
+        return sendJson res, 503, {ok: false, error: 'runner_down', detail: msg}
+    when 'DELETE'
+      return sendJson res, 503, {ok: false, error: 'runner_down'} unless _brokerUp()
+      try
+        out = await ipcStatus.memoRequest 'del', {key: rawKey}
+        return sendJson res, 404, {ok: false, error: 'not_found'} if out?.ok is false
+        return sendJson res, 200, out
+      catch err
+        msg = String(err?.message ? err)
+        return sendJson res, 400, {ok: false, error: 'bad_key'} if msg is 'bad_key'
+        return sendJson res, 503, {ok: false, error: 'runner_down', detail: msg}
+    else
+      return sendJson res, 405, {ok: false, error: 'method_not_allowed'}
+
 server = http.createServer (req, res) ->
   url = req.url ? '/'
   return if tryPluginRoute(req, res)
@@ -2472,6 +2601,87 @@ server = http.createServer (req, res) ->
     .then (status) ->
       sendJson res, 200, status
     .catch (err) ->
+      sendJson res, 500, {ok: false, error: String(err?.message ? err)}
+  if url is '/api/ipc_health'
+    # Observability for the broker/memo wedge: is the runner's broker
+    # reachable, is the StatusSource cache warm, which pipe is it scoped
+    # to, and how many memo keys exist on disk. Every field degrades to
+    # false/null when the runner (and thus the broker) is down — this
+    # endpoint exists precisely to close that observability gap (the
+    # 2026-10-20 stale-doc incident). See UI_MEMO.md / REFACTOR_MEMO.md
+    # stage 1. memo.sqlite is opened read-only and closed immediately;
+    # we never hold the handle.
+    memoRows = null
+    memoPath = MEMO_DB_PATH
+    if fs.existsSync memoPath
+      db = null
+      try
+        db = new DatabaseSync memoPath, { readOnly: true }
+        row = db.prepare('SELECT COUNT(*) AS n FROM memo').get()
+        memoRows = Number(row?.n ? 0)
+      catch
+        memoRows = null
+      finally
+        try db?.close() catch then null
+    return sendJson res, 200,
+      broker_connected: ipcStatus?.connected ? false
+      cache_ready:      ipcStatus?.ready ? false
+      lifecycle:        ipcStatus?.lifecycle ? null
+      filter_pipe:      ipcStatus?.filterPipe ? null
+      memo_rows:        memoRows
+  if url is '/api/events'
+    # Single server-sent-events stream the browser subscribes to once
+    # per page; the ui_server multiplexes broker publishes onto it (the
+    # browser never speaks the broker protocol). Survives a broker-down
+    # runner — the stream opens, emits `hello`, and heartbeats until the
+    # StatusSource reconnects and events resume. See REFACTOR_MEMO stage 3.
+    ip = req.socket?.remoteAddress ? 'unknown'
+    last = _sseThrottle.get ip
+    now = Date.now()
+    if last? and (now - last) < 1000
+      res.writeHead 429, {'Content-Type': 'text/plain'}
+      return res.end 'reconnecting too fast'
+    _sseThrottle.set ip, now
+    res.writeHead 200,
+      'Content-Type':      'text/event-stream'
+      'Cache-Control':     'no-cache'
+      'Connection':        'keep-alive'
+      'X-Accel-Buffering': 'no'   # defeat proxy buffering of the stream
+    res.flushHeaders?()
+    send = (name, payload) ->
+      try res.write "event: #{name}\ndata: #{JSON.stringify payload}\n\n" catch then null
+    # Tell the client the stream is live even when the runner is down.
+    send 'hello', {broker_connected: ipcStatus?.connected ? false, filter_pipe: ipcStatus?.filterPipe ? null}
+    # run/step/event/lifecycle forward the emitted payload verbatim.
+    # memo is reshaped to the browser contract {key, value, version}
+    # (a null payload is a deletion → value:null, deleted:true) so
+    # window.ui_memo consumers can destructure {key, value} directly.
+    onRun       = (p) -> send 'run', p
+    onStep      = (p) -> send 'step', p
+    onEvent     = (p) -> send 'event', p
+    onLifecycle = (p) -> send 'lifecycle', p
+    onMemo      = (m) -> send 'memo', {key: m.key, value: m.payload?.value ? null, version: m.payload?.version ? null, deleted: m.payload is null}
+    if ipcStatus?
+      ipcStatus.on 'run',       onRun
+      ipcStatus.on 'step',      onStep
+      ipcStatus.on 'event',     onEvent
+      ipcStatus.on 'lifecycle', onLifecycle
+      ipcStatus.on 'memo',      onMemo
+    # Comment-line heartbeat keeps proxies/Safari from killing an idle
+    # stream. This is a keep-alive ping, not a data poll — the only
+    # intentional sub-60s interval in the stack.
+    hb = setInterval (-> try res.write ': ping\n\n' catch then null), 20000
+    req.on 'close', ->
+      clearInterval hb
+      if ipcStatus?
+        ipcStatus.removeListener 'run',       onRun
+        ipcStatus.removeListener 'step',      onStep
+        ipcStatus.removeListener 'event',     onEvent
+        ipcStatus.removeListener 'lifecycle', onLifecycle
+        ipcStatus.removeListener 'memo',      onMemo
+    return
+  if url is '/api/memo' or url.startsWith('/api/memo?') or url.startsWith('/api/memo/')
+    return Promise.resolve(handleMemo(req, res, url)).catch (err) ->
       sendJson res, 500, {ok: false, error: String(err?.message ? err)}
   if url is '/api/find_active_runner'
     # 2026-09-13: scan every pipe's state/ui-run.json for a runner
