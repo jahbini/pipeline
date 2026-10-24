@@ -1,6 +1,7 @@
 os   = require 'os'
 path = require 'path'
 net  = require 'net'
+fs   = require 'fs'
 {Broker}       = require './broker'
 {Memo}         = require './memo'
 {BrokerClient} = require './broker_client'
@@ -87,19 +88,52 @@ wireRunner = (S, U, opts={}) ->
       catch err then console.error "[ipc] publish #{topic} failed: #{err?.message ? err}"
     flush()
 
-  # Probe the socket: connects → a broker (switchboard) is live → client;
-  # error (ECONNREFUSED/ENOENT) → nothing listening → host. A short
-  # timeout forces host mode if the probe neither connects nor errors.
+  # Puppet / Stage-B mode: this runner is explicitly a CLIENT of a remote
+  # controller's broker reached over an ssh -R tunnel (RUNNER_SOCK points
+  # at the reverse-forwarded socket). It must NEVER host — hosting would
+  # fork a local island and (with StreamLocalBindUnlink) fight the tunnel.
+  # broker_client already reconnects forever (2s backoff) if the tunnel
+  # isn't up yet, so skip the probe and attach as a client outright.
+  clientOnly = opts.clientOnly ? (String(process.env.BROKER_CLIENT_ONLY ? '') in ['1','true','yes'])
+  becomeClient() if clientOnly
+
+  # Probe the socket for a live broker (the resident controller, normally).
+  #   connect            → a broker is live → CLIENT.
+  #   ECONNREFUSED/ENOENT → nothing is listening → HOST (legacy lone runner;
+  #                         broker.listen() safely reclaims any stale file).
+  #   neither (slow accept) → a resident controller may just be busy. Do
+  #                         NOT host — that is how a transiently-stalled
+  #                         controller used to get its socket stolen. Retry
+  #                         with backoff; only host after MAX_PROBE misses.
   probeDone = false
-  finishProbe = (isLive) ->
+  attempt   = 0
+  MAX_PROBE = 5
+  PROBE_MS  = 800
+  finishProbe = (decision) ->          # 'client' | 'host'
     return if probeDone
     probeDone = true
-    try probe.destroy() catch then null
-    if isLive then becomeClient() else becomeHost()
-  probe = net.connect sockPath
-  probe.on 'connect', -> finishProbe true
-  probe.on 'error',   -> finishProbe false
-  setTimeout (-> finishProbe false), 600
+    if decision is 'client' then becomeClient() else becomeHost()
+  tryProbe = ->
+    return if probeDone
+    attempt += 1
+    probe   = net.connect sockPath
+    settled = false
+    done = (fn) ->
+      return if settled
+      settled = true
+      try probe.destroy() catch then null
+      fn()
+    again = -> if attempt >= MAX_PROBE then finishProbe 'host' else setTimeout tryProbe, 300
+    probe.on 'connect', -> done -> finishProbe 'client'
+    probe.on 'error', (err) ->
+      code = err?.code
+      done ->
+        if code is 'ECONNREFUSED' or code is 'ENOENT'
+          finishProbe 'host'           # definitively nothing listening
+        else
+          again()                      # transient — retry, never host yet
+    setTimeout (-> done again), PROBE_MS
+  tryProbe() unless clientOnly
 
   # Advertise lifecycle immediately (queued until the probe resolves).
   publish "#{base}/lifecycle", {phase:'running', pid:process.pid, host, pipe, since:new Date().toISOString()}, true
@@ -136,7 +170,19 @@ wireRunner = (S, U, opts={}) ->
   cleanup = ->
     return if cleaned
     cleaned = true
-    publish "#{base}/lifecycle", {phase:'exited', pid:process.pid, host, pipe, at:new Date().toISOString()}, true
+    # Enrich the terminal lifecycle with the OUTCOME so the mascot can
+    # diagnose a real failure instead of a bare "exited". The runner
+    # writes <CWD>/pipeline.json {status, by, reason} on a shutdown/fail;
+    # read it (best-effort) and carry {ok, reason} on the exit frame.
+    outcome = {ok: true, reason: null, by: null}
+    try
+      sj = path.join (opts.cwd ? process.cwd()), 'pipeline.json'
+      if fs.existsSync sj
+        rec = JSON.parse fs.readFileSync(sj, 'utf8')
+        if rec? and (rec.status is 'shutdown' or rec.status is 'failed' or rec.failed is true)
+          outcome = {ok: false, reason: String(rec.reason ? rec.by ? 'failed'), by: (rec.by ? null)}
+    catch then null
+    publish "#{base}/lifecycle", {phase:'exited', ok:outcome.ok, reason:outcome.reason, by:outcome.by, pid:process.pid, host, pipe, at:new Date().toISOString()}, true
     try state.memo?.close()
     try state.client?.close()
     try state.broker?.close()
@@ -151,6 +197,47 @@ wireRunner = (S, U, opts={}) ->
   # future switchboard refinement; see MARRIAGE.md.)
   process.on 'beforeExit', -> try cleanup()
   process.on 'exit', -> try cleanup()
+
+  # ── octopus Stage D: memo access + fleet leases for step code ─────
+  # A single memoRequest(op,args) that works in BOTH broker roles: a
+  # CLIENT routes through the broker RPC (the controller's single-writer
+  # memo — correct even over the ssh -R tunnel); a HOST calls its own
+  # in-process memo directly. Steps MUST use this, never a direct sqlite
+  # write, so version numbers + notifications stay coherent (UI_MEMO).
+  # Waits out the brief election window before dispatching.
+  waitReady = ->
+    return Promise.resolve() unless state.mode is 'pending'
+    new Promise (resolve) ->
+      tries = 0
+      iv = setInterval (->
+        if state.mode isnt 'pending' or ++tries > 60
+          clearInterval iv
+          resolve()
+      ), 50
+  state.memoRequest = (op, args={}) ->
+    await waitReady()
+    who = args.who ? pipe
+    if state.mode is 'client' and state.client
+      state.client.request "runner/#{host}/#{pipe}/meta/sqlite/req", Object.assign({op}, args)
+    else if state.memo
+      m = state.memo
+      switch op
+        when 'get'        then m.get args.key
+        when 'get_prefix' then m.getPrefix args.prefix, (args.limit ? 1000)
+        when 'put'        then m.put args.key, args.value, who
+        when 'cas'        then m.cas args.key, args.value, args.if_version, who
+        when 'del'        then m.del args.key
+        else throw new Error "unknown_op:#{op}"
+    else
+      throw new Error 'no_memo'
+  try
+    {LeaseClient} = require './lease'
+    # 60s TTL + heartbeat (crash-release); CPU default 4 slots. These are
+    # the fleet knobs from MARRIAGE Stage D / the 2026-10-23 decision.
+    state.lease = new LeaseClient state.memoRequest, {ttl:60000, who:pipe}
+    state.leaseHost = host
+  catch err
+    console.error "[ipc] lease client unavailable: #{err?.message ? err}"
 
   state
 

@@ -1126,6 +1126,12 @@ resolveOverrideLayers = (pipelineName) ->
   layers = []
   legacyPath = path.join CWD, 'override.yaml'
   layers.push legacyPath if fs.existsSync legacyPath
+  # Node-role config (octopus / MARRIAGE.md): the `puppeteer` override
+  # carries this node's role / ui_port / puppet roster. Recording it as
+  # a layer means a restart captures it into experiment.yaml. It's a
+  # top-level `puppeteer:` block — orthogonal to recipe `run:`/steps.
+  puppeteerPath = path.join CWD, 'override', 'puppeteer.yaml'
+  layers.push puppeteerPath if fs.existsSync puppeteerPath
   name = String(pipelineName ? '').trim()
   if name.length
     recipeOverridePath = path.join CWD, 'override', "#{name}.yaml"
@@ -1792,6 +1798,18 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
     S.markRunning n
     try uiRecorder?.event type:'step', phase:'running', step:n catch then null
 
+    # octopus Stage D: if this step took the GPU lease (lazily, on its
+    # first L.callLLM), release it BEFORE the step resolves so the next
+    # pipe can generate while this one moves on to its CPU-side steps.
+    # Set by the newstyle-step block below; null for non-GPU steps.
+    stepGpuRelease = null
+    settle = (fn) ->
+      if stepGpuRelease
+        rel = stepGpuRelease
+        stepGpuRelease = null
+        Promise.resolve(rel()).then fn, fn
+      else fn()
+
     finish = (ok, errMsg=null) ->
       active.count -= 1
       active.names?.delete n
@@ -1803,7 +1821,7 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
           S.markDone n
         M.saveThis "done:#{n}", true
         try uiRecorder?.event type:'step', phase:'finished', step:n, status:'done' catch then null
-        res(true)
+        settle -> res(true)
       else
         shutdownInfo =
           status: 'shutdown'
@@ -1816,7 +1834,7 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
         M.saveThis "pipeline:shutdown", shutdownInfo
         M.saveThis "done:#{n}", false
         try uiRecorder?.event type:'step', phase:'finished', step:n, status:'failed', error:String(errMsg ? "failed") catch then null
-        rej new Error(String(errMsg ? "failed"))
+        settle -> rej new Error(String(errMsg ? "failed"))
 
     # **Script needed here — fail directly if it is missing.** No fallback
     # to a guessed path and no silent drop into the legacy spawn: when
@@ -1860,6 +1878,71 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
       # short-circuits the loop (recipe-wide halt).
       MAX_STEP_ITERATIONS = 500
       L = createStepLedger(M, n, resolveArtifact, artifactSpecFor, uiRecorder)
+      # ── octopus Stage D: ONE GPU arbiter = gpu_claim (unified) ───────
+      # GPU work funnels through L.callLLM. We hold the host-local GPU
+      # lock `mlx/gpu_claim` — the SAME lock helper_llm/the mascot uses —
+      # for the whole step: the FIRST callLLM claims it, it is HELD until
+      # finish()/settle releases, then freed before the pipe's CPU-side
+      # steps so the next pipe can generate. gpu_claim is pid-robust
+      # (steals a dead holder immediately) and broker-independent, so this
+      # is the single source of truth for "who has the GPU on this host".
+      # The memo `sys/gpu_lease/<host>` is written THROUGH for the fleet
+      # dashboard only (advisory). CPU slots stay memo-based (soft cap).
+      # Everything degrades gracefully: no gpu_claim → direct call; no
+      # broker → no memo write / no CPU slot (today's single-pipe path).
+      _gpuClaim = null
+      try _gpuClaim = require path.join(EXEC, 'mlx', 'gpu_claim')
+      catch then _gpuClaim = null
+      _hostSlug = String(M.ipc?.leaseHost ? 'host').toLowerCase().replace(/[^a-z0-9_\-]/g, '-')
+      _pipeSlug = String(M.ipc?.pipe ? n).toLowerCase().replace(/[^a-z0-9_\-]/g, '-')
+      _gpuKey   = "sys/gpu_lease/#{_hostSlug}"
+      _pubGpu = (holder) ->
+        return unless M.ipc?.memoRequest
+        try
+          if holder then M.ipc.memoRequest('put', {key: _gpuKey, value: {holder, step: n, since: Date.now(), via: 'gpu_claim'}}).catch(-> null)
+          else M.ipc.memoRequest('del', {key: _gpuKey}).catch(-> null)
+        catch then null
+      _claimGpu = (tag) ->
+        return null unless _gpuClaim
+        t = await _gpuClaim.claim {tag, timeoutMs: Number(process.env.GPU_CLAIM_TIMEOUT_MS ? 1800000)}
+        _pubGpu _pipeSlug
+        t
+      _releaseGpu = (t) ->
+        try (_gpuClaim.release t if t and _gpuClaim)
+        _pubGpu null
+      L.memoRequest = M.ipc?.memoRequest ? (-> Promise.reject(new Error 'no_memo'))
+      L.leaseHost   = _hostSlug
+      L.withGpu = (fn) ->
+        t = await _claimGpu "#{_pipeSlug}.#{n}"
+        try
+          await fn()
+        finally
+          _releaseGpu t
+      L.withCpuSlot = (fn, max = 4) ->
+        return fn() unless M.ipc?.lease
+        h = await M.ipc.lease.acquireCpuSlot "sys/cpu_slots/#{_hostSlug}", _pipeSlug, max
+        try
+          await fn()
+        finally
+          await h.release()
+      # Lazy, step-granular GPU hold through callLLM (claim once, hold to
+      # step end). gpu_claim is reentrant per-pid, so an inner L.withGpu
+      # is harmless. Released in finish()/settle via stepGpuRelease.
+      if _gpuClaim
+        _gpuTicket = null
+        _ensureGpu = ->
+          return _gpuTicket if _gpuTicket
+          _gpuTicket = await _claimGpu "#{_pipeSlug}.#{n}"
+          stepGpuRelease = ->
+            t = _gpuTicket
+            _gpuTicket = null
+            _releaseGpu t
+            Promise.resolve()
+          _gpuTicket
+        _origCallLLM = L.callLLM.bind(L)        # preserve this = ledger
+        L.callLLM = (params, dbug) ->
+          await _ensureGpu()
+          _origCallLLM params, dbug
       iteration = 0
       runOnce = ->
         iteration += 1
@@ -2115,6 +2198,12 @@ main = ->
   try
     {wireRunner} = require path.join(EXEC, 'ipc', 'wire')
     ipc = wireRunner S, U, {cwd: CWD}
+    # octopus Stage D: hang the lease/memo surface off M so runStep →
+    # createStepLedger (which receives M) can expose L.withGpu / L.memoRequest
+    # without threading a new parameter through the step machinery. Null-safe:
+    # with no broker, M.ipc stays undefined and steps run lease-free (today's
+    # single-pipe semantics).
+    M.ipc = ipc if ipc?
   catch err
     console.error "[ipc] wire failed (continuing without broker): #{err?.message ? err}"
     ipc = null

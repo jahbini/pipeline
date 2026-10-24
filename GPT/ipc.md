@@ -182,6 +182,228 @@ history (search commits for `bridge.coffee`). When built, the bridge
 replaces every puppeteer-side `execSync('ssh …')` with a broker RPC —
 eliminating the 2–5s event-loop stalls.
 
+## Steal-the-socket footgun — FIXED 2026-10-23 (octopus)
+
+Symptom seen on the mini: puppeteer controller (4300) `broker_connected:true`
+while the writer puppet (4311) was `broker_connected:false`/`disconnected`
+and its whole reactive UI (memo/SSE, spine editor, filters, live
+certificate updates) was dead. `lsof` showed the controller STILL
+listening on `~/pipeline/state/runner.sock` (fd 12u) — but `stat`/`ls`
+reported **no such file**: the socket's directory entry had been
+`unlink()`ed out from under the live listener. The controller's own
+already-open fds kept working (looked healthy), but **every new client**
+— the puppet UI, a fresh browser tab, the next runner — got `ENOENT` on
+`connect()`.
+
+Two root causes, both now fixed:
+
+1. **`broker.coffee::listen()` unconditionally `fs.unlinkSync`ed the
+   socket before binding.** That is the steal primitive: it removes a
+   resident controller's path. Fixed to bind first; only on `EADDRINUSE`
+   probe whether a live listener answers — live → refuse (emit `error`
+   so the caller falls back to client), refused/missing → stale file,
+   reclaim (unlink + retry once). The lone-runner "reclaim a stale
+   socket from a crashed owner" path is preserved (verified: a
+   SIGKILLed owner's leftover socket is reclaimed).
+2. **`wire.coffee` election hosted on a 600ms probe timeout.** A resident
+   controller that was briefly slow to `accept` the probe (the old
+   `execSync('ssh')` event-loop stalls) made a runner time out → host →
+   unlink + steal. Fixed: a probe that neither connects nor errors now
+   RETRIES with backoff (`MAX_PROBE=5`) and **never hosts on a stall**;
+   only a definitive `ECONNREFUSED`/`ENOENT` (nothing listening) hosts
+   promptly (lone-runner fast path, no added latency).
+
+Recovery when it has already happened: restart the puppeteer-ui launchd
+job (`launchctl kickstart -k gui/<uid>/com.jahbini.puppeteer-ui`) — it
+rebinds a fresh `runner.sock`; puppets reconnect on their own via
+`broker_client`'s 2s backoff (no puppet restart needed). Safe only when
+no `pipeline_runner` is active. This is the risk UI_MEMO.md and
+MARRIAGE.md both predicted ("wire.coffee does unlink-then-listen → a
+second runner steals the socket").
+
+## Stage B — SSH-launch + MQTT over SSH — CORE DONE 2026-10-23 (octopus)
+
+Cross-host transport + puppet launch, smoke-tested laptop→mini.
+
+- **`ipc/puppet_supervisor.coffee`** (controller side). For each REMOTE
+  puppet in the `puppets:` roster it keeps one long-lived, supervised
+  `ssh -R <remoteSock>:<brokerSock> -o StreamLocalBindUnlink=yes -o
+  ExitOnForwardFailure=yes -tt <user>@<host> 'cd <base> && exec env
+  RUNNER_SOCK=<remoteSock> UI_ROLE=puppet UI_PORT=<n> BROKER_CLIENT_ONLY=1
+  coffee <pipeline>/ui_server.coffee net'`. The one ssh does both jobs:
+  reverse-forwards the controller's broker socket onto the puppet host
+  AND launches the puppet as a client over it. `-tt` means tunnel death
+  SIGHUPs the puppet (liveness = the SSH/broker connection). Restart on
+  exit with capped backoff; `status()` for `/api/puppets`. LOCAL puppets
+  (same host) are skipped — they use the loopback socket directly.
+- **`BROKER_CLIENT_ONLY`** (`wire.coffee`, also `opts.clientOnly`): a
+  puppet runner NEVER hosts — it goes straight to `becomeClient()` and
+  relies on broker_client's infinite 2s-backoff reconnect (so a
+  not-yet-ready tunnel just retries). Hosting would fork a local island
+  and fight `StreamLocalBindUnlink`.
+- **ui_server wiring:** controller starts the supervisor once its broker
+  is `listening`; a puppet heartbeats a retained `sys/presence/<host>`
+  memo key every 30s (so the controller's fleet view sees it); new
+  `GET /api/puppets` → `{role, puppets:{<key>:{host,ui_port,up,pid,
+  restarts,lastExit,remote_sock}}}`.
+
+Smoke test (laptop harness = Broker+Memo+PuppetSupervisor → mini writer
+puppet on 4321, NOT prod 4311): puppet `/api/ipc_health` →
+`broker_connected:true` (its StatusSource reached the LAPTOP broker over
+the tunnel); `sys/presence/mac-mini` landed in the laptop memo;
+`sup.stop()` → tunnel closed → puppet died. `ssh -R` unix-socket
+forwarding needs OpenSSH ≥6.7 (both hosts are 10.x) + socket paths
+<104 bytes (macOS sun_path limit — long scratchpad paths give EINVAL).
+
+**Not yet done (B production cutover):** the mini's resident puppeteer
+still runs the writer as a standalone same-host process (local socket),
+not as a supervised puppet; and the `execSync('ssh …')` peer panels in
+`puppeteer/ui/project.coffee` still SSH-poll instead of reading the
+broker. That migration (keep SSH as fallback) is the latency win and the
+riskier half — gate it.
+
+## Stage D — fleet leases — SUBSTRATE DONE 2026-10-23 (octopus)
+
+CAS leases on the memo so N pipes run concurrently and serialize only on
+real contention. Keys (both under `sys/`, already in `NOTIFIED`):
+
+    sys/gpu_lease/<host>   {holder, step, since, heartbeat, evicted?}   # one exclusive holder
+    sys/cpu_slots/<host>   {max, held:[{pipe, since, heartbeat}]}       # up to max concurrent
+
+- **`ipc/lease.coffee` — `LeaseClient(memoReq, {ttl,pollMs,hbMs,who})`.**
+  `acquireGpu(key, holder, step, {timeoutMs,onWait})` and
+  `acquireCpuSlot(key, pipe, max, …)` return a handle `{release()}`; the
+  handle self-heartbeats on `hbMs`. **Crash-release (not deferrable):**
+  each lease carries a `heartbeat`; a waiter CAS-evicts a holder whose
+  heartbeat is older than `ttl`. Decided 2026-10-23: **ttl 60 000 ms,
+  CPU max 4.** All acquire/refresh/evict/release ride the memo's `cas`
+  (`{ok:false,reason:'version_mismatch'}` on a lost race, `if_version:0`
+  = create-if-absent) — one writer, no new primitive.
+- **Runner surface (`wire.coffee`):** the `ipc` object from `wireRunner`
+  now carries `ipc.memoRequest(op,args)` — works in BOTH roles (client →
+  broker RPC to the controller's single-writer memo, even over the ssh -R
+  tunnel; host → its own in-process memo), after waiting out the election
+  window — and `ipc.lease` (a `LeaseClient` preset to 60s/`who=pipe`) +
+  `ipc.leaseHost`. A GPU step uses:
+
+      h = await ipc.lease.acquireGpu "sys/gpu_lease/#{ipc.leaseHost}", ipc.pipe, L.stepName
+      try … MLX work … finally await h.release()
+
+- **Verified:** lease logic 10/10 against a direct Memo (exclusivity,
+  release, clear, crash-eviction records `evicted`, CPU cap+blocking);
+  PASS over the real broker RPC (client path); PASS from the `wireRunner`
+  surface (host path).
+
+**Runner surface DONE + proven on the live mini (2026-10-23):**
+`pipeline_runner.coffee` hangs `ipc` off `M` (`M.ipc = ipc`), and
+`createStepLedger`'s call site attaches to every step ledger:
+`L.withGpu(fn)`, `L.withCpuSlot(fn, max=4)`, `L.memoRequest`,
+`L.leaseHost` (host-slugged lowercase for the memo charset). A GPU step
+writes `await L.withGpu => … MLX …`; it DEGRADES GRACEFULLY — no broker
+⇒ the body runs directly (today's single-pipe behaviour). Verified
+end-to-end on the live mini: a real `wireRunner` elected CLIENT of the
+production controller broker, `L.withGpu`'s acquire put
+`sys/gpu_lease/mac-mini` (holder visible on the controller's `/api/memo`),
+release cleared it.
+
+**GPU auto-lease WIRED + PROVEN LIVE (2026-10-23).** Rather than edit the
+shared `pipeline/mlx/llm_dispatch.coffee` (no `L` in scope), the runner
+wraps `L.callLLM` itself: the FIRST `callLLM` in a step lazily acquires
+`sys/gpu_lease/<host>` and HOLDS it until the step ends (released in
+`finish()` via `settle`), so a pipe owns the GPU for its whole generate
+step and frees it before its CPU-side steps. Non-GPU steps never call
+`callLLM` → never lease. Zero recipe edits; degrades to direct call with
+no broker. **Live proof:** two real runners launched concurrently on the
+mini (`hf__qwen__qwen3-0-6b` + `…1-5b`, instance-guard skipped) — the 1.5b
+pipe held the GPU and generated while the 0.6b pipe logged
+`phase:waiting_gpu holder:…1-5b waited_ms:6028→15050` (parked, NOT
+loading its model); on release the 0.6b pipe acquired + generated. Exactly
+one GPU holder at a time, clean handoff, no double model-load.
+
+**Still NOT done — the scheduler auto-fan-out:**
+`puppeteer/scripts/queue_run_ite.coffee` is still serial (its PRE-ENTRY
+IDLE WAIT waits for the peer to go idle before launching the next pipe),
+AND the peer's `/api/launch` does `switch_pipe` which KILLS the active
+runner — so concurrent fan-out is NOT a queue flag, it needs the peer to
+support N concurrent runners (one per pipe dir, `PIPELINE_SKIP_INSTANCE_GUARD`,
+the resident-puppet model). The lease CAPABILITY is proven (manual
+concurrent launch above); wiring the scheduler to auto-launch concurrent
+runners that park on the lease is the remaining Stage D work (overlaps
+MARRIAGE Stage C). CPU slots (`L.withCpuSlot`, `sys/cpu_slots/<host>`,
+max 4) are available but not auto-wired — opt-in per step.
+
+## Termination → mascot diagnosis (NOT blind restart) — 2026-10-23
+
+Decision + rule: `puppeteer/GPT/rules/puppeteer_decides_restart.md`.
+Restart is a scheduling decision owned by the puppeteer — NOT launchd
+`KeepAlive`, NOT a blind supervisor loop.
+
+- `ipc/puppet_supervisor.coffee` reshaped into TWO separate concerns:
+  (1) **transport liveness** — reconnect the `ssh -R` tunnel with backoff
+  (keeps a remote puppet reachable; not work-restart); (2) **work
+  termination** — `attachLifecycle(statusSource)` subscribes
+  `runner/+/+/lifecycle`, and on a terminal phase (`exited`/`failed`/
+  `disconnected`) calls `handleTermination` → de-dupe → `diagnose` →
+  record `pipe/<slug>/last_termination` to the memo → emit `termination`
+  → **no restart**.
+- `ipc/mascot_diagnose.coffee` — default diagnose: clean `exited` → `{done,
+  wait}` (no LLM); else `helper_llm.classify_failure` + `summarize_log` +
+  `schedule` (→ a SCHEDULE_ACTION). The mascot = the helper LLM;
+  `runCapability` already wraps each call in the file-based `gpu_claim`
+  (a SECOND GPU arbiter coexisting with the memo `sys/gpu_lease` —
+  unify later).
+- `ui_server.coffee` (controller) constructs the supervisor even with no
+  remote puppets and `attachLifecycle(ipcStatus)` on broker-up.
+- Proven live: a `chat_llm` exit recorded
+  `pipe/hf__qwen__qwen3-0-6b/last_termination = {category:done,
+  recommendation:wait}`; no restart.
+
+### Follow-ups done 2026-10-23 (same day)
+
+- **GPU arbiter UNIFIED on `gpu_claim`.** The runner's GPU hold
+  (`L.withGpu` + the lazy `callLLM` auto-hold) now takes the host-local
+  `mlx/gpu_claim` file lock — the SAME lock `helper_llm.runCapability`
+  (the mascot) uses — so generation and mascot diagnosis are mutually
+  exclusive on the one GPU. The memo `sys/gpu_lease/<host>` is written
+  THROUGH for the fleet dashboard only (advisory, `via:gpu_claim`). CPU
+  slots stay on the memo lease. Proven: a live `chat_llm` held
+  `~/puppeteer/state/gpu_claim.lock` (tag `<pipe>.chat_llm`) while the
+  memo showed the holder. `lease.coffee` is now GPU-unused (kept for CPU
+  slots + as the cross-host memo primitive).
+- **Reason enrichment.** `wire.coffee` cleanup reads `<CWD>/pipeline.json`
+  (`{status,by,reason}` written on shutdown/fail) and carries
+  `{ok, reason}` on the exit lifecycle, so the mascot diagnoses a real
+  failure. Proven live: an injected OOM reason → mascot
+  `classify_failure`→`category:oom (0.95)`, `schedule`→`hospitalize`,
+  recorded. (Clean exit → no reason → fast-path `{done,wait}`.)
+- **`mascot_diagnose` is SEQUENTIAL.** classify → summarize → schedule
+  awaited in turn — NEVER `Promise.all`. node-mlx runs one generation
+  per process and `gpu_claim` is reentrant per-pid (doesn't serialize
+  same-process calls), so concurrent mascot generations HANG. (Hit this;
+  fixed.)
+- **`HELPER_LLM_MODEL_DIR` glob-resolved at controller boot** (`ui_server`
+  top): the launchd plist literal `/Volumes/bigbig 1/…` went stale after
+  a DiskArb remount to `/Volumes/bigbig`, silently breaking the mascot
+  (it fell back to `escalate`). `ui_server` now scans `/Volumes` for the
+  mounted `bigbig*` variant holding the model and rewrites
+  `process.env.HELPER_LLM_MODEL_DIR` before anything loads helper_llm.
+  Honors the "MODELS is a glob, not a literal" rule.
+
+### Open
+- **Scheduler must ACT** on `pipe/<slug>/last_termination` / the
+  `termination` event (today it is recorded, not consumed).
+- **Fast-crash gap.** A runner that dies in <1s (e.g. missing model dir)
+  NEVER connects to the broker, so it publishes no terminal lifecycle →
+  the controller's lifecycle watcher never sees it → no diagnosis. The
+  reliable route for those is the **scheduler observing the exit of the
+  runner IT launched** and reading `pipeline.json` — i.e., the scheduler
+  side of "the puppeteer inspects a terminated pipe", still to build.
+  The broker-lifecycle path covers runners that live long enough to
+  connect.
+- **Two GPU arbiters → one, but note:** `gpu_claim` is now the lock;
+  the memo `sys/gpu_lease` is advisory. If a future design wants the
+  memo to be authoritative (cross-host leases), re-unify the other way.
+
 ## Related
 
 - `[[plugin_system]]` — how the ui_server loads project-specific routes.

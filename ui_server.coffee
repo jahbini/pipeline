@@ -2,9 +2,31 @@
 fs = require 'fs'
 path = require 'path'
 http = require 'http'
+os = require 'os'
 yaml = require 'js-yaml'
 { spawn } = require 'child_process'
 { DatabaseSync } = require 'node:sqlite'
+
+# octopus: resolve HELPER_LLM_MODEL_DIR across the /Volumes/bigbig*
+# DiskArb remount variants. The launchd plist carries a literal that
+# goes stale when the volume remounts as 'bigbig 1' (the "MODELS is a
+# glob, not a literal" disease), which silently breaks the mascot LLM
+# (classify/schedule fall back to escalate). Fix process.env BEFORE any
+# require pulls helper_llm (it reads the dir at module load). No-op when
+# the configured path exists or isn't a /Volumes/bigbig* path.
+do ->
+  cur = process.env.HELPER_LLM_MODEL_DIR
+  return unless cur and not fs.existsSync(cur)
+  m = cur.match /^\/Volumes\/bigbig[^\/]*(\/.*)$/
+  return unless m
+  try
+    for v in fs.readdirSync('/Volumes') when v.indexOf('bigbig') is 0
+      cand = "/Volumes/#{v}#{m[1]}"
+      if fs.existsSync cand
+        process.env.HELPER_LLM_MODEL_DIR = cand
+        console.log "[ui_server] resolved HELPER_LLM_MODEL_DIR → #{cand} (was #{cur})"
+        return
+  catch then null
 
 # ── IPC: subscribe to runner broker when available ───────────────
 # When the runner is new enough to publish state/step/event topics,
@@ -12,13 +34,10 @@ yaml = require 'js-yaml'
 # ui-run.json / step-*.json / ui-events.jsonl on every request. If
 # the socket isn't there (older runner), the cache stays empty and
 # every helper falls back to disk — behaviour-preserving.
-ipcStatus = null
-try
-  {StatusSource} = require './ipc/status_source'
-  ipcStatus = new StatusSource()
-  ipcStatus.start()
-catch err
-  console.error "[ui_server] ipc disabled: #{err?.message ? err}" if process.env.IPC_DEBUG
+# ipcStatus (+ the in-process broker, when this node is the controller)
+# are constructed AFTER role resolution — see the "octopus: broker" block
+# below the PORT/UI_ROLE lines. (A controller hosts the broker in-process;
+# a puppet is a client of its controller's broker.)
 
 # Reconnect throttle for GET /api/events. EventSource auto-reconnects
 # aggressively on disconnect; a wifi flap can flood the server. Reject a
@@ -84,7 +103,103 @@ if _pluginPath
     _plugin = null
 
 CWD = process.env.CWD ? process.cwd()
-PORT = Number(process.env.UI_PORT ? _plugin?.portDefault ? 4311)
+# Node role/port come from the `puppeteer` override at the PROJECT ROOT
+# (octopus / MARRIAGE.md), not a hardcoded portDefault. role:
+# 'controller' (= puppeteer: hosts broker+memo+UI) | 'puppet' (client);
+# ui_port binds the UI. Read from the project root (resolved pre-chdir)
+# so a preStartup pipe-chdir doesn't hide it. Absent → puppet + the
+# legacy port chain. Env (UI_ROLE/UI_PORT) still wins for scratch tests.
+_puppeteerCfg = do ->
+  root = _pluginProjectRoot ? CWD
+  p = path.join(root, 'override', 'puppeteer.yaml')
+  try
+    return {} unless fs.existsSync(p)
+    (yaml.load(fs.readFileSync(p, 'utf8'))?.puppeteer) ? {}
+  catch err
+    console.error "[ui_server] puppeteer override load failed: #{err?.message ? err}" if process.env.IPC_DEBUG
+    {}
+UI_ROLE = String(process.env.UI_ROLE ? _puppeteerCfg.role ? 'puppet')
+PORT = Number(process.env.UI_PORT ? _puppeteerCfg.ui_port ? _plugin?.portDefault ? 4311)
+console.log "[ui_server] node role=#{UI_ROLE} ui_port=#{PORT}#{if _puppeteerCfg.ui_port? or _puppeteerCfg.role? then ' (from puppeteer override)' else ''}"
+
+# ── octopus: broker ──────────────────────────────────────────────
+# The broker/memo used to be a standalone `switchboard` daemon. The
+# octopus FUSES it into the always-up puppeteer (controller) process:
+# when role=controller we host the Broker + Memo here, in-process, on
+# runner.sock — so there is no separate daemon to launch or to silently
+# die. A puppet hosts nothing; its StatusSource connects to its
+# controller's broker over the same socket (loopback) / SSH (Stage B).
+# Disk stays authoritative; this is the same pub/sub+RPC layer, re-homed.
+ipcBroker = null
+ipcMemo   = null
+if UI_ROLE is 'controller'
+  try
+    # NB: destructure to IpcMemo — the file already binds `Memo` to the
+    # runner's §7 data-plane Memo at `{ Memo } = require RUNNER` (no
+    # installHandlers). CoffeeScript file-scope hoisting would otherwise
+    # make this async callback see that one. ("Two memos, one word.")
+    {Broker}        = require './ipc/broker'
+    {Memo: IpcMemo} = require './ipc/memo'
+    _brokerSock = process.env.RUNNER_SOCK ? "#{process.env.HOME}/pipeline/state/runner.sock"
+    _memoPath   = process.env.MEMO_DB    ? "#{process.env.HOME}/pipeline/state/memo.sqlite"
+    ipcBroker = new Broker(_brokerSock).listen()
+    ipcBroker.on 'listening', ->
+      try
+        ipcMemo = new IpcMemo _memoPath, ipcBroker
+        ipcMemo.installHandlers()
+        n = ipcMemo.rehydrate()
+        console.log "[ui_server] controller broker up at #{_brokerSock}; memo rehydrated #{n} key(s)"
+      catch err
+        console.error "[ui_server] controller memo init failed: #{err?.message ? err}"
+    ipcBroker.on 'error',          (err) -> console.error "[ui_server] controller broker error: #{err?.message ? err}"
+    ipcBroker.on 'dispatch_error', (err) -> console.error "[ui_server] controller dispatch error: #{err?.message ? err}"
+  catch err
+    console.error "[ui_server] controller broker failed to start: #{err?.message ? err}"
+
+# StatusSource is the UI-side cache/subscriber — a client of whatever
+# broker is on runner.sock (our own in-process one when controller, the
+# controller's otherwise). Unchanged: falls back to disk when there is none.
+ipcStatus = null
+try
+  {StatusSource} = require './ipc/status_source'
+  ipcStatus = new StatusSource()
+  ipcStatus.start()
+catch err
+  console.error "[ui_server] ipc disabled: #{err?.message ? err}" if process.env.IPC_DEBUG
+
+# ── octopus Stage B: puppet supervisor (controller) + presence (puppet) ──
+# A controller with a `puppets:` roster keeps one supervised `ssh -R` per
+# REMOTE puppet: the tunnel reverse-forwards our broker socket onto the
+# puppet host AND launches the puppet's ui_server as a broker client over
+# it (MARRIAGE §Transport). A puppet advertises itself via a retained
+# `sys/presence/<host>` memo key so the controller's fleet view can see it.
+ipcPuppets = null
+if UI_ROLE is 'controller'
+  try
+    {PuppetSupervisor} = require './ipc/puppet_supervisor'
+    _sock = process.env.RUNNER_SOCK ? "#{process.env.HOME}/pipeline/state/runner.sock"
+    # Record a diagnosed termination to the memo (RPC through our own
+    # broker → single-writer memo). The scheduler reads it and decides.
+    _memoPut = (key, value) ->
+      if ipcStatus then ipcStatus.memoRequest('put', {key, value}) else Promise.resolve()
+    ipcPuppets = new PuppetSupervisor {brokerSock: _sock, puppets: (_puppeteerCfg.puppets ? []), memoPut: _memoPut}
+    _startSup = ->
+      try ipcPuppets.start()                   # (1) bring up remote-puppet tunnels (none → no-op)
+      try ipcPuppets.attachLifecycle ipcStatus # (2) diagnose EVERY pipe termination via the mascot — never auto-restart
+    # Start once the broker is listening (socket forwards + lifecycle sub).
+    if ipcBroker then ipcBroker.on 'listening', _startSup else _startSup()
+    process.on 'exit', -> try ipcPuppets?.stop()
+    process.on 'SIGTERM', -> try ipcPuppets?.stop()
+  catch err
+    console.error "[ui_server] puppet supervisor failed: #{err?.message ? err}"
+
+if UI_ROLE is 'puppet' and ipcStatus
+  _hostSlug = os.hostname().toLowerCase().split('.')[0].replace(/[^a-z0-9_\-]/g, '-')
+  _announcePresence = ->
+    ipcStatus.memoRequest('put', {key: "sys/presence/#{_hostSlug}", value: {host: os.hostname(), ui_port: PORT, role: 'puppet', pid: process.pid, at: Date.now()}}).catch -> null
+  setTimeout _announcePresence, 1500
+  setInterval _announcePresence, 30000
+
 UI_BIND_MODE = String(process.env.UI_BIND_MODE ? (if process.argv[2] is 'net' then 'net' else 'local'))
 HOST = if UI_BIND_MODE is 'net' then '0.0.0.0' else '127.0.0.1'
 repeatLoop =
@@ -2629,6 +2744,13 @@ server = http.createServer (req, res) ->
       lifecycle:        ipcStatus?.lifecycle ? null
       filter_pipe:      ipcStatus?.filterPipe ? null
       memo_rows:        memoRows
+  if url is '/api/puppets'
+    # Stage B observability: the controller's view of the puppets it
+    # SSH-launches. Each entry = {host, ui_port, up, pid, restarts,
+    # lastExit, remote_sock}. Empty object when this node isn't a
+    # controller or has no roster. Pair with /api/memo?prefix=sys/presence
+    # for the puppet-reported side of the same fleet.
+    return sendJson res, 200, {role: UI_ROLE, puppets: (ipcPuppets?.status() ? {})}
   if url is '/api/events'
     # Single server-sent-events stream the browser subscribes to once
     # per page; the ui_server multiplexes broker publishes onto it (the

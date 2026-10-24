@@ -101,6 +101,27 @@
     .status.running { color: var(--accent); border-color: #9dc5b8; background: #edf8f4; }
     .status.done { color: var(--good); border-color: #aad2b0; background: #eef9ef; }
     .status.failed, .status.shutdown { color: var(--bad); border-color: #d5a1a8; background: #fff1f3; }
+    /* Hero action buttons (Recipe Flowchart, Pipeline Graph) sit just left
+       of the run-status pill and open their content in the live pop-up. */
+    .hero-right { display: flex; align-items: center; gap: 8px; }
+    .hero-btn {
+      font-size: 13px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .hero-btn:hover { background: #f3efe6; }
+    /* The graph's max-height cap is load-bearing (tall+narrow graphs blow
+       up without it). When popped into the modal the .pipeline-graph-panel
+       ancestor is gone, so re-assert the cap scoped to the modal body. */
+    #panel-modal-body .pipeline-svg { width: 100%; height: auto; max-height: min(78vh, 680px); }
+    /* The file + step modals must sit ABOVE a panel pop-up so clicking a
+       circle in the popped Pipeline Graph opens them on top, not behind. */
+    #file-modal-shell, #step-modal-shell { z-index: 60; }
     .kv {
       display: grid;
       grid-template-columns: 130px 1fr;
@@ -450,6 +471,26 @@
     .modal-body {
       padding: 16px;
     }
+    /* Panel pop-out: a hair wider than the file modal, since whole panels
+       (tables, grids) carry more horizontal content than a single file. */
+    .modal.panel-modal { width: min(1280px, 96vw); }
+    /* The ⤢ pop-out button injected into every panel header by
+       setupCollapsibles(). Sits at the right edge, out of the way of the
+       collapse chevron (which is a ::before on the header itself). */
+    .panel-pop-btn {
+      float: right;
+      margin-left: 8px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 6px;
+      padding: 0 7px;
+      font-size: 13px;
+      line-height: 1.5;
+      cursor: pointer;
+      opacity: 0.55;
+    }
+    .panel-pop-btn:hover { opacity: 1; }
     @media (max-width: 900px) {
       .grid { grid-template-columns: 1fr; }
       .hero { flex-direction: column; align-items: start; }
@@ -525,10 +566,18 @@
         <h1 id="page-title">Pipeline Monitor</h1>
         <div id="subtitle" class="mono"></div>
       </div>
-      <div id="run-status" class="status">unknown</div>
+      <div class="hero-right">
+        <button class="hero-btn" id="btn-recipe-flowchart" type="button">Recipe Flowchart ⤢</button>
+        <button class="hero-btn" id="btn-pipeline-graph" type="button">Pipeline Graph ⤢</button>
+        <div id="run-status" class="status">unknown</div>
+      </div>
     </div>
 
-    <section class="panel" id="recipe-flowchart-section" data-default-collapsed="0">
+
+    <!-- Hidden source for the hero "Recipe Flowchart" button — opened in the
+         live pop-up, no longer a top panel (2026-10-24). Still populated by
+         refreshRecipeFlowchart regardless of visibility. -->
+    <section id="recipe-flowchart-section" class="popup-source" style="display:none">
       <h2>Recipe Flowchart</h2>
       <div id="recipe-flowchart-body" class="recipe-flowchart-body">
         <p class="hint" style="margin:8px 0;">Select a recipe to view its flowchart.</p>
@@ -536,7 +585,10 @@
       <div id="recipe-flowchart-status" class="hint mono" style="margin-top:4px;font-size:0.8em;"></div>
     </section>
 
-    <section class="panel pipeline-graph-panel">
+    <!-- Hidden source for the hero "Pipeline Graph" button — opened in the
+         live pop-up, no longer a top panel (2026-10-24). Still populated by
+         refreshPipelineGraph regardless of visibility. -->
+    <section id="pipeline-graph-section" class="pipeline-graph-panel popup-source" style="display:none">
       <h2>Pipeline Graph</h2>
       <div id="pipeline-graph-status" class="hint mono"></div>
       <div id="pipeline-graph"></div>
@@ -761,6 +813,9 @@
             </div>
           </div>
         </section>
+        <!-- Right-column host: Peer Pipes + Queue/Scheduler render here,
+             directly under the Controls pane (2026-10-24). -->
+        <div id="dynamic-panels-right"></div>
       </div>
     </div>
   </div>
@@ -805,6 +860,24 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Generic panel pop-out. The ⤢ button on any panel header opens a
+       full-width snapshot of that panel's content here, with Copy + Close
+       (modeled on the output-file viewer). Helps the placement problem:
+       any panel can be read full-width regardless of which column it lives in. -->
+  <div id="panel-modal-shell" class="modal-shell">
+    <div class="modal panel-modal">
+      <div class="modal-top">
+        <strong id="panel-modal-title" class="mono"></strong>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span id="panel-modal-copy-status" class="hint mono"></span>
+          <button id="panel-modal-copy" class="modal-close" type="button">Copy</button>
+          <button id="panel-modal-close" class="modal-close" type="button">X</button>
+        </div>
+      </div>
+      <div id="panel-modal-body" class="modal-body" style="overflow:auto;"></div>
     </div>
   </div>
 
@@ -1234,7 +1307,10 @@
     // null — their hook is responsible for its own data path.
     function panelHost(meta) {
       const col = meta && meta.column;
-      if (col && col !== 'left' && col !== 'right') {
+      // Any named column resolves to its #dynamic-panels-<col> host if one
+      // exists (e.g. 'right' → the host under the Controls pane, 'fleet' →
+      // under the hero). Falls back to the generic #dynamic-panels slot.
+      if (col) {
         const explicit = document.getElementById(`dynamic-panels-${col}`);
         if (explicit) return explicit;
       }
@@ -1263,6 +1339,10 @@
           slot.className = 'panel';
           slot.id = slotId;
           slot.dataset.panelName = meta.name;
+          // popup_mode panels are wide/interactive and look cramped inline.
+          // They render as a compact header that opens the LIVE body in the
+          // full-width pop-up (see setupCollapsibles + openPanelModalLive).
+          if (meta.popup_mode) slot.dataset.popupMode = '1';
           slot.innerHTML = `<h2>${escapeHtml(meta.title || meta.name)}</h2><div class="panel-body"></div>`;
           host.appendChild(slot);
         }
@@ -1274,6 +1354,9 @@
           if (!seen.has(s.dataset.panelName)) s.remove();
         });
       }
+      // Wire open/close toggles on freshly-injected dynamic panels so they
+      // get a header button and start closed like every other panel.
+      if (typeof setupCollapsibles === 'function') setupCollapsibles();
     }
     function renderPanelBody(target, meta, value) {
       // Custom-hint panels must ALWAYS run their hook; lazy panels get
@@ -1553,7 +1636,8 @@
       // both the file-viewer modal and the step-detail modal.
       const modalOpen =
         byId('file-modal-shell')?.classList.contains('open') ||
-        byId('step-modal-shell')?.classList.contains('open');
+        byId('step-modal-shell')?.classList.contains('open') ||
+        byId('panel-modal-shell')?.classList.contains('open');
       if (modalOpen) {
         console.debug('[ui] refresh:skipped (modal open)');
         return;
@@ -1818,6 +1902,84 @@
 	      // Catch up on state the frozen heartbeat missed while the
 	      // reader had the modal open.
 	      refresh().catch(console.error);
+	    }
+
+	    // ── Generic panel pop-out ───────────────────────────────────
+	    // Opens a full-width, read-only snapshot of a panel's body in a
+	    // modal with Copy + Close. The content is a CLONE with every id
+	    // stripped, so it never becomes a duplicate getElementById target
+	    // that would steal refresh() updates from the live panel. The live
+	    // panel keeps updating underneath; the popup is a snapshot for
+	    // reading/copying (same contract as the output-file viewer).
+	    function stripIds(node) {
+	      if (node.removeAttribute) node.removeAttribute('id');
+	      if (node.querySelectorAll) node.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+	    }
+	    function openPanelModal(container) {
+	      const header = container.querySelector(':scope > h2, :scope > h3');
+	      const title = (container.dataset.panelTitle
+	                     || (header && header.textContent) || 'Panel').replace('⤢', '').trim();
+	      const body = byId('panel-modal-body');
+	      body.innerHTML = '';
+	      for (const child of Array.from(container.children)) {
+	        if (child === header) continue;              // skip the header row
+	        const clone = child.cloneNode(true);
+	        stripIds(clone);
+	        body.appendChild(clone);
+	      }
+	      byId('panel-modal-title').textContent = title;
+	      byId('panel-modal-copy-status').textContent = '';
+	      byId('panel-modal-shell').classList.add('open');
+	    }
+	    // Live variant for popup_mode panels (wide/interactive — Peer Pipes,
+	    // Queue/Scheduler). MOVES the real body nodes into the modal so their
+	    // controls + self-refresh keep working at full width; closePanelModal
+	    // moves them back. IDs preserved (not stripped) so the panels' own
+	    // pollers still find their tbodies while popped.
+	    let panelModalLiveOrigin = null;
+	    function openPanelModalLive(container) {
+	      const header = container.querySelector(':scope > h2, :scope > h3');
+	      const title = (container.dataset.panelTitle
+	                     || (header && header.textContent) || 'Panel').replace('⤢', '').trim();
+	      const body = byId('panel-modal-body');
+	      body.innerHTML = '';
+	      for (const child of Array.from(container.children)) {
+	        if (child === header) continue;
+	        body.appendChild(child);               // appendChild MOVES the node
+	      }
+	      panelModalLiveOrigin = container;
+	      byId('panel-modal-title').textContent = title;
+	      byId('panel-modal-copy-status').textContent = '';
+	      byId('panel-modal-shell').classList.add('open');
+	    }
+	    function closePanelModal() {
+	      byId('panel-modal-shell').classList.remove('open');
+	      byId('panel-modal-copy-status').textContent = '';
+	      // If a live body was moved in, move it back to its origin panel.
+	      if (panelModalLiveOrigin) {
+	        const body = byId('panel-modal-body');
+	        for (const child of Array.from(body.children)) panelModalLiveOrigin.appendChild(child);
+	        panelModalLiveOrigin = null;
+	      }
+	      byId('panel-modal-body').innerHTML = '';
+	      refresh().catch(console.error);
+	    }
+	    async function copyPanelModalText() {
+	      const el = byId('panel-modal-body');
+	      const text = (el.innerText || el.textContent || '').trim();
+	      const status = byId('panel-modal-copy-status');
+	      if (!text.length) { status.textContent = 'nothing to copy'; return; }
+	      try {
+	        await navigator.clipboard.writeText(text);
+	        status.textContent = `copied ${text.length} characters`;
+	      } catch (err) {
+	        const selection = window.getSelection();
+	        const range = document.createRange();
+	        range.selectNodeContents(el);
+	        selection.removeAllRanges();
+	        selection.addRange(range);
+	        status.textContent = 'clipboard write failed; text selected for manual copy';
+	      }
 	    }
 
     // ── Step-detail modal — opens when a script circle in the SVG
@@ -2293,18 +2455,64 @@
         header.classList.add('section-toggle');
         const keyText = (header.textContent || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
         const storageKey = 'ui-collapse:' + keyText;
-        const defaultCollapsed = container.dataset.defaultCollapsed === '1';
+        // Panels start CLOSED by default so the page opens compact and
+        // sections are revealed one at a time. A panel can opt OUT with
+        // data-default-collapsed="0". A stored user preference always wins.
+        const defaultCollapsed = container.dataset.defaultCollapsed !== '0';
         const stored = localStorage.getItem(storageKey);
         if (stored !== null ? stored === '1' : defaultCollapsed) {
           container.classList.add('collapsed');
         }
+        // popup_mode panels (wide/interactive) are compact inline and open
+        // LIVE full-width on header click; everything else toggles collapse.
+        const popupMode = container.dataset.popupMode === '1';
         header.addEventListener('click', () => {
+          if (popupMode) { openPanelModalLive(container); return; }
           container.classList.toggle('collapsed');
           const collapsed = container.classList.contains('collapsed');
           try { localStorage.setItem(storageKey, collapsed ? '1' : '0'); } catch (_) {}
         });
+        // Keep popup_mode panels collapsed inline so they never render
+        // cramped in a narrow column — the header is just the opener.
+        if (popupMode) container.classList.add('collapsed');
+        // Pop-out button — panels only (not controls-group sub-headers).
+        // Opens the panel full-width with Copy + Close. Stop propagation so
+        // clicking it never toggles the collapse. Capture the clean title
+        // before injecting the button so the popup header omits the ⤢ glyph.
+        // popup_mode → live (moved body, interactive); otherwise → snapshot.
+        if (container.classList.contains('panel') && !header.querySelector('.panel-pop-btn')) {
+          container.dataset.panelTitle = (header.textContent || '').trim();
+          const pop = document.createElement('button');
+          pop.type = 'button';
+          pop.className = 'panel-pop-btn';
+          pop.title = popupMode ? 'Open full-width' : 'Pop out full-width (Copy / Close)';
+          pop.textContent = '⤢';
+          pop.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            (popupMode ? openPanelModalLive : openPanelModal)(container);
+          });
+          header.appendChild(pop);
+        }
       });
     }
+    // Expose so late-injected panels (puppeteer plugin, dynamic registry)
+    // can re-wire themselves after they land in the DOM.
+    window.setupCollapsibles = setupCollapsibles;
+
+    // One-time reset (2026-10-24 panel reorg): clear any stale open/closed
+    // preferences so the new collapsed-by-default layout takes effect on
+    // this browser. Fires once; afterward the user's toggles persist normally.
+    try {
+      const RESET_KEY = 'ui-collapse-reset';
+      const RESET_VER = '2026-10-24-all-closed';
+      if (localStorage.getItem(RESET_KEY) !== RESET_VER) {
+        Object.keys(localStorage)
+          .filter((k) => k.indexOf('ui-collapse:') === 0)
+          .forEach((k) => localStorage.removeItem(k));
+        localStorage.setItem(RESET_KEY, RESET_VER);
+      }
+    } catch (_) {}
 
     setupCollapsibles();
 
@@ -2692,6 +2900,21 @@
     byId('step-modal-shell').addEventListener('click', (event) => {
       if (event.target === byId('step-modal-shell')) closeStepModal();
     });
+    byId('panel-modal-copy').addEventListener('click', () => {
+      copyPanelModalText().catch(console.error);
+    });
+    byId('panel-modal-close').addEventListener('click', closePanelModal);
+    byId('panel-modal-shell').addEventListener('click', (event) => {
+      if (event.target === byId('panel-modal-shell')) closePanelModal();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && byId('panel-modal-shell').classList.contains('open')) closePanelModal();
+    });
+    // Hero buttons: Recipe Flowchart + Pipeline Graph are no longer top
+    // panels — they open on demand in the live pop-up (full-width). Live
+    // move keeps the graph's circle-click modals working.
+    byId('btn-recipe-flowchart')?.addEventListener('click', () => openPanelModalLive(byId('recipe-flowchart-section')));
+    byId('btn-pipeline-graph')?.addEventListener('click', () => openPanelModalLive(byId('pipeline-graph-section')));
   </script>
 </body>
 </html>
