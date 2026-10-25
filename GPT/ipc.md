@@ -168,10 +168,10 @@ extracting a resident daemon:
   broker, a runner-client's death is its socket dropping *at the
   daemon*, not a close the ui_server observes — so the ui_server can
   still show a dead runner's last retained state. The `exited`
-  lifecycle publish is best-effort. MARRIAGE.md's "daemon republishes
+  lifecycle publish is best-effort. `[[marriage]]`'s "daemon republishes
   disconnected on client drop" is the eventual fix; not built yet.
 
-This is MARRIAGE.md stage 2 ("extract the switchboard"), landed.
+This is `[[marriage]]` stage 2 ("extract the switchboard"), landed.
 
 ## Cross-host bridge
 
@@ -217,9 +217,9 @@ Recovery when it has already happened: restart the puppeteer-ui launchd
 job (`launchctl kickstart -k gui/<uid>/com.jahbini.puppeteer-ui`) — it
 rebinds a fresh `runner.sock`; puppets reconnect on their own via
 `broker_client`'s 2s backoff (no puppet restart needed). Safe only when
-no `pipeline_runner` is active. This is the risk UI_MEMO.md and
-MARRIAGE.md both predicted ("wire.coffee does unlink-then-listen → a
-second runner steals the socket").
+no `pipeline_runner` is active. This is the risk the reactive-UI wedge
+and `[[marriage]]` both predicted ("wire.coffee does unlink-then-listen →
+a second runner steals the socket").
 
 ## Stage B — SSH-launch + MQTT over SSH — CORE DONE 2026-10-23 (octopus)
 
@@ -255,12 +255,48 @@ the tunnel); `sys/presence/mac-mini` landed in the laptop memo;
 forwarding needs OpenSSH ≥6.7 (both hosts are 10.x) + socket paths
 <104 bytes (macOS sun_path limit — long scratchpad paths give EINVAL).
 
-**Not yet done (B production cutover):** the mini's resident puppeteer
+**Peer-probe migration DONE 2026-10-25 (gated).** The hot per-tick peer
+probes — `SshDispatcher.{probePeerStatus,pgrepPeerRunner}` and the two
+stray `execSync` probes in `handlePuppeteerStatus` — now read a live
+broker cache behind the operator key **`sys/peer_via_broker`** (default
+OFF ⇒ unchanged). Cache: `sys/presence/<host>` (puppet heartbeat) +
+`subscribeBroker 'runner/+/+/{state,lifecycle}'`, trusted only when the
+gate is ON and a presence beat is < 90 s old, else SSH/curl fallback.
+Two additive ctx fields made it possible — `ipcStatus` +
+`subscribeBroker(topic,cb)` in `_pluginCtx` (see
+`[[plugin_system]]` / `[[puppeteer_project_plugin]]`). Verified via
+`~/claude_zone/test/stage_b_peer_via_broker.coffee` (gate-on served from
+broker w/ no SSH; gate-off + stale-presence both fall back).
+
+**Inventory publisher DONE 2026-10-25.** The writer puppet publishes its
+own pipe inventory to the memo key `sys/pipe_inventory/<host>` on a 30 s
+timer (local scan — no SSH), and puppeteer reads that snapshot in
+`peer_pipes` when the gate is ON and it's < 90 s fresh, else SSH
+fallback. The scan+parser is ONE shared module — `pipeline/ui/
+pipe_inventory.coffee`, exposed as `ctx.pipeInventory` — so the writer's
+local-publish path and puppeteer's SSH fallback can't drift (puppeteer's
+old inline bash was removed). This is the "puppet announces its
+inventory" push the design called for; it's also the first real instance
+of the writer behaving as a publishing puppet, and it kills the expensive
+cross-host SSH sqlite scan **without** needing the resident-puppet
+cutover (on the mini the writer is already a same-host broker client).
+Verified: `~/claude_zone/test/stage_b_{peer_via_broker,inventory_publish}.coffee`.
+
+**Legacy laptop→mini still works — verified live 2026-10-25.** A laptop
+puppeteer in SSH-poll mode (`UI_ROLE=puppet` to suppress the new
+supervisor, `PEER_LOCAL=0`, gate off) listed all 35 mini pipes + probed
+peer status over SSH and **spawned a pipe run on the mac-mini** — the
+pre-octopus workflow is intact because the peer-read path stays inert
+with the gate off. Minor gotcha (not urgent): the pipeline-graph pop-up
+needs a second recipe run to render correctly the first time.
+
+**Still NOT done (B production cutover):** the mini's resident puppeteer
 still runs the writer as a standalone same-host process (local socket),
-not as a supervised puppet; and the `execSync('ssh …')` peer panels in
-`puppeteer/ui/project.coffee` still SSH-poll instead of reading the
-broker. That migration (keep SSH as fallback) is the latency win and the
-riskier half — gate it.
+not as a supervised `ssh -R` puppet. And `peer_sessions`' run history
+still rides `SshDispatcher.bash` — same push mechanism applies (a sibling
+`sys/pipe_sessions/<host>` key) but isn't built. The operator toggle for
+`sys/peer_via_broker` is live (Fleet-controls "Peer: SSH ⇄ 📡 broker"
+button in `panels.js`, 2026-10-25).
 
 ## Stage D — fleet leases — SUBSTRATE DONE 2026-10-23 (octopus)
 

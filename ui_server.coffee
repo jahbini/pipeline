@@ -55,6 +55,9 @@ _sseThrottle = new Map()
 #     init?:         (ctx) -> {routes, augmentStatus?}
 #   }
 # Routes are {method, path | pathPrefix, handler(req,res,ctx)}.
+# The ctx also carries ipcStatus (broker client/cache, may be null) and
+# subscribeBroker(topic, cb) for unfiltered cross-pipe subscriptions —
+# see the _pluginCtx construction below (MARRIAGE Stage B).
 # init() returns {routes[], augmentStatus?}. augmentStatus(status) is
 # awaited inside /api/status to inject project-specific fields (eager
 # panel data, extra flags). The request dispatcher consults plugin
@@ -1096,12 +1099,30 @@ pad2 = (n) ->
   text = String(Number(n) ? 0)
   if text.length < 2 then "0#{text}" else text
 
-buildRunTag = ->
+# The active recipe name (control_override.yaml `pipeline:`), used to stem
+# run-log filenames so logs read as `<recipe>_HH_MM.log` instead of the old
+# literal `pipe_HH_MM.log`. Falls back to "pipe" when no recipe is
+# materialized or the file is unreadable.
+activeRecipeStem = ->
+  try
+    p = path.join(CWD, 'control_override.yaml')
+    return 'pipe' unless fs.existsSync(p)
+    doc = yaml.load(fs.readFileSync(p, 'utf8'))
+    name = doc?.pipeline
+    if typeof name is 'string' and name.trim().length then name.trim() else 'pipe'
+  catch
+    'pipe'
+
+buildRunTag = (stem) ->
   now = new Date()
   hhmm = "#{pad2(now.getHours())}_#{pad2(now.getMinutes())}"
+  # 2026-10-24: stem by recipe name (sanitized to a filename-safe token);
+  # fall back to "pipe" so callers that pass nothing still work.
+  safe = String(stem ? '').replace(/[^A-Za-z0-9._-]/g, '')
+  safe = 'pipe' unless safe.length
   {
     hh_mm: hhmm
-    logdir: "pipe_#{hhmm}"
+    logdir: "#{safe}_#{hhmm}"
   }
 
 tailText = (p, maxLines = 120) ->
@@ -1690,7 +1711,7 @@ scheduleRepeatLaunch = ->
   , delayMs
 
 startRunner = ->
-  runTag = buildRunTag()
+  runTag = buildRunTag(activeRecipeStem())
   logDir = path.join(CWD, 'logs')
   fs.mkdirSync logDir, { recursive: true }
   logPath = path.join(logDir, "#{runTag.logdir}.log")
@@ -2355,7 +2376,10 @@ handleClearLogs = (req, res) ->
   logDir = path.join(CWD, 'logs')
   removed = 0
   if fs.existsSync(logDir)
-    for name in fs.readdirSync(logDir) when /^pipe_\d{2}_\d{2}\.(log|err)$/.test(name)
+    # 2026-10-24: delete ALL log files, not just the literal `pipe_HH_MM`
+    # ones — recipe-named logs (`<recipe>_HH_MM.*`), `merge_*`, `launch_*`,
+    # and `<stem>.artifacts.log` all count as log files to clear.
+    for name in fs.readdirSync(logDir) when /\.(log|err)$/.test(name)
       try
         fs.unlinkSync path.join(logDir, name)
         removed += 1
@@ -2510,6 +2534,23 @@ _pluginCtx =
   normalizeUiRun:   (run) -> normalizeUiRun run
   UI_BIND_MODE:     UI_BIND_MODE
   PORT:             PORT
+  # ── IPC surface for plugins (MARRIAGE Stage B) ────────────────
+  # ipcStatus is the UI-side broker client/cache (null when ipc is
+  # disabled or failed to load). Plugins use it for memoRequest (seed +
+  # gate reads/writes) and its unfiltered 'memo' EventEmitter stream
+  # (presence + operator keys). subscribeBroker gives a plugin an
+  # UNFILTERED cross-pipe topic subscription (e.g. runner/+/+/lifecycle)
+  # that the pipe-scoped ipcStatus handlers do not surface — reconnect-
+  # safe (BrokerClient re-subscribes on connect) and a no-op when no
+  # broker. Returns an unsubscribe thunk.
+  ipcStatus:        ipcStatus
+  subscribeBroker:  (topic, cb) ->
+    try ipcStatus?.client?.subscribe(topic, cb)
+    catch err then console.error "[ui_server] subscribeBroker(#{topic}): #{err?.message ? err}"
+    -> try ipcStatus?.client?.unsubscribe(topic, cb)
+  # Canonical writer-pipe inventory probe (shared bash + parser) so the
+  # writer (local publish) and puppeteer (SSH fallback) never drift.
+  pipeInventory:    (try require('./ui/pipe_inventory') catch then null)
 _pluginRoutes = []
 _pluginAugmentStatus = null
 if _plugin?.init?

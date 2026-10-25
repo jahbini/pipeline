@@ -615,10 +615,10 @@
           <div id="out-files" class="files"></div>
         </section>
 
-        <section class="panel">
-          <h2>Diary Files</h2>
-          <div id="diary-files" class="files"></div>
-        </section>
+        <!-- Diary Files, Stories, Training Runs, Story Usage panels removed
+             2026-10-24: half-baked pipe-content views. They'll be rebuilt as
+             proper structures once the story/diary/celarien-voyage generation
+             architecture exists. -->
 
         <section class="panel" data-default-collapsed="1">
           <h2>Logs</h2>
@@ -640,38 +640,9 @@
           <div id="run-detail" class="hint mono" style="margin-top:8px; white-space:pre-wrap;"></div>
         </section>
 
-        <section class="panel" data-default-collapsed="1">
-          <h2>Stories</h2>
-          <div id="sqlite-stories-meta" class="hint mono"></div>
-          <table class="steps">
-            <thead>
-              <tr><th>story_id</th><th>title</th></tr>
-            </thead>
-            <tbody id="sqlite-stories-body"></tbody>
-          </table>
-        </section>
-
-        <section class="panel" data-default-collapsed="1">
-          <h2>Training Runs</h2>
-          <div id="sqlite-training-runs-meta" class="hint mono"></div>
-          <table class="steps">
-            <thead>
-              <tr><th>started</th><th>run_id</th><th>train rows</th><th>status</th></tr>
-            </thead>
-            <tbody id="sqlite-training-runs-body"></tbody>
-          </table>
-        </section>
-
-        <section class="panel" data-default-collapsed="1">
-          <h2>Story Usage (LoRA)</h2>
-          <div id="sqlite-usage-meta" class="hint mono"></div>
-          <table class="steps">
-            <thead>
-              <tr><th>story_id</th><th>use_count</th><th>last_used</th></tr>
-            </thead>
-            <tbody id="sqlite-usage-body"></tbody>
-          </table>
-        </section>
+        <!-- Stories / Training Runs / Story Usage panels removed 2026-10-24
+             (see note above the Logs panel) — to be rebuilt with the real
+             generation architecture. -->
 
         <section class="panel">
           <h2>Steps</h2>
@@ -1428,69 +1399,11 @@
         if (currentRunDetailId) loadRunDetail(currentRunDetailId).catch(console.error);
       }
 
-      // Stories
-      const stories = await fetchSqliteRequest('allStories.jsonl');
-      const sBody = byId('sqlite-stories-body');
-      const sMeta = byId('sqlite-stories-meta');
-      if (!stories.ok || !Array.isArray(stories.value)) {
-        sBody.innerHTML = '';
-        sMeta.textContent = stories.ok ? '(no rows)' : `error: ${stories.error}`;
-      } else {
-        const rows = stories.value;
-        const head = rows.slice(0, SQLITE_PANEL_LIMIT);
-        sMeta.textContent = `${rows.length} total${rows.length > head.length ? ` (showing first ${head.length})` : ''}`;
-        sBody.innerHTML = head.map((row) => `
-          <tr>
-            <td class="mono">${escapeHtml(row.story_id ?? '')}</td>
-            <td>${escapeHtml(row.title ?? '')}</td>
-          </tr>
-        `).join('');
-      }
-
-      // Training Runs
-      const runs = await fetchSqliteRequest('loraTrainingRuns.jsonl');
-      const rBody = byId('sqlite-training-runs-body');
-      const rMeta = byId('sqlite-training-runs-meta');
-      if (!runs.ok || !Array.isArray(runs.value)) {
-        rBody.innerHTML = '';
-        rMeta.textContent = runs.ok ? '(no rows)' : `error: ${runs.error}`;
-      } else {
-        // Show newest first; the meta layer typically orders by started_at DESC,
-        // but defensively sort here so the panel is consistent regardless.
-        const rows = runs.value.slice().sort((a, b) => String(b.started_at || '').localeCompare(String(a.started_at || '')));
-        const head = rows.slice(0, SQLITE_PANEL_LIMIT);
-        rMeta.textContent = `${rows.length} total${rows.length > head.length ? ` (showing newest ${head.length})` : ''}`;
-        rBody.innerHTML = head.map((row) => `
-          <tr>
-            <td class="mono">${escapeHtml(formatLocalTime(row.started_at || ''))}</td>
-            <td class="mono">${escapeHtml(row.run_id ?? '')}</td>
-            <td class="mono">${escapeHtml(row.train_rows_count ?? '')}</td>
-            <td>${escapeHtml(row.status ?? '')}</td>
-          </tr>
-        `).join('');
-      }
-
-      // Story Usage (LoRA)
-      const usage = await fetchSqliteRequest('loraStoryUsage.jsonl');
-      const uBody = byId('sqlite-usage-body');
-      const uMeta = byId('sqlite-usage-meta');
-      if (!usage.ok || !Array.isArray(usage.value)) {
-        uBody.innerHTML = '';
-        uMeta.textContent = usage.ok ? '(no rows)' : `error: ${usage.error}`;
-      } else {
-        // Highest use_count first — most-trained stories surface at the top.
-        const rows = usage.value.slice().sort((a, b) => Number(b.use_count || 0) - Number(a.use_count || 0));
-        const head = rows.slice(0, SQLITE_PANEL_LIMIT);
-        const totalUsed = rows.filter((r) => Number(r.use_count || 0) > 0).length;
-        uMeta.textContent = `${rows.length} tracked, ${totalUsed} trained${rows.length > head.length ? ` (showing top ${head.length})` : ''}`;
-        uBody.innerHTML = head.map((row) => `
-          <tr>
-            <td class="mono">${escapeHtml(row.story_id ?? '')}</td>
-            <td class="mono">${escapeHtml(row.use_count ?? 0)}</td>
-            <td class="mono">${escapeHtml(formatLocalTime(row.last_trained_at || ''))}</td>
-          </tr>
-        `).join('');
-      }
+      // Stories / Training Runs / Story Usage renderers removed 2026-10-24
+      // along with their panels — to be rebuilt with the real story/diary/
+      // voyage generation architecture. (fetchSqliteRequest + the meta
+      // requests allStories/loraTrainingRuns/loraStoryUsage still exist for
+      // whatever rebuilds them.)
     }
 
     function renderKillButton(run) {
@@ -1749,7 +1662,6 @@
       renderControls(data.controls || {});
       renderOverrideEditor(data.controls || {});
       renderFiles(byId('out-files'), data.out_files);
-      renderFiles(byId('diary-files'), data.diary_files);
       renderFiles(byId('log-files'), data.log_files);
       renderSteps(data.steps);
       byId('latest-log').textContent = data.latest_log || '';

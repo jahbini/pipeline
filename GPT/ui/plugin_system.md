@@ -51,8 +51,29 @@ launches).
  readRequestBody(req) -> Promise<string>,
  readJson(path, fallback), readText(path, fallback), writeText(path, text),
  resolveUiAsset(rel), listFiles(dir),
- describeOutputFile(rel, runStart), normalizeUiRun(run)}
+ describeOutputFile(rel, runStart), normalizeUiRun(run),
+ UI_BIND_MODE, PORT,
+ ipcStatus,                        # broker client/cache (null when ipc off)
+ subscribeBroker(topic, cb) -> unsubFn,
+ pipeInventory}                    # {INVENTORY_BASH, parse} or null
 ```
+
+`pipeInventory` (2026-10-25) is the ONE canonical writer-pipe inventory
+probe — `pipeline/ui/pipe_inventory.coffee`, exposing `INVENTORY_BASH`
+(the sqlite/filesystem scan) + `parse(raw)`. Shared so the writer's
+local-publish path (`sys/pipe_inventory/<host>`) and puppeteer's SSH
+fallback can never drift. See `[[puppeteer_project_plugin]]` /
+`[[writer_project_plugin]]`.
+
+`ipcStatus` + `subscribeBroker` were added for **MARRIAGE Stage B**
+(2026-10-25). `ipcStatus` is the UI-side `StatusSource` (may be null):
+use its `memoRequest(op, args)` and its unfiltered `'memo'`
+EventEmitter stream. `subscribeBroker(topic, cb)` gives an **unfiltered
+cross-pipe** subscription (e.g. `runner/+/+/lifecycle`) that the
+pipe-scoped `ipcStatus` handlers do not surface — reconnect-safe and a
+no-op when no broker. The puppeteer plugin uses both to keep a live
+peer-view cache behind the `sys/peer_via_broker` gate; see
+`[[puppeteer_project_plugin]]`.
 
 Plugins add their own helpers (SSH wrappers, SQLite handles, caches)
 privately — the context stays minimal.
