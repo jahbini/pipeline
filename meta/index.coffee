@@ -49,7 +49,10 @@ module.exports = (M, opts = {}) ->
   priority = (name) ->
     return 0 if name is 'sqlite.coffee'
     return 1 if name is 'pid_reap.coffee'
-    2
+    # ui.coffee must beat slash.coffee: `ui/intent/x` is a naked path that
+    # slash's permissive catch-all would otherwise claim as a file. (2026-10-28)
+    return 2 if name is 'ui.coffee'
+    3
   files = fs.readdirSync(baseDir)
     .filter (f) ->
       f.endsWith('.coffee') and f isnt 'index.coffee'

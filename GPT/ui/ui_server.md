@@ -212,3 +212,42 @@ Known pitfalls:
   `background: var(--bad)` fill.
 - Both live in `writediary/ui/index.html` AND `pipeline/ui/index.html` (kept in
   sync); the package copy mirrors to node_modules. Edit both when changing UI.
+
+## Update 2026-10-24 — collapse-by-default, panel pop-out, hero buttons, log naming
+
+Panel-reorg pass (continues `writer/morning_ui.md`). All in
+`pipeline/ui/index.html` + `pipeline/ui_server.coffee`:
+
+- **Panels start CLOSED by default.** `setupCollapsibles()` collapses
+  every `.panel`/`.controls-group` unless it opts out with
+  `data-default-collapsed="0"` (stored user pref still wins). A one-time
+  `localStorage['ui-collapse-reset']` flush clears stale prefs. It is now
+  **re-run at the end of `renderDynamicPanels()` and from the puppeteer
+  plugin after its panels inject** — dynamic/plugin panels used to get no
+  toggle at all (they landed after the boot-time call).
+- **Panel pop-out.** Every panel header gets a `⤢` button → full-width
+  modal (`#panel-modal-shell`) with Copy + Close (Esc/backdrop close),
+  modeled on the file viewer. Two variants: `openPanelModal` = snapshot
+  clone with **ids stripped** (so it never shadows the live panel's
+  `getElementById`); `openPanelModalLive` = MOVE the real body in (for
+  `popup_mode` panels, keeps controls live), moved back on close. The
+  panel modal is in the refresh freeze-guard. `#file-modal-shell` +
+  `#step-modal-shell` are `z-index:60` so they open ABOVE a panel pop-out.
+- **Hero action buttons.** Recipe Flowchart + Pipeline Graph are no
+  longer top panels — they're `.hero-btn`s just left of the run-status
+  pill (`.hero-right`), opening their (hidden, still-populated) sections
+  via `openPanelModalLive`. `#panel-modal-body .pipeline-svg` re-asserts
+  the graph's max-height cap (lost when moved out of `.pipeline-graph-panel`).
+- **Removed pipe-content panels** from the shared shell: Diary Files,
+  Stories, Training Runs, Story Usage (markup + their populate JS). They
+  were half-baked per-pipe corpus views; to be rebuilt when the story/
+  diary/voyage generation architecture exists. `writer/panels/diary_files.coffee`
+  deleted too. Server data (`/api/sqlite/*`, `data.diary_files`) left intact.
+- **Run-log filenames now `<recipe>_HH_MM.log/.err`** (was literal
+  `pipe_HH_MM`). `activeRecipeStem()` reads `control_override.yaml`'s
+  `pipeline:` in CWD; `buildRunTag(stem)` sanitizes it (fallback `pipe`);
+  `startRunner` passes it. Only the UI launch path; existing files keep
+  old names. `LOGDIR`/`<LOGDIR>.artifacts.log` rename along as an opaque stem.
+- **"Delete Log Files" deletes ALL logs.** `handleClearLogs` filter
+  widened from `^pipe_\d{2}_\d{2}\.(log|err)$` to `/\.(log|err)$/` — now
+  also clears recipe-named, `merge_*`, `launch_*`, and `.artifacts.log`.

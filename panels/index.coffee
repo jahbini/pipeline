@@ -81,6 +81,7 @@ loadPanel = (name, filePath) ->
       column:        String(panel.column ? 'left')
       eager:         panel.eager is true
       poll_seconds:  Number(panel.poll_seconds ? 5)
+      popup_mode:    panel.popup_mode is true
       sort_order:    if typeof panel.sort_order is 'number' then panel.sort_order else null
       applies:       if typeof panel.applies is 'function' then panel.applies else null
       endpoint:      panel.endpoint
@@ -121,7 +122,8 @@ exports.load = ({CWD, BASE, EXEC, helpers}) ->
       # client, so this only affects panels that declare one.
       for name, p of panels
         {name, title: p.title, render_hint: p.render_hint, column: p.column,
-         eager: p.eager, poll_seconds: p.poll_seconds, sort_order: p.sort_order, tier: p.tier}
+         eager: p.eager, poll_seconds: p.poll_seconds, popup_mode: p.popup_mode,
+         sort_order: p.sort_order, tier: p.tier}
 
     get: (name) -> panels[name] ? null
 

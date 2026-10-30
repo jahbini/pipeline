@@ -28,6 +28,25 @@ Rules the human has stated explicitly. Read this at session start.
   directly for exploring the C++ API, headers, kernel implementations,
   and op signatures. Do not modify it.
 
+## Per-pipe `out/` / `data/` / `params/` layout
+
+Each pipe dir has three subdirs with strict roles (jahbini 2026-10-27):
+
+- **`out/`** — ALL generated and final outputs. If a step writes it, it goes here
+  (chapter text, audits, directives, filled arcs, reports). A fan-out that pushes a
+  generated artifact to a peer writes it to the peer's `out/`, and any downstream
+  `source:` artifact that reads it points at `out/` too — keep writer + reader paths
+  in agreement.
+- **`data/`** — read-only info *related to the recipe*: static, checked-in reference
+  (`iching_casting.yaml`, `lepa_framework.yaml`, story libraries). Not per-run.
+- **`params/`** — per-step parameter files ONLY (`<step>.yaml`, `_global.yaml`, and
+  operator/UI inputs like `celarien_setup.yaml`). The "equivalent command-line
+  parameters." NEVER generated data.
+
+Mixing generated data into `params/` hides it from the OUTPUTS view and blurs
+input-vs-product. (Fixed in celarien 2026-10-27: fanout + `source:` + generate fallback
+all moved `params/` → `out/`.)
+
 ## Tools: shared utilities behind `S.tools`
 
 Shared functionality used by more than one step lives in `tools/<toolname>.coffee`
@@ -128,6 +147,15 @@ and rewriting the step to consume it via `L.theLowdown(...)`. The
 step's business logic (per-event match selection, cross-iteration story
 dedup, chunk_text regeneration from `story.text` when the row's
 chunk_text is empty) stayed in the step — only the SQL moved.
+
+This generalizes beyond `fs`: a step does **no direct I/O of any kind** — not
+`node:sqlite`/`DatabaseSync`, not `execSync`/`spawn` ssh, not raw sockets. The meta
+layer (`pipeline/meta/*`) performs ALL reads/writes via the step's request-keys
+(`L.need`/`L.make`/`L.theLowdown`/`L.saveThis`/`L.memoRequest`); the **broker** is
+meta's transport for octopus (controller↔puppet) comms, not a step's to call; the
+**memo** is the scheduling/coordination plane. A step reaching for a socket, a db
+handle, or ssh has broken the layering. (jahbini 2026-10-23; architecture +
+per-step migration status in `pipeline/GPT/marriage.md` + `ipc.md`.)
 
 ## Step scripts are location-anonymous
 

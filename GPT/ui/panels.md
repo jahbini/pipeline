@@ -168,6 +168,29 @@ happens only after every consumer moved to `data.panels_data.*`.
   another panel's state. If two panels need shared data, either fetch
   it twice or hoist the source into `helpers`.
 
+## Update 2026-10-24 — column hosts, popup_mode, pop-out
+
+**Column → host resolution generalized.** `renderDynamicPanels`'
+`panelHost(meta)` now resolves ANY `column` value to a
+`#dynamic-panels-<col>` host element if one exists, else falls back to
+`#dynamic-panels`. Previously `left`/`right` were special-cased to the
+fallback. So a panel declaring `column: 'right'` renders into
+`#dynamic-panels-right` (the host under the Controls pane), `column:
+'fleet'` into `#dynamic-panels-fleet`, etc. Drop a `<div
+id="dynamic-panels-<col>">` wherever you want that column to land.
+
+**New panel flag: `popup_mode: true`.** Forwarded through the registry
+(`index.coffee` `loadPanel` + `list()`) into `/api/status.panels`, then
+stamped on the slot as `data-popup-mode="1"`. A popup_mode panel renders
+as a **compact header inline** (kept collapsed) and opens its **live**
+body full-width in the shared panel pop-out on header-click or ⤢ —
+`openPanelModalLive` MOVES the real body nodes into the modal (controls +
+self-refresh keep working), moved back on close. Use it for wide/
+interactive panels that look cramped in a column (puppeteer: `peer_pipes`,
+`queue_status`, `peer_sessions`). Non-popup panels get the generic ⤢
+**snapshot** pop-out (clone, ids stripped) instead. Both live in
+`pipeline/ui/index.html`; see `[[ui_server]]` "Update 2026-10-24".
+
 ## See also
 
 - `pipeline_architecture.md` § "Two orbits" (framework vs domain).

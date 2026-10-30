@@ -34,13 +34,38 @@ class Broker extends EventEmitter
     @seq = 0
 
   listen: ->
-    try fs.unlinkSync @sockPath catch
+    # NEVER blindly unlink the socket path. A plain `fs.unlinkSync` before
+    # bind is the "steal the socket" footgun: if a resident controller is
+    # already listening here, removing its directory entry orphans its
+    # live inode — the controller keeps its open fds (looks healthy) but
+    # every NEW client gets ENOENT. Instead: try to bind; only on
+    # EADDRINUSE probe whether a live listener answers. Live → refuse
+    # (surface the error so the caller falls back to client). Refused /
+    # missing → the file is stale, so reclaim it (unlink + retry once).
     fs.mkdirSync path.dirname(@sockPath), recursive:true
     @server = net.createServer (sock) => @_accept sock
-    @server.on 'error', (err) => @emit 'error', err
-    @server.listen @sockPath, =>
+    onListening = =>
       try fs.chmodSync @sockPath, 0o600 catch
       @emit 'listening', @sockPath
+    @server.on 'error', (err) =>
+      unless err?.code is 'EADDRINUSE' and not @_retriedBind
+        return @emit 'error', err
+      probe = net.connect @sockPath
+      settled = false
+      finish = (fn) =>
+        return if settled
+        settled = true
+        try probe.destroy() catch
+        fn()
+      probe.once 'connect', => finish => @emit 'error', err  # live listener — do not steal
+      probe.once 'error', (perr) => finish =>
+        if perr?.code is 'ECONNREFUSED' or perr?.code is 'ENOENT'
+          @_retriedBind = true
+          try fs.unlinkSync @sockPath catch
+          @server.listen @sockPath, onListening             # stale file — reclaim
+        else
+          @emit 'error', err
+    @server.listen @sockPath, onListening
     @
 
   close: ->
