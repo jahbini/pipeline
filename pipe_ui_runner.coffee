@@ -1,6 +1,6 @@
 #!/usr/bin/env coffee
 ###
-              pipeline_runner.coffee  —  a micro-OS for AI experiments
+              pipe_ui_runner.coffee  —  the fused UI + runner node (a micro-OS for AI experiments)
               ===================================================================
 
   A tiny dependency-aware step runner for shell-friendly experiments. Pipelines
@@ -69,6 +69,25 @@ yaml      = require 'js-yaml'
 CoffeeScript = require 'coffeescript'
 CoffeeScript.register()
 
+# Async subprocess exec — a Promise over `spawn`, capturing stdout/stderr. The
+# fused node has ONE event loop shared by the UI service + the DAG runner, so
+# in-process code must never block on spawnSync (see GPT/async_fused_node.md).
+# Resolves {stdout, stderr, code} on exit (any code — the caller inspects it);
+# rejects only if the process fails to spawn.
+execAsync = (cmd, args = [], opts = {}) ->
+  new Promise (resolve, reject) ->
+    child = spawn cmd, args, Object.assign({}, opts, {stdio: ['ignore', 'pipe', 'pipe']})
+    out = ''; err = ''
+    child.stdout?.setEncoding 'utf8'
+    child.stderr?.setEncoding 'utf8'
+    child.stdout?.on 'data', (d) -> out += d
+    child.stderr?.on 'data', (d) -> err += d
+    child.on 'error', reject
+    child.on 'close', (code) -> resolve {stdout: out, stderr: err, code}
+
+# Async sleep — yields the loop (never Atomics.wait).
+delay = (ms) -> new Promise (resolve) -> setTimeout resolve, ms
+
 ###
 **EXEC vs CWD — read this twice.**
 
@@ -91,7 +110,11 @@ state. Keep that distinction clean — it is the seam along which
 `scripts/` overriding and meta-plugin loading will eventually grow.
 ###
 EXEC = process.env.EXEC ? path.dirname(__filename)
-CWD  = process.cwd()
+# Honor env.CWD when set (the UI launch path — spawn OR the fused
+# worker_thread — passes it) and fall back to process.cwd() for the bare
+# CLI (`coffee pipeline_runner.coffee` inside a pipe dir). A worker_thread
+# cannot chdir, so the fused model relies on this to point CWD at the pipe.
+CWD  = process.env.CWD ? process.cwd()
 
 # BASE — the consuming project's root. When the runner is installed as an
 # npm package, EXEC is `<base>/node_modules/@jahbini/pipeline`, and npm wipes
@@ -511,78 +534,17 @@ expandIncludes = (spec, baseDir) ->
   merged
 
 ###
-§4 — Single-instance guard
+§4 — Process liveness
 ==================================================================
-
-Two pipeline_runners writing to the same `state/` directory will
-corrupt each other's per-step files. `ensureSingleInstance` scans `ps`
-for sibling processes also running `pipeline_runner.coffee` and
-compares each candidate's CWD (via lsof -d cwd) to ours. Only
-same-CWD siblings are flagged as a conflict; different-CWD runners
-have their own state/ dir and cannot corrupt us. This unblocks the
-puppeteer running its own recipe (e.g. celarien_prep in ~/puppeteer)
-alongside a peer/smoke pipe in a different CWD. This is observational,
-not a lock — racing startups can still both pass the check. The cost
-of a real lock wasn't worth it for a teaching tool; the cost of
-*silent* double-run was.
 
 `isProcessAlive` is a `kill(pid, 0)` probe used when re-attaching to
 an in-flight UI run.
+
+(The legacy `ensureSingleInstance` ps/lsof guard was removed 2026-10-30
+with the old split runner. In the fused node single-instance is owned by
+launchd `KeepAlive` — one job per role/port — not a ps scan. `execSync`
+is still used below only for the quick `lsof` cwd probe in liveness.)
 ###
-ensureSingleInstance = ->
-  return null if process.env.PIPELINE_SKIP_INSTANCE_GUARD is '1'
-  try
-    scriptPath = path.resolve(__filename)
-    out = execSync('ps -Ao pid=,command=', encoding:'utf8')
-    lines = out.split("\n").map((l)-> l.trim()).filter (l)-> l.length > 0
-    others = []
-
-    for line in lines
-      match = line.match /^(\d+)\s+(.*)$/
-      continue unless match?
-      pid = Number(match[1])
-      command = String(match[2] ? '')
-      continue unless Number.isFinite(pid) and pid > 0
-      continue if pid is process.pid
-      continue unless command.includes('pipeline_runner.coffee')
-      continue unless command.includes(scriptPath) or command.includes(path.basename(scriptPath))
-      # 2026-09-12 self-match fix — the EXECUTABLE (first token of the
-      # command line) must be `coffee` or `node`. A bash/zsh -c pipe
-      # that MENTIONS "pipeline_runner.coffee" in its arguments (e.g.
-      # a puppeteer SSH probe running `pgrep -f pipeline_runner.coffee`
-      # or a shell script containing `pkill -f coffee.*pipeline_runner`)
-      # does NOT count as another instance. We check the executable
-      # basename, not substring existence.
-      firstToken = command.split(/\s+/)[0] ? ''
-      exeBase = firstToken.split('/').pop()
-      continue unless exeBase is 'coffee' or exeBase is 'node'
-      # CWD-scope: only runners in our SAME CWD share our state/ dir.
-      # Different-CWD runners cannot corrupt us and are allowed.
-      otherCwd = null
-      try
-        lsofOut = execSync("lsof -a -p #{pid} -d cwd -Fn 2>/dev/null", encoding:'utf8')
-        for lsofLine in lsofOut.split("\n")
-          if lsofLine.length > 1 and lsofLine[0] is 'n'
-            otherCwd = lsofLine.slice(1).trim()
-            break
-      catch _err
-        otherCwd = null
-      continue if otherCwd? and otherCwd isnt process.cwd()
-      others.push
-        pid: pid
-        command: command
-        cwd: otherCwd
-
-    if others.length > 0
-      console.error "[pipeline_runner] another pipeline_runner.coffee is already active"
-      for other in others
-        console.error "[pipeline_runner] active pid=#{other.pid} cmd=#{other.command}"
-      return others
-  catch err
-    console.error "[pipeline_runner] single-instance check failed:", String(err?.message ? err)
-    null
-  null
-
 isProcessAlive = (pid) ->
   num = Number(pid)
   return false unless Number.isFinite(num) and num > 0
@@ -896,6 +858,14 @@ class Memo
       return if keys.some((k)=> @theLowdown(k).value is false)
       try andDo() catch then null
 
+  # Reset the per-run DAG working set between runs in the fused node — drop all
+  # keys EXCEPT the persistent UI/operator namespaces (ui/*, sys/*), so a new
+  # run can't read a stale artifact/experiment/`done:` value from the last one.
+  resetRun: ->
+    for own k of @MM when not (k.indexOf('ui/') is 0 or k.indexOf('sys/') is 0)
+      delete @MM[k]
+    return
+
   addMetaRule: (name, regex, handler) ->
     @metaRules.push {name, regex, handler}
 
@@ -932,52 +902,26 @@ class Memo
 
     args = buildArgs(cmdType, payload)
     console.error "MLX args",args if dbug
-    spawnSync = require('child_process').spawnSync
-    # 2026-09-25 (puppeteer→mini step 9): claim the GPU mutex around
-    # the Python subprocess. The subprocess is a separate process
-    # (its MLX state isolated), but Metal RAM is shared with any
-    # in-process session_api users; without the claim, an mlx_lm
-    # spawn while the helper LLM is generating (or vice versa) can
-    # blow past GPU RAM and crash. sync path — see session_api for
-    # the async path.
-    gpuClaim = require './mlx/gpu_claim'
-    ticket = null
+    # 2026-09-25 (puppeteer→mini step 9): claim the GPU mutex around the
+    # Python subprocess. The subprocess is a separate process (its MLX
+    # state isolated), but Metal RAM is shared with any in-process
+    # session_api users; without the claim, an mlx_lm spawn while the
+    # helper LLM is generating (or vice versa) can blow past GPU RAM and
+    # crash. 2026-10-30: ASYNC — the fused node's one event loop must not
+    # block (see GPT/async_fused_node.md). The real async `claim()` from
+    # mlx/gpu_claim replaces the old sync busy-wait + hand-rolled lockfile:
+    # it yields the loop while waiting, handles stale-stealing +
+    # reentrance + the write race, and throws GpuClaimTimeout on timeout.
+    { claim, release } = require './mlx/gpu_claim'
+    ticket = await claim {tag: "callMLX.#{cmdType}", timeoutMs: 300_000}
     try
-      # Sync claim not available; the mutex is inherently async, but
-      # callMLX is sync-in-legacy. Do a busy-wait via a spawnSync
-      # sleep loop up to 5 minutes. This IS ugly; the right fix is
-      # to make callMLX async downstream. Flagged for follow-up.
-      startedAt = Date.now()
-      deadline  = startedAt + 300_000
-      while true
-        cur = gpuClaim.held_by()
-        alive = cur? and (try process.kill(cur.pid, 0); true catch then false)
-        stale = cur? and (not alive or (Date.now() - (cur.claimed_at ? 0)) > 10*60*1000)
-        canTake = (not cur?) or stale
-        if canTake
-          try
-            require('fs').writeFileSync gpuClaim.LOCK_PATH(),
-              JSON.stringify({pid: process.pid, tag: "callMLX.#{cmdType}", claimed_at: Date.now(), ticket_id: "callmlx-#{Date.now()}-#{Math.random()}"})
-            ticket = require('fs').readFileSync(gpuClaim.LOCK_PATH(), 'utf8')
-            break
-          catch _ then null
-        break if Date.now() > deadline
-        # Small sync sleep — spawnSync 'sleep 0.25' is portable.
-        spawnSync 'sleep', ['0.25']
-      res = spawnSync resolvePython(CWD), args, {encoding:'utf8'}
-      console.error "MLX result" ,res if dbug
-      if res.error?
-        throw res.error
-      if res.status isnt 0
-        throw new Error "MLX failed: #{res.stderr ? res.stdout ? "exit #{res.status}"}"
+      res = await execAsync resolvePython(CWD), args
+      console.error "MLX result", res if dbug
+      if res.code isnt 0
+        throw new Error "MLX failed: #{res.stderr or res.stdout or "exit #{res.code}"}"
       res.stdout
     finally
-      # Remove the lock file if it still records us as the holder.
-      try
-        cur = gpuClaim.held_by()
-        if cur?.pid is process.pid
-          require('fs').unlinkSync gpuClaim.LOCK_PATH()
-      catch _ then null
+      try release ticket catch then null
 
   callLLM: (params, dbug = false) ->
     console.error "LLM(in-process) #{params.op}", params if dbug
@@ -2161,31 +2105,20 @@ The full life of a run, in the order things happen:
      right code and update `ui-run.json`. If a shutdown was
      written mid-flight, honor it immediately.
 ###
-main = ->
-  otherRunners = ensureSingleInstance()
-  if otherRunners?.length
-    stateDir = path.join(CWD, 'state')
-    fs.mkdirSync(stateDir, {recursive:true})
-    uiRunPath = path.join(stateDir, 'ui-run.json')
-    current = {}
-    if fs.existsSync(uiRunPath)
-      try current = JSON.parse(fs.readFileSync(uiRunPath, 'utf8')) catch then current = {}
-    if isProcessAlive(current?.pid)
-      current.status = 'running'
-      current.reason = 'attached to existing pipeline_runner.coffee'
-    else
-      current.status = 'skipped'
-      current.finished_at = new Date().toISOString()
-      current.reason = 'another pipeline_runner.coffee is already active'
-    current.other_runners = otherRunners
-    fs.writeFileSync uiRunPath, JSON.stringify(current, null, 2), 'utf8'
-    process.exit(0)
-
+# runRecipe — the DAG-runner taskmaster. Runs ONE recipe to completion against
+# the INJECTED shared Memo (the fused node's one memo), writes ui/run status
+# into it, and calls `done(result)` on completion. It NEVER process.exit()s —
+# that would kill the long-lived UI taskmaster sharing this process.
+# (MARRIAGE fuse, 2026-10-29.)
+runRecipe = (M, runOpts={}, done=(->)) ->
+  # No cross-process single-instance guard — the fused node IS the one process;
+  # the UI taskmaster gates concurrency before calling runRecipe.
   pythonEnv = validatePythonEnvironment(CWD)
 
-  M = new Memo()
-  metaLoader = require path.join(EXEC, 'meta')
-  metaLoader(M, { baseDir: CWD, basePath: BASE, execDir: EXEC })
+  # M + metaLoader come from the fused boot (ONE shared memo). Reset the per-run
+  # DAG working set (keeping ui/* + sys/*), then stamp ui/run running.
+  M.resetRun?()
+  M.saveThis 'ui/run', {status: 'running', at: Date.now()}
   S = new StepStateStore path.join(CWD,'state')
   U = createUiRecorder M, path.join(CWD,'state')
   U.reset()
@@ -2244,10 +2177,10 @@ main = ->
   controlOverridePath = path.join(CWD,'control_override.yaml')
   controlOverride = loadYamlSafe controlOverridePath
   legacyOverride = loadYamlSafe path.join(CWD, 'override.yaml')
-  pipelineName = controlOverride.pipeline ? legacyOverride.pipeline
+  pipelineName = runOpts.recipe ? controlOverride.pipeline ? legacyOverride.pipeline
   unless pipelineName?
     console.error "control_override.yaml or legacy override.yaml missing pipeline"
-    process.exit(1)
+    return done({status: 'error', reason: 'no pipeline in control_override'})
 
   overrideLayers = resolveOverrideLayers pipelineName
   configPath = resolveConfigPath pipelineName
@@ -2373,7 +2306,8 @@ main = ->
     banner "🛑 PIPELINE PREVIOUSLY SHUT DOWN"
     console.log "  by:", pipeState.by
     console.log "  reason:", pipeState.reason
-    process.exit(0)
+    M.saveThis 'ui/run', {status: 'shutdown', reason: pipeState.reason, at: Date.now()}
+    return done({status: 'shutdown', reason: pipeState.reason})
 
   active = {count: 0, names: new Set()}
 
@@ -2595,12 +2529,13 @@ main = ->
     sd = M.theLowdown("pipeline:shutdown").value
     if sd?
       S.writePipelineShutdown sd
-      exitCode = if sd.failed is true then 1 else 0
-      finalizeRunStatus (if sd.failed is true then 'failed' else 'shutdown'), { shutdown: sd }
+      status = if sd.failed is true then 'failed' else 'shutdown'
+      finalizeRunStatus status, { shutdown: sd }
       banner if sd.failed is true then "💥 PIPELINE FAILED" else "🛑 PIPELINE SHUTDOWN"
       console.log "  by:", sd.by
       console.log "  reason:", sd.reason
-      process.exit(exitCode)
+      M.saveThis 'ui/run', {status, reason: sd.reason, at: Date.now()}
+      return done({status, reason: sd.reason, shutdown: sd})
 
     doneFinals = true
     anyFail = false
@@ -2616,11 +2551,13 @@ main = ->
       if anyFail
         finalizeRunStatus 'failed'
         banner "💥 Pipeline finished with failures (final: #{finals.join(', ')})"
-        process.exit(1)
+        M.saveThis 'ui/run', {status: 'failed', at: Date.now()}
+        return done({status: 'failed', finals})
       else
         finalizeRunStatus 'done'
         banner "🌟 Pipeline finished (final: #{finals.join(', ')})"
-        process.exit(0)
+        M.saveThis 'ui/run', {status: 'done', at: Date.now()}
+        return done({status: 'done', finals})
 
     setTimeout(tick, 2000)
 
@@ -2641,35 +2578,65 @@ main = ->
   protocol the runner does not currently provide; if you need one,
   add a `cancel:<step>` Memo key the step polls.
   ###
-  printActiveSteps = (signalName) ->
-    names = Array.from(active.names ? [])
-    banner "📶 Signal received: #{signalName}"
-    if names.length
-      console.log "  active (#{names.length}):", names.join(', ')
-    else
-      console.log "  active (0): none"
+  # (Fused node) No per-run signal handlers: SIGTERM/SIGINT belong to the
+  # long-lived UI process, and installing them per runRecipe would both stack
+  # listeners across runs and let a recipe signal kill the UI taskmaster.
+  # Cancellation, if needed, is a `cancel:<step>` memo key the step polls (§12).
 
-  process.on 'SIGUSR1', ->
-    printActiveSteps('SIGUSR1')
+# **Entry point.** `bootFusedNode()` runs only when invoked directly
+# (`coffee pipe_ui_runner.coffee`, the launchd jobs, or the `pipeline` bin).
+# When the file is `require`d instead — e.g. a test harness exercising the
+# spec-merge in isolation — we skip boot and expose the internals below for
+# the caller to drive.
+# ── FUSED NODE BOOT ───────────────────────────────────────────────
+# One process, two taskmasters over ONE shared Memo (collisions = shared keys).
+# The UI service (meta/ui) never dies; it launches the DAG runner (runRecipe)
+# IN-PROCESS. No worker, no parentPort — runRecipe writes ui/* into the SAME
+# memo the UI serves. (callMLX and callLLM are both async now — no in-process
+# blocking compute freezes the shared event loop; see GPT/async_fused_node.md.)
+bootFusedNode = (opts={}) ->
+  M = new Memo()
+  (require path.join(EXEC, 'meta')) M, {baseDir: CWD, basePath: BASE, execDir: EXEC}
+  running = false
+  # The UI taskmaster calls this to launch the DAG taskmaster. Fire-and-track:
+  # run status streams via the `ui/run` memo key → SSE. Returns immediately.
+  M.ui.onLaunch = (req) ->
+    payload = if typeof req is 'string' then {pipeline: req} else (req ? {})
+    recipe = String(payload.pipeline ? payload.recipe ? '').trim()
+    return {ok: false, error: 'pipeline required'} unless recipe
+    return {ok: false, error: 'a run is already active'} if running
+    # restart:true (from /api/step_restart) preserves on-disk DAG state so the
+    # runner's restart_here protocol can keep upstream steps and only redo the
+    # target + downstream. A normal Run does the opposite: fresh-run clear.
+    restart = payload.restart is true
+    unless restart
+      # Persist the selection so the status panel's _controlPipeline() and the DAG
+      # read a consistent recipe/ui_values (legacy /api/launch wrote this too).
+      try
+        obj = {pipeline: recipe}
+        obj.ui_values = payload.ui_values if payload.ui_values? and typeof payload.ui_values is 'object'
+        fs.writeFileSync path.join(CWD, 'control_override.yaml'), yaml.dump(obj), 'utf8'
+      catch err then null
+      # Fresh-run semantics (jahbini 2026-10-29): a Run clears prior DAG state
+      # (pipeline.json + every step-<name>.json) so the whole recipe re-executes
+      # rather than restoring done-flags and skipping. No crash-resume memoization.
+      try fs.unlinkSync path.join(CWD, 'pipeline.json') catch then null
+      sdir = path.join(CWD, 'state')
+      for f in (try fs.readdirSync(sdir) catch then []) when /^step-.*\.json$/.test(f)
+        try fs.unlinkSync path.join(sdir, f) catch then null
+    running = true
+    try runRecipe M, {recipe}, (result) -> running = false
+    catch err then running = false; return {ok: false, error: String(err?.message ? err)}
+    {ok: true, status: (if restart then 'restarted' else 'launched'), pid: process.pid, override: {pipeline: recipe}}
+  port = Number(opts.port ? process.env.UI_PORT ? 4300)
+  M.ui.serve {port, host: opts.host, onListen: (p) -> console.log "🎛  pipe_ui_runner — fused node on #{p}; one shared memo; no worker"}
+  M
 
-  process.on 'SIGTERM', ->
-    printActiveSteps('SIGTERM')
-    process.exit(143)
-
-  process.on 'SIGINT', ->
-    printActiveSteps('SIGINT')
-    console.log "\n(CTRL+C) Exiting..."
-    process.exit(130)
-
-# **Entry point.** Run only when invoked directly (`coffee
-# pipeline_runner.coffee` or the `pipeline` bin). When the file is
-# `require`d instead — e.g. a test harness exercising the spec-merge in
-# isolation — we skip `main()` and expose the internals below for the
-# caller to drive. `ui_server.coffee` *spawns* the runner as a
-# subprocess, so it never trips this guard.
-main() if require.main is module
+bootFusedNode() if require.main is module
 
 module.exports = {
+  runRecipe
+  bootFusedNode
   deepMerge
   stripUiDirectives
   loadYamlSafe

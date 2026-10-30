@@ -184,7 +184,7 @@ readTools = [
 controlTools = [
   {
     name: 'launch'
-    description: 'Launch the active pipe (POST /api/launch). Idempotent via ensureSingleInstance on the UI side.'
+    description: 'Launch the active pipe (POST /api/launch). The fused node refuses a launch while a run is already active (ui/run.status==running).'
     inputSchema: { type: 'object', properties: { body: { type: 'object' } }, additionalProperties: false }
     handler: wrapProxy 'POST', -> '/api/launch'
   }

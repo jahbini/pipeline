@@ -24,29 +24,36 @@ cp   = require 'child_process'
 SLEEP_10_MIN = 10 * 60 * 1000
 MAX_RETRIES  = 3
 
-# Synchronous sleep without consuming a CPU core.
-sleepBuffer = new Int32Array new SharedArrayBuffer 4
-
+# Async sleep — yields the event loop. This step runs IN-PROCESS inside the
+# fused UI+runner node (one event loop, two cooperating taskmasters), so a
+# blocking wait would freeze the never-dying UI service. The old blocking
+# Atomics.wait froze it for the full 10-minute retry backoff.
 sleep = (ms) ->
-  Atomics.wait sleepBuffer, 0, 0, ms
-  return
+  new Promise (resolve) -> setTimeout resolve, ms
 
+# Async subprocess run (was cp.execFileSync). Spawns, inherits stdio, and
+# resolves on clean exit / rejects on failure — never blocks the loop.
 run = (cmd, args, cwd = null, extraEnv = {}) ->
   env = Object.assign {}, process.env, extraEnv
+  new Promise (resolve, reject) ->
+    child = cp.spawn cmd, args, { cwd, stdio: 'inherit', env }
+    child.on 'error', reject
+    child.on 'exit', (code, signal) ->
+      return resolve() if code is 0
+      reject new Error "#{cmd} #{args.join ' '} exited #{if signal then "on #{signal}" else "with code #{code}"}"
 
-  cp.execFileSync cmd, args,
-    cwd: cwd
-    stdio: 'inherit'
-    env: env
-
+# Async shell run (was cp.execSync) — captures stdout, rejects on failure.
 runSh = (cmd, cwd = null, extraEnv = {}) ->
   env = Object.assign {}, process.env, extraEnv
-
-  cp.execSync cmd,
-    cwd: cwd
-    stdio: 'pipe'
-    encoding: 'utf8'
-    env: env
+  new Promise (resolve, reject) ->
+    child = cp.spawn cmd, { cwd, env, shell: true }
+    out = ''; err = ''
+    child.stdout?.on 'data', (d) -> out += d
+    child.stderr?.on 'data', (d) -> err += d
+    child.on 'error', reject
+    child.on 'exit', (code) ->
+      return resolve(out) if code is 0
+      reject new Error "command failed (#{code}): #{err or out}"
 
 provenancePathFor = (targetDir) ->
   # Visible (no leading dot) so `ls` shows it and humans can spot it
@@ -368,7 +375,7 @@ gitPublicArgs = [
 
         console.log "[init] Checking repository..."
 
-        run(
+        await run(
           'git'
           gitPublicArgs.concat [
             'ls-remote'
@@ -386,7 +393,7 @@ gitPublicArgs = [
 
         console.log "[init] Cloning repository..."
 
-        run(
+        await run(
           'git'
           gitPublicArgs.concat [
             'clone'
@@ -406,7 +413,7 @@ gitPublicArgs = [
 
         console.log "[init] Pulling Git LFS objects..."
 
-        run(
+        await run(
           'git'
           gitPublicArgs.concat [
             'lfs'
@@ -419,7 +426,7 @@ gitPublicArgs = [
         # Ensure all LFS pointer files are materialized.
         console.log "[init] Checking out Git LFS objects..."
 
-        run(
+        await run(
           'git'
           gitPublicArgs.concat [
             'lfs'
@@ -467,7 +474,7 @@ gitPublicArgs = [
 
         if attempt < MAX_RETRIES
           console.log "[init] Waiting 10 minutes before retry..."
-          sleep SLEEP_10_MIN
+          await sleep SLEEP_10_MIN
         else
           console.log "[init] Exhausted retries."
 

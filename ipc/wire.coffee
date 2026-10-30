@@ -5,6 +5,9 @@ fs   = require 'fs'
 {Broker}       = require './broker'
 {Memo}         = require './memo'
 {BrokerClient} = require './broker_client'
+# (The worker_thread/parentPort UI mirror was removed 2026-10-30 with the
+# legacy fuse — the fused node (pipe_ui_runner.coffee) is one process with an
+# in-process memo + meta/ui, so there is no main-thread UI to mirror to.)
 
 # Additive wiring: the runner publishes state/step/event/lifecycle
 # AFTER each disk write (disk stays authoritative — publishes fire only

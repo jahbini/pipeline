@@ -1,9 +1,236 @@
-# MARRIAGE: the puppeteer is one process — UI + memo fused — driving same-shape writer puppets over MQTT/SSH
+# MARRIAGE: one class = UI + pipeline_runner, fused, one instance per active pipe — recursive puppets/puppeteers
 
 > **Canonical home: `pipeline/GPT/marriage.md`** (moved out of
 > `~/claude_zone/` 2026-10-25 so the north-star lives in the repo,
 > committed + cross-machine, per `CONVENTIONS.md`). Implementation detail
 > lives in `[[ipc]]`; forward work is tracked in `~/claude_zone/TODO.md`.
+
+## ★ THE CANONICAL GOAL (jahbini-confirmed 2026-10-28) — read this; work in this order
+
+**The merge.** Fuse `ui_server.coffee` and `pipeline_runner.coffee` into ONE
+CoffeeScript class — the *recipe runner* — one instance per active pipe.
+`pipeline_runner` already owns the three things that matter: the **memo
+(IN-PROCESS)**, the **DAG**, and **running local recipe scripts**. The UI folds into
+that same process as a **`meta/ui` I/O device**, loaded by `metaLoader` exactly like
+`meta/sqlite`/`meta/yaml`, driven by the in-process memo — HTTP / SSE / asset serving
+included. Steps address the UI only through meta request-keys, never a separate server.
+
+Every node is this identical class. A **puppeteer** has subordinate puppets; a
+**puppet** is the same node without. Nodes speak **octopus** to each other (up to a
+puppeteer, down to subordinates). Recipe scheduling is a **petri net**.
+
+**THE MEMO IS THE RUNNER'S IN-PROCESS MEMO — never `state/memo.sqlite`, never a broker
+RPC** (jahbini, 2026-10-28). No separate `ui_server` process, no spawned
+`pipeline_runner`, no broker / sqlite-memo / switchboard / leases. That whole `ipc/`
+substrate is the wrong cut ([[ipc]], banner-marked obsolete) and the tar pit that
+derails every session — do not reintroduce it.
+
+## ★ STATUS 2026-10-30 — THE FUSE IS BUILT, RUNNING, AND VALIDATED (supersedes the worker-era notes below)
+
+The merge is no longer aspirational. The fused node is **`pipeline/pipe_ui_runner.coffee`**
+— ONE CoffeeScript class: the `Memo` (in-process) + the full DAG machinery + `runRecipe`
+(runs a recipe in-process, never `process.exit`) + `bootFusedNode`. The UI is the
+`meta/ui` device (`pipeline/meta/ui.coffee`), which owns ALL serving (static page, project
+plugin routes, every `/api/*`, SSE). **No worker_thread, no `run_worker.js` shim, no
+spawned `pipeline_runner`, no broker/sqlite memo.** The old worker/.js-shim fuse (described
+in the sections below, and still in the LEGACY `ui_server.coffee`) was the wrong shape and
+is retired from the fused path.
+
+**Running now — THE FUSE IS THE SOLE SERVICE (legacy retired 2026-10-30).** The mini runs the
+pair **launchd-resident** (`com.jahbini.pipe-ui-puppeteer` → 5400, `com.jahbini.pipe-ui-writer`
+→ 5411; `RunAtLoad`+`KeepAlive`, `WorkingDirectory` = ~/puppeteer / ~/writer, shared
+`GPU_CLAIM_DIR=~/puppeteer/state` so one Metal mutex, peered to each other). KeepAlive-respawn
+verified. The legacy `com.jahbini.puppeteer-ui` launchd job is unloaded + its plist retired
+(`.retired-20261030`); the manual writer on 4311 is stopped; **4300/4311 are gone.** The laptop
+runs the same pair for dev. `pipeline_runner.coffee`, `ui_server.coffee`, `run_worker.js` are
+deleted from the repo (kept as `.deprecated-20261030` on the mini for a short rollback window).
+package.json bins/scripts (pipeline + puppeteer + writer) now point at `pipe_ui_runner.coffee`.
+
+**Two cooperating taskmasters, one event loop, no 'kill':** the UI service and the DAG
+runner share the one in-process memo + meta and cooperate by STATE, never by process
+termination ([[taskmasters-cooperate-no-kill]], which retired the old split-process "never
+kill a runner, only the UI" rule). Because they share one event loop, in-process code must
+never block it — **`callMLX` and `callLLM` are both async now**, and step scripts shell out
+via awaited async spawn (reference pattern + rule: `pipeline/GPT/async_fused_node.md`). This
+closed the last freeze (the 2026-10-30 `download_model` git-lfs case, where a synchronous
+`git lfs pull` in the fused loop made the UI stop answering).
+
+**What the fused node serves today** (parity pass vs live legacy, 2026-10-29/30): the full
+`index.html` + plugin routes + `/api/{launch,kill,status,control,human_override,file,
+pipeline_svg,step_detail,step_restart,adapters,save_good_adapter,memo,ui,events,
+recipe_flowchart,sqlite/*,manifest}`, with the status aggregate at structural parity
+against live 4311 (every field the page consumes).
+
+**Cutover DONE 2026-10-30** (launchd residency + legacy retirement + package.json + file
+deletion — all above). Remaining tidy-ups, none load-bearing: the inert `parentPort`/`postParent`
+worker-era mirror still sits in `ipc/wire.coffee` (harmless — `parentPort` is null outside a
+worker; `wire.coffee` itself stays, the fused node requires `wireRunner`); a few cosmetic
+`pipeline_runner`/`ui_server` mentions remain in docstrings + one `mcp/pipe_server` tool
+description; and the `.deprecated-20261030` rollback copies on the mini can be removed once
+trusted. Day-to-day handoff lives in `~/claude_zone/FAILURE.md` (steering only, not committed).
+
+**The work, in order:**
+0. **Establish / complete the single-process fuse.** Confirm `/api/launch` →
+   `ui_server.startRunner` → `worker_thread` (`run_worker.js` → `pipeline_runner.main()`)
+   is the live, SOLE launch path, and the detached child-process spawn is gone.
+   (Investigation first — not building.)
+1. **UI as `meta/ui`.** `pipeline/meta/ui.coffee` loaded by `metaLoader`, owning UI I/O
+   end-to-end over the in-process memo; the top-level `ui_server` shrinks to a thin
+   bootstrap.
+   - ⏳ STARTED 2026-10-28 (proven live on the mini, additive beside the broker path):
+     `meta/ui.coffee` gives `ui/*` keys in-process memo semantics + `M.ui`
+     (get/set/snapshot/subscribe), ordered to beat `slash`. `ui_server` holds a
+     long-lived server-level `uiMemo`; `POST /api/ui/<key>` writes land in it and
+     `/api/events` pushes `ui/*` (initial snapshot + live `subscribe`) as `memo` frames
+     the browser already renders. `/api/memo` (broker) and `ipcStatus` events untouched.
+     Probe: `~/claude_zone/test/meta_ui_probe.coffee` (6/6).
+   - ✓ FIRST REAL STATE MIGRATED 2026-10-28: the peer-pipes ward filter
+     (`ui/filter/peer_pipes`) now rides the in-process `uiMemo`. `window.ui_memo`
+     (`puppeteer/ui/panels/panels.js`) routes `ui/*` → `/api/ui`, everything else
+     (`sys/*`) → broker `/api/memo`; `.on()`/SSE unchanged (the `memo` frame carries
+     both). Server-side write/read/SSE round-trip proven; a browser hard-reload loads
+     the new panels.js. **Cross-tab sync HUMAN-CONFIRMED by jahbini 2026-10-28** — a
+     second mac-mini:4300 tab shows the ward filter identically, which can only come
+     from `uiMemo` pushing over SSE to the other tab's `subscribe`. The merge path
+     carries live operator state, in-process, end to end.
+     NEXT (scouted): the remaining `ui/*` *operator* keys are actually `sys/*` (Freeze,
+     Fleet mode, Peer-source) — cross-process, correctly staying on the broker for now.
+     The real next piece is SERVER-PUSHED run status (run/step/event/lifecycle): today
+     it round-trips the broker socket even within the one process (worker publishes via
+     `wire` → `runner.sock` → main-thread `ipcStatus` → SSE). Target: carry it
+     worker→main over the `worker_threads` MessagePort into `uiMemo`, dropping the broker
+     from the local status path.
+   - ✓ FIRST STATUS FIELD DONE 2026-10-28: `ui/run` now flows worker→main over
+     **`parentPort`** — `run_worker.js` `postUi()` posts `{type:'ui',key,value}`;
+     `startRunner`'s `worker.on('message')` writes it into `uiMemo`; the terminal is
+     written from the worker `exit`/`error` handlers (the worker can't post across its
+     own `process.exit`). Proven: SSE shows `ui/run:running` (parentPort) then `:failed`
+     (exit) on a launch+kill; `/api/ui/run` round-trips. NO broker in this path. The
+     `worker.on('message')` handler is generic (`type:'ui'` → `uiMemo`), so widening is
+     just more `postUi` calls.
+   - ✓ STEP/EVENT/LIFECYCLE DONE 2026-10-28: `wire.coffee`'s `publish()` now ALSO posts
+     every base-prefixed topic to `parentPort` as `ui/<suffix>` (gated on `parentPort`,
+     so the standalone CLI runner is broker-only, unchanged). A real `celarien_prep` run
+     landed `ui/state`, `ui/lifecycle`, `ui/event`, `ui/step/current`, and per-step
+     `ui/step/<name>` into `uiMemo` (proven via `/api/ui` snapshot), broker path intact.
+     The mirror fired on EVERY publish incl. the `ui/event` firehose, broadcasting each
+     to every tab — a full run ran noticeably slow.
+   - ✓ COALESCE DONE 2026-10-28: `meta/ui.coffee` now batches the change→SSE emit —
+     `store` updates IMMEDIATELY (get/snapshot/theLowdown always current), but the emit
+     collects dirty keys and flushes the LATEST value per key on a ~40ms timer, so a
+     burst collapses to ~one push/key/window. Probe (6/6) asserts: emit deferred, a
+     3-write same-key burst → 1 emit carrying the latest value, unsubscribe stops it.
+     Live-verified on the mini: SSE delivered a `ui/filter/peer_pipes` write through the
+     coalesced path. Status-over-memo is now load-bounded + safe to rely on.
+     NEXT (the payoff): point the browser at `ui/*` for status rendering (drop the
+     re-fetch-on-every-push), then retire the LOCAL broker-fed SSE path — broker stays
+     for cross-host/octopus only.
+   - ⚠ SCOUTED 2026-10-28 — the browser status panel is BIGGER than a swap. It renders a
+     server-computed aggregate from `/api/puppeteer_status` (`handlePuppeteerStatus`,
+     `puppeteer/ui/project.coffee:240`): queue counts + peer-active + next-up. That
+     handler is request-shaped `(req,res)`, does DIRECT I/O on the OBSOLETE substrate
+     (`execSync pgrep`, `SshDispatcher.pgrepPeerRunner()` over SSH, `fs` reads of
+     `queue_state.json`), and lives in the PLUGIN while `uiMemo` lives in CORE (ctx
+     exposes `subscribeBroker`/`ipcStatus`, NOT a `ui/*` write). So the slice =
+     (a) refactor the aggregate to a pure `buildPuppeteerStatus()`; (b) expose a `ui/*`
+     write to the plugin via ctx; (c) push `ui/puppeteer_status` on coarse run/lifecycle
+     events (coalesced); (d) browser renders from `ui_memo.on('ui/puppeteer_status')` +
+     snapshot, dropping the per-push fetch. Done RIGHT it should rebuild the aggregate
+     from the in-process `ui/*` run/step frames + memo-driven pipe/queue state rather
+     than re-pushing the pgrep/ssh computation — a rethink entangled with the obsolete
+     substrate. Verify at the browser. This is the next focused piece; the `ui/run` +
+     step/event/lifecycle frames it needs are already in `uiMemo`.
+   - ✓ SMALLER BROWSER SLICE DONE 2026-10-28: `panels.js` no longer re-fetches
+     `/api/puppeteer_status` on every `step` push — coarse `run`/`lifecycle` refresh
+     immediately, `step` bursts throttle to ≤1 re-fetch/1.5s (`onPushThrottled`). Cuts
+     the N-tabs×per-step pgrep+ssh+fs re-fetch. Browser hard-reload to load it. The full
+     memo-driven aggregate (push `ui/puppeteer_status`, render from it) is still the
+     bigger piece scouted above.
+2. **Steps reach the UI only via meta request-keys** (symmetric with `meta/sqlite`).
+3. **One recursive class** — the same fused class as puppet or puppeteer by config;
+   octopus between instances; petri-net scheduling.
+
+> **⚠ SUPERSEDED (see the 2026-10-30 STATUS block above).** This step-0 note and the
+> "CORE REQUIREMENT DELIVERED (2026-10-26)" section below describe the OLD worker_thread +
+> `run_worker.js` fuse. That shape was rejected (not one CoffeeScript class; a separate
+> `.js` program) and replaced by `pipe_ui_runner.coffee` (one class, in-process, no worker/
+> shim), now running as the octopus. Steps 1-3 (UI as `meta/ui`, steps-address-UI-via-meta-
+> key, one recursive class) are all DONE there. The prose below is kept only as the record
+> of how the worker-era fuse was built — the LEGACY `ui_server.coffee` still uses it until
+> cutover.
+>
+> **Step 0 — VERIFIED 2026-10-28 (worker-era, historical).** The worker_thread fuse was the
+> live LOCAL launch path: `/api/launch` → `startRunner` → `new Worker(run_worker.js)` →
+> `pipeline_runner.main()`, one PID.
+
+## ✅ THE CORE REQUIREMENT IS DELIVERED (2026-10-26) — one process = UI + pipeline
+
+> jahbini's actual MARRIAGE requirement was a **single process that is
+> both the UI and the pipeline**, not the UI↔broker↔memo fusion the body
+> of this doc originally described. That is now built and proven. The
+> earlier framing (UI+broker+memo as the "controller", writers as
+> *separate spawned processes*) was the wrong cut; the `ui_server`
+> `spawn('coffee', ['pipeline_runner.coffee'])` was exactly the thing
+> that had to go.
+>
+> **The memo is `pipeline_runner`'s in-process memo — NOT `state/memo.sqlite`, NOT a
+> broker RPC** (jahbini, 2026-10-28: *"the memo is not the sqlite DB"*). The entire
+> `ipc/` broker + sqlite-memo + switchboard + leases substrate ([[ipc]], now banner-
+> marked OBSOLETE) is background from the wrong cut; it is the tar pit that re-derails
+> every session. The merged runner owns the memo/DAG/recipe-execution; **octopus**
+> inter-node comms stay as a concept, the sqlite-memo substrate does not. Do not extend
+> it, and do not build completion/coordination detection on it.
+
+**How it works now.** `ui_server.startRunner` no longer spawns a child
+process. It launches the run **in a `worker_thread` inside the ui_server
+process** (`pipeline/run_worker.js` → `pipeline_runner.main()`), so **one
+OS process (one PID) serves the UI and runs the pipeline**.
+
+- The runner code is **unchanged** except two backward-compatible edits:
+  `pipeline_runner.coffee` now exports `main`, and resolves `CWD` from
+  `env.CWD ?? process.cwd()` (a worker can't `chdir`; the spawn already
+  set `env.CWD`, the bare CLI still falls back to `process.cwd()`).
+- A worker's `process.exit(code)` **stops only the worker**, not the UI
+  process, and surfaces as the Worker `'exit'` code — which maps straight
+  onto the old `child.on('exit')` → `markUiRunExited` logic.
+- **The blocking-compute worry is resolved by construction:** heavy MLX
+  work runs on the worker thread, so the UI event loop stays live.
+  `@frost-beta/mlx` loads + runs in a worker (probed), and the proof run
+  kept the host loop ticking throughout.
+- Single-run liveness is now the tracked `activeRunWorker` handle (the
+  run's pid is the ui_server pid, so pid-grep can't tell); `/api/kill`
+  does `worker.terminate()`; `findActiveWorkspaceRun` is worker-aware.
+
+**Proven (laptop, 2026-10-26):** (1) a real recipe ran in-process via a
+harness driving the exact worker path — host survived the worker's
+`process.exit(0)`, event loop ticked 32× during the run, `ui-run.json`
+pid == host pid; (2) end-to-end through the **real `ui_server`** —
+`POST /api/launch` → `status:done` with pid == server pid, server alive
+afterward. Harnesses: `~/claude_zone/test/compress_harness.js` +
+`compress_pipe/`.
+
+**Proven in production (2026-10-26):** synced to the mini and a real run
+(real MLX generation) executed in the fused worker — jahbini confirmed it
+"works perfectly." So the single-process model is live on the mini, not
+just the laptop proof.
+
+**NOT yet done (honest):**
+- The **UI is an I/O device HANDLED BY the meta system** (jahbini's exact
+  words: *"the UI is treated as an I/O device and is handled by the meta
+  system of the pipeline's memo"*). The literal design: a `meta/ui`
+  handler loaded by `metaLoader(M, …)` like `meta/sqlite`/`meta/yaml`,
+  owning the UI I/O **end-to-end — serving included** — with `ipc/broker`
+  + the memo as its underlying wire (not a reason to split the serving
+  off into `ipc/`). NOT a carved device + separate transport.
+- The **deeper "UI as a `meta/ui` device"** form (steps touch the UI
+  through a meta request-key like `meta/sqlite`) is the fuller
+  expression; the single-process requirement is met, the meta-device
+  refactor is the next layer, not a blocker.
+
+The rest of this doc (cross-host puppet/controller, leases, Stage B peer
+read) is the MULTI-HOST layer and still stands — the fusion is **per
+node**: each node's UI + its runner are now one process; a controller may
+still drive remote nodes over the broker/SSH.
 
 Rewritten 2026-10-22 on branch **`octopus`**. This **supersedes** the
 2026-10-21 fable brainstorm, which inverted the intended design: it
@@ -391,6 +618,17 @@ controller for its sub-flock.
      concurrent STAGES without launching. Verified: toggle memo round-trip,
      orchestration unit 7/7 (pre-revision), 2-runner GPU handoff live
      earlier (the eventual puppet mechanism). Left at default serial.
+   - **Still-legacy direct-I/O in `queue_run_ite`** (pre-existing, NOT the
+     octopus additions — the serial-scheduler migration follow-on, == Phase 0
+     broker-lifecycle work): `isFleetFrozen`/`_readMemoValue` (direct sqlite
+     peek of the memo), `readPipeStates`/`writePipeStates` (`pipe_states.json`
+     direct fs — the whole serial path + `escalatePipeForHelp`/
+     `applyMascotDecision`), `runEntry`'s `callPeer` (fetch) + `execSync`
+     pgrep, `spawn_log` (sqlite). Migration = move `pipe_states` into the memo
+     and route peer I/O + completion through `meta/remote` / the broker
+     lifecycle. (The DONE octopus-side conformance — `fleetSshExec`/`fleetLaunch`/
+     `recentSessionsFor` deleted, `fleetMode`/`dispatchConcurrent` via
+     `L.memoRequest` — is the revision noted just above.)
    - ⏳ Recursion proper (a writer hosting a sub-flock) still future.
 6. **Stage D — leases/fleet.** `L.lease`/`L.release` vocabulary + the
    GPU/CPU keys; fan-out dispatch becomes safe and concurrent.
@@ -455,5 +693,8 @@ controller for its sub-flock.
   done) and the standalone job retired 2026-10-23.
 - `puppeteer/GPT/rules/puppeteer_decides_restart.md` — restart is a
   controller decision; the mascot diagnoses every termination.
-- `puppeteer/GPT/rules/{never_kill_active_ui,always_leave_pipeline_running}.md`
-  — the resident-controller pattern promoted into architecture.
+- `puppeteer/GPT/rules/{taskmasters_cooperate_no_kill,always_leave_pipeline_running}.md`
+  — the resident-controller pattern promoted into architecture. In the fuse the
+  UI service + DAG runner are cooperating taskmasters sharing memo + meta; there
+  is no 'kill', lifecycle is STATE (the old "never kill a runner, only the UI"
+  split-process rule was retired 2026-10-30).

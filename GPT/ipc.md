@@ -1,4 +1,24 @@
-# IPC — in-process broker + sqlite memo
+> # ⚠️ OBSOLETE FRAMING — superseded by the MARRIAGE merge goal ([[marriage]])
+>
+> The goal is **ONE process = the UI + `pipeline_runner`**, a single recursive
+> class per active pipe that owns the **memo in-process** (along with the DAG and
+> local recipe execution). Puppet ≡ puppeteer, identical code; a puppeteer just has
+> subordinates.
+>
+> **The memo is NOT `state/memo.sqlite` and NOT a broker RPC.** (jahbini, 2026-10-28:
+> *"the memo is not the sqlite DB."*) The "SQLite-backed key/value store + broker +
+> switchboard + leases" model described below is the WRONG CUT — it is the exact
+> substrate tar pit that has derailed session after session. **Do not treat it as the
+> goal, do not extend it, do not build completion/coordination on it.** Inter-node
+> **octopus** comms remain as a concept (the merged runner talks up to a puppeteer and
+> down to subordinate puppets), but that is not this sqlite-memo substrate.
+>
+> Read [[marriage]] first. Everything below is retained only as historical record of a
+> discarded approach.
+
+---
+
+# IPC — in-process broker + sqlite memo  *(OBSOLETE — see banner above)*
 
 **Introduced**: 2026-10-08. **Location**: `pipeline/ipc/*.coffee`.
 **Status**: live on the mac-mini; UI falls back to disk reads when
