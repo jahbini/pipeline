@@ -37,13 +37,19 @@ in the sections below, and still in the LEGACY `ui_server.coffee`) was the wrong
 is retired from the fused path.
 
 **Running now — THE FUSE IS THE SOLE SERVICE (legacy retired 2026-10-30).** The mini runs the
-pair **launchd-resident** (`com.jahbini.pipe-ui-puppeteer` → 5400, `com.jahbini.pipe-ui-writer`
-→ 5411; `RunAtLoad`+`KeepAlive`, `WorkingDirectory` = ~/puppeteer / ~/writer, shared
+pair **launchd-resident** (`com.jahbini.pipe-ui-puppeteer`, `com.jahbini.pipe-ui-writer`;
+`RunAtLoad`+`KeepAlive`, `WorkingDirectory` = ~/puppeteer / ~/writer, shared
 `GPU_CLAIM_DIR=~/puppeteer/state` so one Metal mutex, peered to each other). KeepAlive-respawn
 verified. The legacy `com.jahbini.puppeteer-ui` launchd job is unloaded + its plist retired
 (`.retired-20261030`); the manual writer on 4311 is stopped; **4300/4311 are gone.** The laptop
 runs the same pair for dev. `pipeline_runner.coffee`, `ui_server.coffee`, `run_worker.js` are
 deleted from the repo (kept as `.deprecated-20261030` on the mini for a short rollback window).
+
+**PORTS DRIFT — verify live, don't trust old numbers.** The launchd JOB NAMES are stable
+(`com.jahbini.pipe-ui-{puppeteer,writer}`); the ports they bind have moved (were 4300/4311,
+then 5400/5411). **Verified on the mini 2026-11-03: puppeteer = 8000, writer = 6100** (puppet
+fleet ~5512+). Check reality with `launchctl list | grep pipe-ui` +
+`lsof -nP -iTCP -sTCP:LISTEN | grep node`; this line is a dated snapshot, not a guarantee.
 package.json bins/scripts (pipeline + puppeteer + writer) now point at `pipe_ui_runner.coffee`.
 
 **Two cooperating taskmasters, one event loop, no 'kill':** the UI service and the DAG

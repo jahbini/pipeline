@@ -110,11 +110,29 @@ state. Keep that distinction clean — it is the seam along which
 `scripts/` overriding and meta-plugin loading will eventually grow.
 ###
 EXEC = process.env.EXEC ? path.dirname(__filename)
-# Honor env.CWD when set (the UI launch path — spawn OR the fused
-# worker_thread — passes it) and fall back to process.cwd() for the bare
-# CLI (`coffee pipeline_runner.coffee` inside a pipe dir). A worker_thread
-# cannot chdir, so the fused model relies on this to point CWD at the pipe.
-CWD  = process.env.CWD ? process.cwd()
+# CWD resolution. An explicit `CWD` env (a targeted launch) always wins.
+# Otherwise — when launched at a project ROOT (launchd WorkingDirectory,
+# `npm run ui`, or a bare CLI) — honor a sticky `state/current_pipe.txt` that
+# names a pipe to re-enter: resolve + chdir HERE, before CWD is captured and
+# before BASE / metaLoader / the plugin run, so the WHOLE node comes up
+# pipe-scoped. This is what lets the `/pipe/<name>` deep-link survive a launchd
+# KeepAlive respawn — launchd restarts the node at the root with no CWD env, so
+# the pipe identity has to travel through the sticky file, not process args.
+CWD = do ->
+  return process.env.CWD if process.env.CWD
+  base = process.cwd()
+  try
+    sticky = path.join base, 'state', 'current_pipe.txt'
+    return base unless fs.existsSync sticky
+    name = String(fs.readFileSync(sticky, 'utf8') ? '').trim()
+    return base unless name.length and not (name.includes('/') or name.includes(path.sep) or name in ['.', '..'])
+    cand = path.join base, 'pipes', name
+    return base unless fs.existsSync(cand) and fs.statSync(cand).isDirectory()
+    process.chdir cand
+    console.log "[pipe_ui_runner] sticky pipe: #{name} → cwd=#{cand}"
+    cand
+  catch
+    base
 
 # BASE — the consuming project's root. When the runner is installed as an
 # npm package, EXEC is `<base>/node_modules/@jahbini/pipeline`, and npm wipes
@@ -735,6 +753,7 @@ class StepStateStore
       status: 'shutdown'
       by: info.by
       reason: info.reason
+      failed: info.failed is true            # distinguishes a step FAILURE from a clean shutdown
       timestamp: info.timestamp ? new Date().toISOString()
     fs.writeFileSync(
       path.join('.', 'pipeline.json'),
@@ -1035,6 +1054,19 @@ substituteBraces = (value) ->
     return out
   value
 
+# setByPath(obj, 'a.b.c', v) → obj.a.b.c = v, creating intermediate objects.
+# Materializes the UI's dotted `ui_values` keys into the recipe tree.
+setByPath = (obj, dotted, value) ->
+  parts = String(dotted).split '.'
+  node  = obj
+  for part, i in parts
+    if i is parts.length - 1
+      node[part] = value
+    else
+      node[part] = {} unless node[part]? and typeof node[part] is 'object' and not Array.isArray(node[part])
+      node = node[part]
+  obj
+
 createExperimentObject = (configPath, overridePaths, controlOverridePath = null) ->
   recipe = expandIncludes loadYamlSafe(configPath), path.dirname(configPath)
   merged = deepMerge {}, recipe
@@ -1043,6 +1075,16 @@ createExperimentObject = (configPath, overridePaths, controlOverridePath = null)
     merged = deepMerge merged, loadYamlSafe(overridePath)
   if controlOverridePath? and fs.existsSync(controlOverridePath)
     merged = deepMerge merged, loadYamlSafe(controlOverridePath)
+  # Materialize UI form values. control_override.yaml carries `ui_values` with
+  # DOTTED keys (e.g. `chat_llm.prompt_text`) from the UI form; a plain deep-merge
+  # leaves them as a verbatim `ui_values` block that no step reads. Expand each
+  # dotted path into the recipe tree — the SAME place a nested human override
+  # (`chat_llm: {prompt_text: …}`) lands — then drop `ui_values` (UI transport,
+  # not a recipe field).
+  if merged.ui_values? and typeof merged.ui_values is 'object' and not Array.isArray(merged.ui_values)
+    for own dotted, value of merged.ui_values when dotted
+      setByPath merged, dotted, value
+    delete merged.ui_values
   # Post-merge: expand cross-field references (e.g. ${run.model} inside
   # a step's path param). Env vars (${MODELS}) already expanded per-file
   # at load time; this second pass resolves anything that needed the
@@ -2597,6 +2639,32 @@ runRecipe = (M, runOpts={}, done=(->)) ->
 bootFusedNode = (opts={}) ->
   M = new Memo()
   (require path.join(EXEC, 'meta')) M, {baseDir: CWD, basePath: BASE, execDir: EXEC}
+
+  # ── MQTT at node boot (2026-10-31) ─────────────────────────────────
+  # Open the cross-NODE event pipe for the WHOLE process life, not just while a
+  # recipe runs (the old wiring lived in runRecipe). The first node to boot hosts
+  # the Broker on the shared runner.sock; the others connect as clients. Puppet
+  # writes (e.g. a graded certificate) publish a topic; the puppeteer subscribes
+  # and applies — event-driven, no rescan. Additive + graceful: a failure here
+  # leaves `M.certBus` undefined and the node serves exactly as before. Same-host
+  # (mini 5400+5411) uses the local socket; cross-host keeps the Stage B ssh -R.
+  try
+    {Broker}       = require path.join(EXEC, 'ipc', 'broker')
+    {BrokerClient} = require path.join(EXEC, 'ipc', 'broker_client')
+    certSock = process.env.RUNNER_SOCK ? path.join((process.env.HOME ? ''), 'pipeline', 'state', 'runner.sock')
+    _broker = new Broker certSock
+    _broker.once 'listening', ->
+      M.certBus = {mode: 'host', publish: ((t, p, retain = false) -> _broker.publish t, p, {retain}), subscribe: ((f, fn) -> _broker.subscribeLocal f, fn)}
+      console.log "[mqtt] hosting broker on #{certSock} — this node is the controller"
+    _broker.once 'error', ->
+      _client = new BrokerClient certSock, "node-#{process.pid}", 'runner'
+      _client.connect().catch -> null
+      M.certBus = {mode: 'client', publish: ((t, p, retain = false) -> _client.publish t, p, retain), subscribe: ((f, fn) -> _client.subscribe f, fn)}
+      console.log "[mqtt] connected as client to #{certSock}"
+    _broker.listen()
+  catch err
+    console.error "[mqtt] boot broker failed (continuing without MQTT): #{err?.message ? err}"
+
   running = false
   # The UI taskmaster calls this to launch the DAG taskmaster. Fire-and-track:
   # run status streams via the `ui/run` memo key → SSE. Returns immediately.

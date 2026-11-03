@@ -190,6 +190,9 @@ module.exports = (M, opts={}) ->
     writeText:        _writeText
     resolveUiAsset:   _resolveUiAsset
     listFiles:        _listFiles
+    # Live getter for the node-boot MQTT pub/sub (set async in bootFusedNode).
+    # Plugins read it lazily: ctx.certBus() → {publish, subscribe, mode} or undefined.
+    certBus:          (-> M.certBus)
     # Shared library inventory (INVENTORY_BASH + parse) for the peer-pipes panel;
     # it SSH-enumerates model pipes on remote hosts. Null-safe if the module moves.
     pipeInventory:    (try require(path.join(opts.execDir, 'ui', 'pipe_inventory')) catch then null)
@@ -207,7 +210,17 @@ module.exports = (M, opts={}) ->
     UI_BIND_MODE:     (process.env.UI_BIND_MODE ? 'net')
     PORT:             port
     ipcStatus:        _memoIpcShim()
-    subscribeBroker:  (topic, cb) -> (-> )               # single fused node — no cross-pipe broker; refine if needed
+    subscribeBroker:  (topic, cb) ->
+      # Route to the host broker (M.certBus, set async in bootFusedNode) once
+      # it is up. Carries cross-node topics like runner/+/+/{state,lifecycle}
+      # to this node's plugin. Deferred attach — certBus may not exist yet at
+      # plugin-load; no broker → stays a no-op (prior single-node behaviour).
+      fn = (t, p) -> try cb(t, p)
+      attach = (n = 0) ->
+        if M.certBus then (try M.certBus.subscribe(topic, fn))
+        else if n <= 100 then setTimeout (-> attach(n + 1)), 200
+      attach()
+      (-> )
 
   # Status builder (3.5) — the rich /api/status the UI needs to know its CWD/pipe:
   # workspace + pipe{root,current,workspace,pipes[]} + run + pipeline_state + steps.
@@ -298,7 +311,44 @@ module.exports = (M, opts={}) ->
           continue unless (try (fs.statSync(full).isDirectory() and fs.existsSync(path.join(full, 'adapter_config.json'))) catch then false)
           rows.push {key: "build/#{name}", label: (if name is 'adapter' then 'adapter (current)' else name)}
       return rows
-    []
+    cwdDir = opts.baseDir ? process.cwd()
+    # DB-backed pickers — read the pipe's runtime.sqlite directly (node:sqlite),
+    # same as the legacy ui_server. `db/story_titles` powers storacle's story_id
+    # dropdown (one row per row in `stories`); `db/kag_keywords` powers the
+    # keyword pickers. (Ported into the fused UI 2026-10-31 — this case was
+    # dropped in the cutover, which is why the story_id dropdown was empty.)
+    if specPath is 'db/story_titles' or specPath is 'db/kag_keywords'
+      dbPath = path.join(cwdDir, 'runtime.sqlite')
+      return [] unless (try fs.existsSync(dbPath) catch then false)
+      db = null
+      try
+        {DatabaseSync} = require 'node:sqlite'
+        db = new DatabaseSync dbPath
+        if specPath is 'db/story_titles'
+          # Show ONLY the story_id — it IS the DB key storacle looks up, and the
+          # title is usually the same string (apollos-virgin.md), so showing
+          # both read as a redundant "name — name".
+          rows = db.prepare('SELECT story_id FROM stories ORDER BY story_id ASC').all()
+          return ({key: String(r.story_id), label: String(r.story_id)} for r in rows when r?.story_id?)
+        rows = db.prepare("SELECT DISTINCT keyword FROM kag_entries WHERE keyword IS NOT NULL AND TRIM(keyword) != '' ORDER BY keyword ASC").all()
+        return ({key: String(r.keyword), label: String(r.keyword)} for r in rows when r?.keyword?)
+      catch err
+        console.error "[meta/ui] dropdown #{specPath} sqlite read failed: #{err?.message ? err}"
+        return []
+      finally
+        try db?.close() catch then null
+    # Generic file-backed dropdown: `<file-dir>/<file>/<key...>` → read a yaml
+    # file under the pipe, walk the key path, map the node to {key, label}.
+    parts = specPath.split('/')
+    return [] unless parts.length >= 3
+    node = _parseYaml(path.join(cwdDir, parts[0], parts[1]))
+    for key in parts.slice(2)
+      return [] unless node? and typeof node is 'object'
+      node = node[key]
+    return [] unless node? and typeof node is 'object'
+    rows = ({key, label: (value?.text ? value?.character ? value?.label ? key)} for own key, value of node)
+    rows.sort (a, b) -> String(a.label).localeCompare String(b.label)
+    rows
   _scanUiFields = (recipe, override, pendingUi={}) ->
     rows = []
     buildLabel = (p) ->
@@ -392,6 +442,18 @@ module.exports = (M, opts={}) ->
     st = try fs.statSync(full) catch then null
     return null unless st?.isFile?()
     {path: rel, size: st.size, mtime: st.mtime.toISOString(), text: _readText(full, '')}
+  # True iff `pid` names a live process. process.kill(pid, 0) sends no signal —
+  # it throws ESRCH when the pid is gone, EPERM when it exists but we may not
+  # signal it (still alive). Used to reconcile a stale "running" run record.
+  _pidAlive = (pid) ->
+    n = Number(pid)
+    return false unless n and Number.isFinite(n)
+    try
+      process.kill(n, 0)
+      true
+    catch err
+      err?.code is 'EPERM'
+
   _buildStatus = ->
     cwd  = opts.baseDir ? process.cwd()
     base = opts.basePath ? cwd
@@ -402,6 +464,44 @@ module.exports = (M, opts={}) ->
     uiRunMemo = M.theLowdown('ui/run')?.value ? {}
     uiRun = Object.assign {}, uiRunDisk, uiRunMemo
     run = Object.assign({status: 'idle', pipeline: _controlPipeline(), cwd: cwd, exec: opts.execDir, pid: process.pid, started_at: (uiRun.started_at ? uiRun.at ? null), logdir: (uiRun.logdir ? null), is_process_alive: (uiRun.status is 'running'), is_attached: false}, uiRun)
+    # Reconcile a STALE "running". A run can end — especially a crash or a Metal
+    # SIGABRT — before finalizeRunStatus stamps state/ui-run.json terminal, so
+    # the file is left status:running with no finished_at and nothing fixes it.
+    # pipeline.json carries the authoritative death (the Pipeline-Death panel
+    # already shows it), and onLaunch clears pipeline.json at every run start —
+    # so a death record present while status says running means the run FAILED.
+    # Report it as ended, using the death record the UI already has.
+    if run.status is 'running'
+      death = _readJson(path.join(cwd, 'pipeline.json'), null)
+      if death? and (death.failed is true or death.status in ['failed', 'shutdown'])
+        # A step-caused death is a FAILURE; a clean shutdown is by the UI/human.
+        # (death.failed is the authoritative flag on new records; `by` covers
+        # records written before that flag was persisted.)
+        isFailure = (death.failed is true) or (death.by? and death.by not in ['ui', 'user', 'human', 'kill'])
+        run.status           = if isFailure then 'failed' else 'shutdown'
+        run.finished_at       = death.timestamp ? run.finished_at ? null
+        run.reason            = death.reason ? run.reason ? null
+        run.failed_step       = death.by ? null
+        run.is_process_alive  = false
+      else
+        # No qualifying death record — e.g. writer pipes never write
+        # pipeline.json, and a Metal SIGABRT can skip it too. A fused run
+        # executes IN-PROCESS, so its recorded pid IS the node that ran it. If
+        # that pid is not alive, the node was replaced (launchd restart) or
+        # crashed; the run can never finalize itself and would read "running"
+        # forever. Report it ended. Our own live run keeps status:running
+        # because process.pid is alive. (Display-only; the on-disk record
+        # self-heals when the next run overwrites ui-run.json.)
+        runPid = Number(uiRun.pid ? run.pid ? 0)
+        if runPid and not _pidAlive(runPid)
+          run.status           = 'shutdown'
+          run.finished_at       = run.finished_at ? null
+          run.reason            = run.reason ? "orphaned: run pid #{runPid} is not alive (node restarted or crashed with no pipeline.json death record)"
+          run.is_process_alive  = false
+        else
+          # Genuinely running in a live process — report liveness truthfully
+          # instead of trusting the bare "status is running" default (444).
+          run.is_process_alive = if runPid then _pidAlive(runPid) else run.is_process_alive
     expected = _collectExpectedOutputs(run)
     uiCtl = _readJson(path.join(cwd, 'state', 'ui-control.json'), {}) ? {}
     loraRemaining = _readJson(path.join(cwd, 'out', 'lora_remaining_count.json'), null)
@@ -411,8 +511,13 @@ module.exports = (M, opts={}) ->
     newestLog = ((try fs.readdirSync(logsDir) catch then []).filter((f) -> /\.log$/.test f).map((f) -> {f, m: (try fs.statSync(path.join(logsDir, f)).mtimeMs catch then 0)}).sort((a, b) -> b.m - a.m)[0]?.f) ? null
     logStem = if newestLog then newestLog.replace(/\.log$/, '') else null
     tail = (p) -> try (t = fs.readFileSync(p, 'utf8'); if t.length > 20000 then t.slice(-20000) else t) catch then ''
+    mem = try process.memoryUsage() catch then {}
     ok: true
     run: run
+    # This node's own JS memory footprint. rss ≈ the 60-80MB resident cost of a
+    # fused node; heapUsed/heapTotal are the V8 JS heap; external is C++ memory
+    # held by JS (Buffers etc.). The fleet view sums rss across live puppets.
+    memory: {rss: (mem.rss ? 0), heapUsed: (mem.heapUsed ? 0), heapTotal: (mem.heapTotal ? 0), external: (mem.external ? 0), rss_mb: Math.round((mem.rss ? 0) / 1048576), heap_used_mb: Math.round((mem.heapUsed ? 0) / 1048576), pid: process.pid}
     pipeline_state: _readJson(path.join(cwd, 'pipeline.json'), null)
     workspace: {top_level: path.basename(base), pipe: current}
     pipe: {root: _pipesRoot(), current, workspace: cwd, pipes: ({name: n, is_active: n is current} for n in _listPipeDirs())}
@@ -449,6 +554,57 @@ module.exports = (M, opts={}) ->
   M.ui.serve = (serveOpts={}) ->
     port = Number(serveOpts.port ? process.env.UI_PORT ? 4300)
     host = String(serveOpts.host ? '0.0.0.0')
+    # ── cross-node memo replication (MARRIAGE Stage B, intra-host) ──────
+    # The `sys/*` memo namespace is SHARED across every node on a host
+    # (a mini's writer + its pipes; the co-located puppeteer today). Each
+    # node keeps its own in-process M (rehydrated from disk); `sys/*`
+    # changes are mirrored over the host broker (M.certBus) so all nodes
+    # converge. Non-`sys/*` keys (ui/*, run/*, per-pipe working state) stay
+    # node-local. Durability is the filesystem + sqlite, NOT the bus: a
+    # dropped/re-hosted broker reconverges via retained messages + the
+    # writer's 30s inventory republish. No certBus → this never wires and
+    # the node behaves exactly as a lone node did before.
+    NODE_ID = "node-#{process.pid}-#{port}"
+    # Memo keys are NEVER deleted (a "clear" is a value update, not a removal;
+    # the meta rule even treats a literal `undefined` write as a READ), so we
+    # replicate value SETS only — no delete/clear propagation.
+    #
+    # Echo suppression must survive the ASYNC flush: M.ui notifications are
+    # coalesced (~40ms), so a synchronous "applying" flag is already cleared
+    # by the time the applied value fires 'change' and would re-publish it (a
+    # convergent but needless cross-node storm). Instead we record the value
+    # SIGNATURE we just applied from the bus; the sender skips exactly one
+    # 'change' matching it. A genuine later local change still publishes.
+    _sig = (v) -> try JSON.stringify(v) catch then 'ERR'
+    _suppress = {}
+    _memoReplOn = false
+    _wireMemoRepl = (bus) ->
+      return if _memoReplOn
+      _memoReplOn = true
+      # local sys/* set -> publish (retained) to the bus, unless it is the one
+      # echo of a value we just applied FROM the bus (signature match).
+      M.ui.subscribe (k, v) ->
+        return unless typeof k is 'string' and k.indexOf('sys/') is 0 and v?
+        if _suppress[k] is _sig(v)
+          delete _suppress[k]          # consume the one expected echo
+          return
+        delete _suppress[k]
+        try bus.publish "memo/#{k}", {value: v, origin: NODE_ID}, true
+      # remote sys/* set -> apply into local M, which notifies local
+      # subscribers (incl. the plugin's ipcStatus.on('memo')). Origin lets the
+      # originator fast-skip its own echo; others record the signature so their
+      # re-publish of the just-applied value is suppressed by the sender above.
+      bus.subscribe "memo/sys/#", (topic, payload) ->
+        return unless payload? and payload.origin isnt NODE_ID and payload.value?
+        key = String(topic).slice(5)   # drop the "memo/" prefix
+        return unless key.indexOf('sys/') is 0
+        _suppress[key] = _sig(payload.value)
+        try M.saveThis key, payload.value
+        catch err then console.error "[memo-repl] apply #{key} failed: #{err?.message ? err}"
+      console.log "[memo-repl] sys/* replication wired (#{bus.mode ? '?'}) as #{NODE_ID}"
+    do _waitCertBus = (n = 0) ->
+      return _wireMemoRepl(M.certBus) if M.certBus
+      setTimeout (-> _waitCertBus(n + 1)), 200 if n <= 100
     # Load + mount the project plugin's routes with the memo-backed ctx (3.2).
     pluginRoutes = []; pluginCtx = null; pluginAugmentStatus = null
     try

@@ -74,7 +74,22 @@ INVENTORY_BASH = '''
       manifest_json=$(cat "$d/recipe_manifest.json" 2>/dev/null | tr -d '\\n' | tr '\\t' ' ')
       [ -z "$manifest_json" ] && manifest_json="{}"
     fi
-    printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "$name" "$model" "$downloaded" "$quantized" "$kag_rows" "$running" "$run_pipeline" "$manifest_json" "$oracle_remaining" "$lora_remaining" "$kag_total" "$reembed_remaining" "$emb_clean_rows"
+    # Portfolio (writer/GPT/portfolio.md): the generated-data subset of the
+    # pipe dir — out/ diary/ build/ runtime.sqlite. Read-only counts/size so
+    # the puppeteer can report each writer pipe's portfolio through this one
+    # canonical scanner (no second scanner, no writes into the pipe).
+    out_count=$([ -d "$d/out" ] && find "$d/out" -type f 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+    diary_count=$([ -d "$d/diary" ] && find "$d/diary" -type f 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+    build_count=$([ -d "$d/build" ] && find "$d/build" -type f 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+    sqlite_bytes=$([ -f "$db" ] && { stat -f%z "$db" 2>/dev/null || stat -c%s "$db" 2>/dev/null || echo 0; } || echo 0)
+    # Per-stage "test already ran" flags, for the cert-pending chip (the
+    # certificate marker means a human must GRADE, not re-run the test when
+    # its output artifacts already exist). Entrance test (newborn recipe)
+    # writes out/story_seed_ids.json; the SAT/elementary ladder writes
+    # out/elementary_verdict.yaml.
+    entrance_done=$([ -f "$d/out/story_seed_ids.json" ] && echo 1 || echo 0)
+    sat_done=$([ -f "$d/out/elementary_verdict.yaml" ] && echo 1 || echo 0)
+    printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "$name" "$model" "$downloaded" "$quantized" "$kag_rows" "$running" "$run_pipeline" "$manifest_json" "$oracle_remaining" "$lora_remaining" "$kag_total" "$reembed_remaining" "$emb_clean_rows" "$out_count" "$diary_count" "$build_count" "$sqlite_bytes" "$entrance_done" "$sat_done"
   done
 '''
 
@@ -110,6 +125,18 @@ parse = (raw) ->
       kag_total:         parseCount(parts[10]) ? 0
       reembed_remaining: parseCount(parts[11])
       emb_clean_count:   parseCount(parts[12]) ? 0
+      # Portfolio counts/size (parts[13..16]). Additive: a peer still running
+      # the old 13-column scanner yields undefined here → 0, never a crash.
+      portfolio:
+        out_files:    parseCount(parts[13]) ? 0
+        diary_files:  parseCount(parts[14]) ? 0
+        build_files:  parseCount(parts[15]) ? 0
+        sqlite_bytes: parseCount(parts[16]) ? 0
+      # Per-stage test-ran flags (parts[17..18]) for the cert-pending chip.
+      # Absent on an old peer's 17-column line → false → chip falls back to
+      # "launch test" (prior behavior), never a crash.
+      entrance_done: parts[17] is '1'
+      sat_done:      parts[18] is '1'
   pipes
 
 module.exports = {INVENTORY_BASH, parse}

@@ -615,6 +615,14 @@
           <div id="out-files" class="files"></div>
         </section>
 
+        <!-- Host for panels that declare column: 'after-outputs' (e.g. the
+             writer's sat_buckets / sat_generations / sat_verdicts). Lives
+             directly under Outputs so verdict/generation panels sit beside
+             the artifacts they summarize. panelHost() in the dispatcher maps
+             column 'after-outputs' → this div; without it those panels
+             silently never render. -->
+        <div id="dynamic-panels-after-outputs"></div>
+
         <!-- Diary Files, Stories, Training Runs, Story Usage panels removed
              2026-10-24: half-baked pipe-content views. They'll be rebuilt as
              proper structures once the story/diary/celarien-voyage generation
@@ -670,17 +678,17 @@
           <h2>Controls</h2>
           <div class="controls">
             <div class="controls-group">
-              <h3>Pipe</h3>
+              <h3>Workspace</h3>
               <div id="pipe-current" class="mono"></div>
               <!-- Plugin seam: project plugins fill this with pipe-scoped
                    controls (links, buttons, status). Shared UI never
                    writes into it. See REFACTOR_UI.md. -->
               <div id="pipe-plugin-slot" class="mono" style="font-size:12px;margin-top:4px;"></div>
               <label>
-                Switch UI To Pipe
+                Switch to workspace
                 <select id="pipe-select"></select>
               </label>
-              <button id="switch-pipe-button" type="button">Switch Pipe UI</button>
+              <button id="switch-pipe-button" type="button">Switch workspace</button>
               <button id="shutdown-ui-button" type="button">Shutdown UI Server</button>
               <button id="merge-pipe-button" type="button">Merge Adapter And SQLite From Other Machine</button>
               <div id="merge-result" class="hint mono"></div>
@@ -969,14 +977,26 @@
         return;
       }
 
-      // Italic + a small tag on non-shipped recipes so a human can see
-      // at a glance which are project overrides / pipe-local additions.
-      pipelineSelect.innerHTML = enriched.map(({ name, source }) => {
-        const isLocal = source !== 'shipped';
-        const style = isLocal ? ' style="font-style:italic"' : '';
-        const suffix = source === 'pipe' ? ' • pipe' : source === 'project' ? ' • project' : '';
-        return `<option value="${name}"${style} ${name === selectedPipeline ? 'selected' : ''}>${name}${suffix}</option>`;
-      }).join('');
+      // Group the picker by `source` (the tag _listRecipes already sets:
+      // 'pipe' | 'project' | 'shipped') so the pipe's own and the project's
+      // (e.g. the writer's) recipes LEAD and the framework's shipped
+      // catalog is last. No new server field — just how we render the
+      // existing enriched list. Non-shipped stay italic.
+      const RECIPE_GROUPS = [
+        { source: 'pipe',    label: 'This pipe' },
+        { source: 'project', label: 'This project' },
+        { source: 'shipped', label: 'Framework (shipped)' },
+      ];
+      const recipeOption = ({ name, source }) => {
+        const style = source !== 'shipped' ? ' style="font-style:italic"' : '';
+        return `<option value="${name}"${style} ${name === selectedPipeline ? 'selected' : ''}>${name}</option>`;
+      };
+      pipelineSelect.innerHTML = RECIPE_GROUPS.map(({ source, label }) => {
+        const rows = enriched.filter((r) => r.source === source);
+        return rows.length ? `<optgroup label="${label}">${rows.map(recipeOption).join('')}</optgroup>` : '';
+      }).join('')
+        // Any unexpected source value still shows, ungrouped, at the end.
+        + enriched.filter((r) => !RECIPE_GROUPS.some((g) => g.source === r.source)).map(recipeOption).join('');
       uiTarget.innerHTML = uiFields.map((field) => {
         if (field.type === 'checkbox') {
           return `

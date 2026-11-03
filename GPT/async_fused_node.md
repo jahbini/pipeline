@@ -80,3 +80,27 @@ subprocess (old `execFileSync` = 0 ticks, fully blocked).
 Fs-level sync (`fs.rmSync` in download_model's dir cleanup) is left as-is: local,
 fast, not a subprocess; convert to `fs.promises.rm` only if a huge-dir removal
 becomes a visible stall.
+
+## Stale-"running" reconciliation — orphaned in-process runs (2026-10-31)
+
+A fused run executes IN-PROCESS, so a node restart (launchd kickstart, port-kill)
+or crash kills the run mid-flight and `finalizeRunStatus` never stamps
+`state/ui-run.json` terminal — it reads "running" forever. The first fix only
+reconciled against `pipeline.json` (the death record), but **writer pipes never
+write pipeline.json** (and a Metal SIGABRT can skip it), so those stale records
+slipped through — and `is_process_alive` was a bare `(uiRun.status is 'running')`
+that never checked the pid, so a dead node's run read as alive.
+
+Fix in `meta/ui.coffee` `_buildStatus` (display-only; on-disk record self-heals
+when the next run overwrites ui-run.json):
+- `_pidAlive(pid)` via `process.kill(pid, 0)` (ESRCH = dead, EPERM = alive).
+- When status is "running" and there's no qualifying `pipeline.json` death: the
+  recorded `pid` IS the node that ran it (in-process). If that pid is not alive
+  → mark `shutdown` + an "orphaned" reason + `is_process_alive:false`. Our own
+  live run keeps "running" because `process.pid` is alive.
+- `is_process_alive` is now reported truthfully from `_pidAlive(runPid)`.
+
+Verified on the laptop: injected stale running + dead pid (no pipeline.json) →
+`shutdown`; injected running with the live node pid → stays `running`. The death-
+record branch (step failure / clean shutdown) is unchanged and still takes
+priority.

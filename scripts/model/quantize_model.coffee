@@ -167,6 +167,22 @@ path = require 'path'
       # DAG) continue to load raw fp16 weights via session_api's
       # fallback. Only THIS step is failed.
       try fs.rmSync tmpAbs, recursive: true, force: true catch
+      # Quantize failed. The pre-staged fallback symlink (dstAbs -> src, the
+      # FULL unquantized model) is still in place. Policy:
+      #   quantize_fallback=true (DEFAULT, 2026-10-31 jahbini): quantization is
+      #     best-effort — "quantization only if possible". Keep the symlink and
+      #     SUCCEED so downstream (chat_llm, etc.) loads the UNQUANTIZED model.
+      #     If it's small enough it runs; if it can't load at all, THAT
+      #     downstream failure is where the pipe gets tossed. A model whose type
+      #     we can't quantize (e.g. the ternary/vLLM Metal-kernel error) no
+      #     longer kills the pipe here.
+      #   quantize_fallback=false: FAIL first-class, so puppeteer's classifier
+      #     can retry a transient OOM / Metal-timeout quant. Set on fleet pipes
+      #     that want the retry rather than the fallback.
+      if S.param('quantize_fallback', true) isnt false
+        console.error "[#{S.stepName}] quantization not possible for this model (#{err?.message ? err}) — falling back to the UNQUANTIZED model at #{dstAbs} -> #{fallbackTarget}. Downstream runs it if it's small enough; otherwise the pipe is tossed there."
+        S.done()
+        return
       console.error "[#{S.stepName}] quantize failed (#{err?.message ? err}); pre-staged symlink at #{dstAbs} -> #{fallbackTarget} remains in place so downstream RECIPES still see usable weights"
       throw err
 
