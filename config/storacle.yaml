@@ -66,16 +66,12 @@ storacle:
   # model default when the human picks "(base — no adapter)".
   adapter_path: ""
 
-  # Toggle: prepend a Related-Passages block retrieved via top-K
-  # cosine over kag_embeddings_clean. RAG-lite.
-  use_chunks: [ UI_checkbox, false ]
+  # (use_chunks / rag_top_k REMOVED 2026-11-07 — chunking eliminated,
+  #  pipeline/GPT/rag_vs_kag.md. KAG is the retrieval mechanism.)
 
   # Toggle: prepend the chosen story's kag_entries as an inline
   # "Story-derived context" block (one line per keyword/headline).
   use_kag:    [ UI_checkbox, false ]
-
-  # Top-K used when use_chunks=true.
-  rag_top_k: 4
 
   llm:
     # 2026-09-15: every knob exposed as a UI input so the human can

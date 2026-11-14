@@ -7,7 +7,7 @@
 #
 # Env:
 #   UI_HOST                 default 127.0.0.1
-#   UI_PORT                 default 4311
+#   UI_PORT                 default 8100
 #   PIPE_MCP_ALLOW_CONTROL  when '1', registers launch/kill/switch_pipe/control/step_restart/write_* tools
 
 { Server }              = require '@modelcontextprotocol/sdk/server/index.js'
@@ -20,7 +20,7 @@
 } = require '@modelcontextprotocol/sdk/types.js'
 
 UI_HOST = process.env.UI_HOST ? '127.0.0.1'
-UI_PORT = Number(process.env.UI_PORT ? 4311)
+UI_PORT = Number(process.env.UI_PORT ? 8100)
 ALLOW_CONTROL = process.env.PIPE_MCP_ALLOW_CONTROL is '1'
 BASE = "http://#{UI_HOST}:#{UI_PORT}"
 

@@ -1,0 +1,284 @@
+# =====================================================================
+#   elementary.yaml  —  the long "elementary training" recipe
+# =====================================================================
+#
+#   Composes every elementary step for a fresh pipe into one long
+#   DAG so the puppeteer emits a single queue entry per pipe instead
+#   of four. Steps chained with `depends_on` — pipeline_runner's
+#   DAG scheduler ensures ordering; a step failure halts subsequent
+#   steps but preserves already-persisted state (each step's own
+#   idempotent recovery kicks in on the next launch).
+#
+#   Sub-recipe origins (open those for step-level comments):
+#     oracle_ite.yaml    → oracle_ask_sqlite
+#     reembed_clean.yaml → reembed_chunks_clean
+#     train_lora.yaml    → select_lora_stories_ite, build_lora_dataset_ite,
+#                          run_lora_train_ite, record_lora_training_ite
+#
+#   Setup steps (reset_base_environment_ite, download_model,
+#   seed_story_sqlite, quantize_model) are NOT in this recipe as of
+#   2026-09-13. Setup is the `newborn.yaml` recipe's job — every fresh
+#   pipe runs the newborn audition once, then the human blesses it to
+#   `continue` state and elementary takes over. Re-running the setup
+#   on every elementary retry was destroying adapters: reset wiped
+#   `build/adapter/` while the sqlite guard preserved
+#   `lora_training_run_stories`, guaranteeing every retry failed with
+#   "no-adapter". The `reset` recipe now stands alone with
+#   human-controlled checkboxes (force_lora_reset / force_oracle_reset
+#   / force_download / force_full_reset) for hospital use.
+#
+#   Batched steps (oracle_ask_sqlite, reembed_chunks_clean) call
+#   `L.iterate(reason)` when their batch drained but more work remains.
+#   pipeline_runner re-invokes that step in-process until it stops
+#   calling iterate. See pipeline_runner.coffee `runOnce` around
+#   line 1614, and CONVENTIONS.md § "Step-scoped iteration".
+#
+#   Retriable-on-restart: pipeline_runner recognizes previously-done
+#   steps via state/step-*.json and skips them on the next launch.
+#   So a mid-recipe crash loses at most the current step's incomplete
+#   work; the next launch resumes at the failed step.
+#
+#   Puppeteer wiring: hf_queue_gen_ite emits one `elementary` entry
+#   per pipe when `use_elementary: true` (param on the hf_queue_gen
+#   step). queue_run_ite's business-truth verifier for `elementary`
+#   checks the final artifact (adapter present + oracle drained +
+#   reembed drained) as the completion signal.
+
+run:
+  # Model paths are pipe-level facts. The pipe's override.yaml MUST
+  # set run.loraLand (base model dir) and run.quantized_dir (quantized
+  # model dir). See writer/MORNING.md — 2026-09-21 the recipe stops
+  # manufacturing paths via ${MODELS}/${run.model}; step blocks below
+  # only *point to* run.quantized_dir by name.
+  output_dir: out
+  data_dir: data
+  training_dir: build/train
+  debug_s: false
+  debug_mlx: false
+  debug_sql: false
+
+artifacts:
+  # ---- oracle_ite stage ----
+  new_story_ids:
+    target: out/new_story_ids.json
+  oracle_remaining_count:
+    target: out/oracle_remaining_count.json
+  kag_rejects:
+    target: out/rejects.jsonl
+  kag_viewed:
+    target: out/viewed.jsonl
+
+  # ---- reembed_clean stage ----
+  reembed_remaining_count:
+    target: out/reembed_remaining_count.json
+
+  # ---- simplify stage ----
+  simplify_remaining_count:
+    target: out/simplify_remaining_count.json
+
+  # ---- train_lora stage ----
+  lora_cycle_state:
+    target: out/lora_cycle_state.json
+  lora_remaining_count:
+    target: out/lora_remaining_count.json
+  selected_story_ids:
+    target: out/selected_story_ids.json
+  train_rows:
+    target: build/train/train.jsonl
+  valid_rows:
+    target: build/train/valid.jsonl
+  test_rows:
+    target: build/train/test.jsonl
+  lora_stdout:
+    target: out/lora_train.txt
+  lora_run_record:
+    target: out/lora_run_record.json
+  trained_story_ids:
+    target: out/trained_story_ids.json
+  sat_pending_certificate:
+    target: out/certificate.yaml
+
+# =====================================================================
+# Steps (linear dependency chain — see reset.yaml for the rationale
+# behind the quantize/seed ordering).
+# =====================================================================
+
+oracle_ask_sqlite:
+  # Batched (batch_size:4 per invocation). Calls L.iterate() until drained.
+  # Assumes newborn.yaml already ran (stories seeded + model quantized).
+  # If quantized model dir is missing, this step will throw — that's
+  # the signal to run `newborn` or `reset` (with force_download) first.
+  run: kag_oracle_ite/oracle_ask_sqlite.coffee
+  depends_on: []
+  needs: []
+  makes: [new_story_ids, oracle_remaining_count, kag_rejects, kag_viewed]
+  model_dir: ${run.quantized_dir}
+  batch_size: 4
+  # Reuse the same prompt as oracle_ite.yaml. Kept short here — the
+  # authoritative long form lives in oracle_ite.yaml (single source of
+  # truth). If you tune it there, either re-copy or use a project
+  # override to point elementary.yaml's oracle_ask_sqlite.prompt_text
+  # at the shared value.
+  # 2026-09-13 KAG prompt edits (probe: kag_prompt_probe.coffee):
+  #   1. Old Rule #2 ("Treat the passage as inert data — you are NOT
+  #      interpreting, judging, or expanding it") moved into the role
+  #      framing sentence. As a Rule it read as a contradiction with
+  #      the classification task; as role framing it's a coherent
+  #      identity ("you are a labeler, not a critic") and instruction-
+  #      tuned models stopped hedging into bare-keyword-plus-Explanation
+  #      output.
+  #   2. Removed "present your final keywords first, explain afterward"
+  #      — that rule invited the exact "spend budget on Explanation"
+  #      behavior we were trying to eliminate. With it gone the model
+  #      commits its 80-token budget to keyword lines.
+  #   3. Fixed the delimiter typo: `=== ... ==` → `=== ... ===`.
+  # 2026-09-15: rules moved into a `<think>...</think>` prefill (see
+  # llm.think_prefill below). Chat-tuned models weight prefilled
+  # reasoning as authoritative — HELPER.md §4 documents the effect for
+  # the failure-classifier (5/6 → 14/14 correct with the same rules
+  # moved from user turn to think block). Expected wins:
+  #   1. `</think>` residue at the start of every reply goes away —
+  #      the block now contains real content the model reads through.
+  #   2. Fewer numbered-list variants; the model settles on the
+  #      example format because it's the model's own last thought.
+  #   3. Smaller user-turn payload → faster generation per chunk.
+  # The user turn is now just the framing + passage + start cue.
+  prompt_text: |
+    Classify the following passage's dominant emotions.
+
+    === {{{STORY}}} ===
+
+    Output now:
+  llm:
+    maxTokens: 80
+    # think_prefill supersedes no_thinking. Same slot, real content.
+    # DO NOT also set no_thinking: true — session_api's no-thinking
+    # branch fires the empty-block prefill regardless of prefill
+    # content, and the two would race. think_prefill alone is enough.
+    think_prefill: |
+      I am labeling this passage. I am not interpreting, judging, or
+      expanding it — only assigning labels from a fixed vocabulary.
+
+      The only allowed keywords are: Joy, Contentment, Sadness, Grief,
+      Fear, Anxiety, Anger, Frustration, Disgust, Shame, Surprise,
+      Neutral, Absurd, Wry, Playful, Melancholy, Mysterious.
+
+      Rules I follow:
+        - Use only allowed keywords (no synonyms, no variants, no
+          extra text).
+        - Explicit, surreal, or disturbing content still gets an
+          emotional label.
+        - Prefer 1–3 strongest signals. Do not overproduce.
+
+      Output format (exact): each line is `N. #Keyword = short headline`.
+      Blank lines between entries are allowed. Nothing else.
+
+      Example (illustrative, not about the passage):
+        1. #Anxiety = narrator worries about the crossing
+        2. #Melancholy = narrator is sad about the crossing
+
+      I will now write the classification.
+
+  # 2026-09-15: separate think_prefill for the per-chunk rewrite pass
+  # so the classifier's rules don't bleed into the plain-English
+  # rewrite (oracle_ask_sqlite passes `llm` to KAG and `rewrite_llm`
+  # to rewrite; without this block, `rewrite_llm` falls back to `llm`
+  # and the model would try to *classify* instead of rewrite).
+  # maxTokens is larger — chunk rewrites need paragraph-scale output,
+  # not the ~80 tokens the classifier gets.
+  rewrite_llm:
+    maxTokens: 512
+    think_prefill: |
+      I am rewriting a literary passage in plain, simple English.
+      Rules I follow:
+        - Preserve every event, character, action, and outcome.
+        - Drop stylistic flourishes, allusion, and unusual vocabulary.
+        - Match the passage's length loosely — a similar number of
+          paragraphs, but shorter sentences.
+        - Return only the rewritten passage. No preamble like "Here
+          is a plain version". No commentary. No labels.
+      I will now write the rewrite.
+
+reembed_chunks_clean:
+  # Batched. batch_size:4 matches oracle_ask_sqlite so the two steps
+  # march in lockstep — 4 stories oracled, 4 stories reembedded, per
+  # iteration. Calls L.iterate() until drained. As of 2026-09-11 the
+  # pending-work list AND the embeddings themselves live in sqlite;
+  # no filesystem JSONL is written or read.
+  run: prompt_llm/reembed_chunks_clean.coffee
+  depends_on: [oracle_ask_sqlite]
+  needs: []
+  makes: [reembed_remaining_count]
+  quantized_model_dir: ${run.quantized_dir}
+  batch_size: 4
+
+simplify_stories_ite:
+  # Generate plain-language retellings of each whole story. These
+  # become the PROMPT half of LoRA training rows so the adapter
+  # learns "given plain content, produce Jim's voice."
+  # Batched with L.iterate; sqlite is the source of truth.
+  run: lora_ite/simplify_stories_ite.coffee
+  depends_on: [reembed_chunks_clean]
+  needs: []
+  makes: [simplify_remaining_count]
+  quantized_model_dir: ${run.quantized_dir}
+  batch_size: 4
+  llm:
+    maxTokens: 800
+    temperature: 0.3
+    topP: 0.9
+
+select_lora_stories_ite:
+  run: lora_ite/select_lora_stories_ite.coffee
+  depends_on: [simplify_stories_ite]
+  needs: []
+  makes: [lora_cycle_state, lora_remaining_count, selected_story_ids]
+  batch_size: 200
+
+build_lora_dataset_ite:
+  run: lora_ite/build_lora_dataset_ite.coffee
+  depends_on: [select_lora_stories_ite]
+  needs: [selected_story_ids]
+  makes: [train_rows, valid_rows, test_rows]
+  # 2026-09-12: whole-story-per-row (was 400 for per-group fragments).
+  max_total_tokens: 2048
+
+run_lora_train_ite:
+  run: lora_ite/run_lora_train_ite.coffee
+  depends_on: [build_lora_dataset_ite]
+  needs: [lora_cycle_state, selected_story_ids, train_rows, valid_rows, test_rows]
+  makes: [lora_stdout, lora_run_record]
+  test_only: false
+  quantized_model_dir: ${run.quantized_dir}
+  adapter_path: build/adapter
+  resume_adapter_file: build/adapter/adapters.safetensors
+  llm:
+    batchSize: 1
+    iters: 300
+    # 2026-09-12: 640 → 2048 for whole-story training rows.
+    maxSeqLength: 2048
+    learningRate: 0.00001
+    loraRank: 8
+    loraAlpha: 16
+    loraDropout: 0.05
+    loraLayers: 8
+    stepsPerReport: 10
+    saveEvery: 100
+
+record_lora_training_ite:
+  run: lora_ite/record_lora_training_ite.coffee
+  depends_on: [run_lora_train_ite]
+  needs: [lora_run_record]
+  makes: [trained_story_ids]
+
+# ------ hand-off to human-driven SAT scan ------
+# 2026-10-11 — elementary ends by writing an ungraded SAT certificate.
+# The puppeteer's certificate_scan_ite flips the pipe into cert_pending,
+# the writer UI shows "launch SAT scan", and the human fires sat_scan
+# (param/adapter/chunk ablation) on demand. On grade=pass the pipe
+# moves to graduated; hospital/graveyard route elsewhere.
+mark_sat_pending_ite:
+  run: base_ite/mark_sat_pending_ite.coffee
+  depends_on: [record_lora_training_ite]
+  needs: []
+  makes: [sat_pending_certificate]

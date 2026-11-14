@@ -79,13 +79,23 @@ wireRunner = (S, U, opts={}) ->
       pubFn = -> null   # no broker; disk stays authoritative
       flush()
       return
-    try
-      state.memo = new Memo(memoPath, state.broker)
-      state.memo.installHandlers()
-      n = state.memo.rehydrate()
-      console.log "[ipc] runner is broker HOST at #{sockPath}; memo rehydrated #{n} key(s) (no switchboard)"
-    catch err
-      console.error "[ipc] memo init failed: #{err?.message ? err}"
+    # ONE MEMO (jahbini 2026-10-28, enforced 2026-11-07): the memo is the
+    # fused node's IN-PROCESS M — never state/memo.sqlite, never a broker
+    # RPC store. The sqlite Memo is no longer instantiated here; the broker
+    # this branch hosts is TRANSPORT only (publishes, retained messages,
+    # cross-node sys/* replication). L.memoRequest is served in-process by
+    # the runner (pipe_ui_runner createStepLedger), not by broker RPC.
+    # LEGACY_SQLITE_MEMO=1 resurrects the old store for forensics only.
+    if String(process.env.LEGACY_SQLITE_MEMO ? '') in ['1', 'true']
+      try
+        state.memo = new Memo(memoPath, state.broker)
+        state.memo.installHandlers()
+        n = state.memo.rehydrate()
+        console.log "[ipc] LEGACY_SQLITE_MEMO: broker HOST at #{sockPath}; sqlite memo rehydrated #{n} key(s)"
+      catch err
+        console.error "[ipc] legacy memo init failed: #{err?.message ? err}"
+    else
+      console.log "[ipc] runner is broker HOST at #{sockPath} (transport only — memo is in-process, GPT/memo_unification.md)"
     pubFn = (topic, payload, retain) ->
       try state.broker.publish topic, payload, retain:retain
       catch err then console.error "[ipc] publish #{topic} failed: #{err?.message ? err}"

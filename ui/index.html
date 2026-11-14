@@ -561,6 +561,11 @@
   <div id="project-root-plugin-slot" data-visible-when="project-root"></div>
   <div id="pipe-scope-plugin-slot"   data-visible-when="pipe-scope"></div>
   <div class="wrap">
+    <!-- Hidden host for column:'top' registry panels (2026-11-08, jahbini):
+         their bodies live here (display:none) so self-refreshing pollers
+         keep working, and each gets a hero-bar BUTTON that opens the LIVE
+         full-width popup — same mechanism as the Flowchart/Graph buttons. -->
+    <div id="dynamic-panels-topstore" style="display:none"></div>
     <div class="hero">
       <div>
         <h1 id="page-title">Pipeline Monitor</h1>
@@ -601,7 +606,7 @@
           <div id="pipeline-death-box" class="death-box hidden">
             <div id="pipeline-death-text" class="mono"></div>
             <div class="button-row">
-              <button id="clear-pipeline-state-button" class="danger-button" type="button">Erase pipeline.json</button>
+              <button id="clear-pipeline-state-button" class="danger-button" type="button">Kill run + erase state/ (from scratch)</button>
             </div>
           </div>
           <div id="pipeline-death-empty" class="hint mono">no pipeline.json death message</div>
@@ -897,10 +902,38 @@
     // user picks a different recipe we know which one's human override to save.
     let loadedPipeline = '';
     let refreshTimer = null;
+    let memoEvents = null;
+    let memoKick = null;
+
+    function wireMemoEvents() {
+      // MARRIAGE (2026-11-08, jahbini): the UI and the pipeline share ONE
+      // in-process memo — the node pushes every memo change over the
+      // /api/events SSE stream, so the page refreshes WHEN something
+      // actually changed instead of re-scanning the filesystem on a 2s
+      // timer. The runner stamps ui/run + ui/step/<name> into the memo at
+      // every transition, so run progress (and the files steps produce)
+      // re-render within ~250ms. EventSource auto-reconnects on its own;
+      // the slow interval below is only a safety net.
+      if (memoEvents) return;
+      try {
+        memoEvents = new EventSource('/api/events');
+        memoEvents.addEventListener('memo', () => {
+          if (uiEditorHasFocus()) return;   // never yank values mid-edit
+          window.clearTimeout(memoKick);
+          memoKick = window.setTimeout(() => refresh().catch(console.error), 250);
+        });
+      } catch (e) {
+        console.warn('SSE unavailable — falling back to interval polling', e);
+        memoEvents = null;
+      }
+    }
 
     function startRefreshLoop() {
+      wireMemoEvents();
       if (refreshTimer) return;
-      refreshTimer = window.setInterval(() => refresh().catch(console.error), 2000);
+      // Safety-net cadence only — SSE carries the real-time updates.
+      // (Was a 2s filesystem-poll loop pre-marriage.)
+      refreshTimer = window.setInterval(() => refresh().catch(console.error), 30000);
     }
 
     function stopRefreshLoop() {
@@ -944,23 +977,34 @@
     }
 
     function renderFiles(target, files) {
-      if (!files || !files.length) {
-        target.innerHTML = '<div class="mono">none</div>';
-        return;
-      }
-      target.innerHTML = files.map((f) => `
+      const html = (!files || !files.length)
+        ? '<div class="mono">none</div>'
+        : files.map((f) => `
         <div class="file clickable ${f.is_fresh ? 'fresh' : 'stale'}" data-path="${f.path || ''}">
           <span class="mono">${f.path || f.name}</span>
           <span class="mono">${f.exists ? (f.size ?? '') : 'missing'}</span>
         </div>
       `).join('');
-
-      target.querySelectorAll('.file.clickable').forEach((node) => {
-        node.addEventListener('dblclick', () => {
+      // Reliability (2026-11-08): the 2s refresh loop used to innerHTML-
+      // rebuild this list on EVERY tick, destroying the row the user was
+      // mid-double-click on (the browser then never composes dblclick) —
+      // "output file won't open". Two fixes: (1) skip the rewrite when
+      // nothing changed; (2) a SINGLE click opens the file, delegated on
+      // the persistent container so re-renders can't drop the handler.
+      // dblclick still works via the same delegate.
+      if (target.__filesHtml !== html) {
+        target.__filesHtml = html;
+        target.innerHTML = html;
+      }
+      if (!target.__fileClickWired) {
+        target.__fileClickWired = true;
+        target.addEventListener('click', (ev) => {
+          const node = ev.target.closest('.file.clickable');
+          if (!node || !target.contains(node)) return;
           const filePath = node.getAttribute('data-path');
           if (filePath) openFileModal(filePath).catch(console.error);
         });
-      });
+      }
     }
 
     function renderControls(controls) {
@@ -1319,7 +1363,11 @@
       const dataByName = data.panels_data || {};
       const seenByHost = new Map();
       for (const meta of panels) {
-        const host = panelHost(meta);
+        // column:'top' → body parks hidden in the topstore; the opener is a
+        // hero-bar button (jahbini 2026-11-08: fleet panels live at the top
+        // of the page as buttons, beside Recipe Flowchart / Pipeline Graph).
+        const isTop = meta.column === 'top';
+        const host = isTop ? document.getElementById('dynamic-panels-topstore') : panelHost(meta);
         if (!host) continue;
         if (!seenByHost.has(host)) seenByHost.set(host, new Set());
         seenByHost.get(host).add(meta.name);
@@ -1336,18 +1384,38 @@
           if (meta.popup_mode) slot.dataset.popupMode = '1';
           slot.innerHTML = `<h2>${escapeHtml(meta.title || meta.name)}</h2><div class="panel-body"></div>`;
           host.appendChild(slot);
+          if (isTop) ensureHeroPanelButton(meta, slot);
         }
         renderPanelBody(slot.querySelector('.panel-body'), meta, dataByName[meta.name]);
       }
-      // Sweep slots no longer backed by a panel entry (per host).
+      // Sweep slots no longer backed by a panel entry (per host) — and the
+      // hero button of any swept top panel.
       for (const [host, seen] of seenByHost) {
         host.querySelectorAll('section[data-panel-name]').forEach((s) => {
-          if (!seen.has(s.dataset.panelName)) s.remove();
+          if (!seen.has(s.dataset.panelName)) {
+            document.getElementById(`btn-panel-${s.dataset.panelName}`)?.remove();
+            s.remove();
+          }
         });
       }
       // Wire open/close toggles on freshly-injected dynamic panels so they
       // get a header button and start closed like every other panel.
       if (typeof setupCollapsibles === 'function') setupCollapsibles();
+    }
+    function ensureHeroPanelButton(meta, slot) {
+      const id = `btn-panel-${meta.name}`;
+      if (document.getElementById(id)) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'hero-btn';
+      btn.id = id;
+      btn.textContent = `${meta.title || meta.name} ⤢`;
+      btn.addEventListener('click', () => openPanelModalLive(slot));
+      // Row order (jahbini 2026-11-08): fleet buttons first, then the
+      // built-in Recipe Flowchart / Pipeline Graph openers.
+      const anchor = byId('btn-recipe-flowchart');
+      if (anchor && anchor.parentElement) anchor.parentElement.insertBefore(btn, anchor);
+      else byId('run-status')?.parentElement?.appendChild(btn);
     }
     function renderPanelBody(target, meta, value) {
       // Custom-hint panels must ALWAYS run their hook; lazy panels get
@@ -2002,9 +2070,20 @@
 
 	    async function openFileModal(filePath) {
 	      const res = await fetch(`/api/file?path=${encodeURIComponent(filePath)}`, { cache: 'no-store' });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || 'file open failed');
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* non-JSON error body */ }
+      if (!res.ok || !data || !data.ok) {
+        // Show the failure IN the modal — a silent console throw reads as
+        // "the UI does nothing" (2026-11-08).
+        byId('file-modal-title').textContent = filePath;
+        byId('file-modal-meta').textContent = '';
+        byId('file-modal-copy-status').textContent = '';
+        const errEl = byId('file-modal-text');
+        errEl.classList.remove('is-plot');
+        errEl.style.cssText = '';
+        errEl.textContent = `could not open ${filePath}: ${(data && data.error) || `HTTP ${res.status}`}`;
+        byId('file-modal-shell').classList.add('open');
+        return;
       }
 	      const file = data.file || {};
 	      byId('file-modal-title').textContent = file.path || '';
@@ -2023,7 +2102,10 @@
 	      } catch (e) {
 	        console.warn('[plugin] decorateFileModal threw:', e);
 	      }
-	      if (!pluginRes || !pluginRes.rendered) textEl.textContent = file.text || '';
+	      if (!pluginRes || !pluginRes.rendered) {
+	        // An empty file used to open a blank modal that read as "broken".
+	        textEl.textContent = (file.text && file.text.length) ? file.text : '(empty file — 0 bytes)';
+	      }
 	      byId('file-modal-shell').classList.add('open');
 	    }
 

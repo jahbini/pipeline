@@ -49,6 +49,42 @@ module.exports = (M, opts={}) ->
   bus   = new EventEmitter()
   bus.setMaxListeners 0           # many SSE clients may subscribe at once
 
+  # ── sys/* durability (ONE MEMO, 2026-11-07) ───────────────────────────
+  # The in-process memo IS the memo; durability is the FILESYSTEM, not a
+  # sqlite store or the bus. Operator keys (sys/freeze, sys/fleet_mode, …)
+  # must survive a node restart, so sys/* writes persist (debounced) to
+  # state/sys_memo.json and rehydrate here at device load. ui/* stays
+  # process-local by design (per-node working state).
+  SYS_MEMO_PATH = path.join (opts.baseDir ? process.cwd()), 'state', 'sys_memo.json'
+  # Ephemeral sys/* keys (liveness beats, 30s inventory snapshots) are NOT
+  # persisted or rehydrated — they're meaningless across a restart and
+  # would bloat the durable file / resurrect stale state. Only operator
+  # keys (freeze, fleet_mode, peer_via_broker, …) survive.
+  _sysEphemeral = /^sys\/(presence|pipe_inventory)\//
+  _sysDirty = false
+  _sysTimer = null
+  _persistSys = ->
+    _sysTimer = null
+    return unless _sysDirty
+    _sysDirty = false
+    out = {}
+    out[k] = v for own k, v of store when k.indexOf('sys/') is 0 and v isnt undefined and not _sysEphemeral.test(k)
+    try
+      fs.mkdirSync path.dirname(SYS_MEMO_PATH), {recursive: true}
+      fs.writeFileSync SYS_MEMO_PATH, JSON.stringify(out, null, 2), 'utf8'
+    catch err
+      console.error "[meta/ui] sys/* persist failed: #{err?.message ? err}"
+  _scheduleSysPersist = ->
+    _sysDirty = true
+    return if _sysTimer?
+    _sysTimer = setTimeout _persistSys, 500
+    _sysTimer.unref?()
+  try
+    _seed = JSON.parse fs.readFileSync(SYS_MEMO_PATH, 'utf8')
+    store[k] = v for own k, v of _seed when k.indexOf('sys/') is 0 and not _sysEphemeral.test(k)
+    console.log "[meta/ui] rehydrated #{Object.keys(_seed).length} sys/* key(s) from #{SYS_MEMO_PATH}"
+  catch then null
+
   # Coalesced change notification (2026-10-28). A busy run mirrors EVERY
   # publish here (ui/state, ui/step/*, ui/event, ui/lifecycle); emitting +
   # SSE-broadcasting each one synchronously firehoses every browser tab. So we
@@ -84,6 +120,7 @@ module.exports = (M, opts={}) ->
       store[key] = value       # immediate — reads never wait on the flush
       pending[key] = value
       schedule()
+      _scheduleSysPersist() if key.indexOf('sys/') is 0
       value
 
   # The seam the UI taskmaster (HTTP/SSE transport) binds to. Writes route
@@ -99,6 +136,7 @@ module.exports = (M, opts={}) ->
       try delete M.MM[key]
       pending[key] = undefined   # coalesced deletion push (value undefined → deleted)
       schedule()
+      _scheduleSysPersist() if key.indexOf('sys/') is 0
       true
     subscribe: (cb) ->
       bus.on 'change', cb
@@ -294,11 +332,37 @@ module.exports = (M, opts={}) ->
       node = node[part]
     node
   _parseYaml = (p) -> try (require 'js-yaml').load(fs.readFileSync(p, 'utf8')) catch then null
-  _parseRecipe = (name) ->
+  # Recipe `include:` expansion — mirrors the runner's expandIncludes/deepMerge
+  # (pipe_ui_runner.coffee) so the UI sees the SAME merged recipe the DAG runs.
+  # Without this, a voyage recipe like grain_run.yaml (which `include:`s
+  # celarien_voyage.yaml and defines NO artifacts/steps of its own) surfaces an
+  # empty Outputs panel even though the run wrote every out/ file. Deep-merge
+  # direction matches the runner: each included base is the SOURCE and wins on
+  # keys it defines; the including recipe keeps keys the base omits.
+  _isPlainObj = (v) -> v? and typeof v is 'object' and not Array.isArray(v)
+  _deepMergeInto = (target, source) ->
+    return target unless source?
+    for own k, v of source
+      if v is null then delete target[k]
+      else if _isPlainObj(v) and _isPlainObj(target[k]) then _deepMergeInto target[k], v
+      else target[k] = (if Array.isArray(v) then v.slice() else v)
+    target
+  _expandRecipeIncludes = (spec, baseDir) ->
+    return spec unless spec? and Array.isArray(spec.include)
+    merged = JSON.parse(JSON.stringify(spec))
+    for inc in spec.include
+      incPath = if path.isAbsolute(inc) then inc else path.join(baseDir, inc)
+      incSpec = _parseYaml(incPath)
+      merged = _deepMergeInto(merged, incSpec) if incSpec?
+    merged
+  _parseRecipe = (name, expand = true) ->
     return null unless name
     for dir in [(opts.baseDir ? process.cwd()), opts.basePath, opts.execDir] when dir
       p = path.join(dir, 'config', "#{name}.yaml")
-      return _parseYaml(p) if (try fs.existsSync(p) catch then false)
+      if (try fs.existsSync(p) catch then false)
+        spec = _parseYaml(p)
+        return spec unless expand and spec?
+        return _expandRecipeIncludes(spec, path.dirname(p))
     null
   _loadDropdownOptions = (specPath) ->
     return [] unless typeof specPath is 'string' and specPath.length
@@ -512,12 +576,20 @@ module.exports = (M, opts={}) ->
     logStem = if newestLog then newestLog.replace(/\.log$/, '') else null
     tail = (p) -> try (t = fs.readFileSync(p, 'utf8'); if t.length > 20000 then t.slice(-20000) else t) catch then ''
     mem = try process.memoryUsage() catch then {}
+    # Memory knowledge (2026-11-07): rss is BLIND to MLX — model weights live
+    # in Metal unified memory, so a node holding a 16GB model still shows
+    # ~50MB rss. global.__mlx_runtime (registered by mlx/llm_dispatch on
+    # first model load) is the true instrument; absent ⇒ no model ever
+    # loaded in this process, metal_* report 0.
+    _mlxrt = global.__mlx_runtime ? null
+    _metal = try (_mlxrt?.memStats?() ? null) catch then null
+    _msess = try (_mlxrt?.sessionCount?() ? 0) catch then 0
     ok: true
     run: run
     # This node's own JS memory footprint. rss ≈ the 60-80MB resident cost of a
     # fused node; heapUsed/heapTotal are the V8 JS heap; external is C++ memory
     # held by JS (Buffers etc.). The fleet view sums rss across live puppets.
-    memory: {rss: (mem.rss ? 0), heapUsed: (mem.heapUsed ? 0), heapTotal: (mem.heapTotal ? 0), external: (mem.external ? 0), rss_mb: Math.round((mem.rss ? 0) / 1048576), heap_used_mb: Math.round((mem.heapUsed ? 0) / 1048576), pid: process.pid}
+    memory: {rss: (mem.rss ? 0), heapUsed: (mem.heapUsed ? 0), heapTotal: (mem.heapTotal ? 0), external: (mem.external ? 0), rss_mb: Math.round((mem.rss ? 0) / 1048576), heap_used_mb: Math.round((mem.heapUsed ? 0) / 1048576), metal_active_mb: (_metal?.active_mb ? 0), metal_peak_mb: (_metal?.peak_mb ? 0), model_sessions: _msess, pid: process.pid}
     pipeline_state: _readJson(path.join(cwd, 'pipeline.json'), null)
     workspace: {top_level: path.basename(base), pipe: current}
     pipe: {root: _pipesRoot(), current, workspace: cwd, pipes: ({name: n, is_active: n is current} for n in _listPipeDirs())}
@@ -664,6 +736,19 @@ module.exports = (M, opts={}) ->
           payload = try JSON.parse(body or '{}') catch then {}
           return _sendJson res, 503, {ok: false, error: 'no launcher wired'} unless M.ui.onLaunch?
           return _sendJson res, 200, M.ui.onLaunch(payload)
+        if pathname is '/api/evict_model' and req.method is 'POST'
+          # Memory knowledge: drop every cached MLX session — model weights,
+          # KV cache, Metal cache — but KEEP the node serving ("KEEP THE
+          # UI"). Non-destructive: the next callLLM reloads on demand. No-op
+          # when this node never loaded a model (registry absent).
+          rt = global.__mlx_runtime
+          unless rt?
+            return _sendJson res, 200, {ok: true, evicted: 0, note: 'no mlx loaded in this node'}
+          try
+            r = await rt.evictSessions()
+            return _sendJson res, 200, {ok: true, evicted: (r?.evicted ? 0), metal: (r?.metal ? null)}
+          catch err
+            return _sendJson res, 500, {ok: false, error: String(err?.message ? err)}
         if pathname is '/api/kill' and req.method is 'POST'
           # In-process kill: the DAG's completion tick watches `pipeline:shutdown`.
           M.saveThis 'pipeline:shutdown', {by: 'ui', reason: 'killed via /api/kill', failed: false, at: Date.now()}
@@ -818,6 +903,17 @@ module.exports = (M, opts={}) ->
           for k in ['scene', 'arrival', 'disturbance', 'reflection', 'realization'] when p[k]?
             obj[k] = String(p[k])
           try _writeText path.join((opts.baseDir ? process.cwd()), 'control_override.yaml'), (require 'js-yaml').dump(obj)
+          # Persist the continuous / cooldown-relaunch controls. The fused node's
+          # re-fire loop (pipe_ui_runner onLaunch) reads state/ui-control.json;
+          # _buildStatus reads it too. Only touch the keys the client actually sent.
+          if p.continuous? or p.continuous_delay_seconds?
+            cwd2    = opts.baseDir ? process.cwd()
+            ctlPath = path.join(cwd2, 'state', 'ui-control.json')
+            cur     = _readJson(ctlPath, {}) ? {}
+            cur.continuous = (p.continuous is true) if p.continuous?
+            cur.continuous_delay_seconds = Number(p.continuous_delay_seconds) if p.continuous_delay_seconds?
+            try fs.mkdirSync(path.join(cwd2, 'state'), {recursive: true}) catch then null
+            try _writeText ctlPath, JSON.stringify(cur, null, 2)
           return _sendJson res, 200, {ok: true, control_override: obj}
         if pathname is '/api/human_override' and req.method is 'POST'
           body = await _readBody req
@@ -838,6 +934,11 @@ module.exports = (M, opts={}) ->
           return _sendJson res, 200, {ok: true, cleared: 'out'}
         if pathname is '/api/clear_pipeline_state' and req.method is 'POST'
           cwd = opts.baseDir ? process.cwd()
+          # From-scratch: stop any in-flight run (the DAG tick watches this memo
+          # key) THEN erase the crash record + every step-<name>.json, so the
+          # next Run — which now RESUMES by default — has no state to resume and
+          # re-executes the whole recipe. (Button: "Kill run + erase state/".)
+          try M.saveThis 'pipeline:shutdown', {by: 'ui', reason: 'from-scratch: kill + erase state', failed: false, at: Date.now()} catch then null
           try fs.unlinkSync path.join(cwd, 'pipeline.json') catch then null
           sdir = path.join(cwd, 'state')
           try (fs.unlinkSync(path.join(sdir, f)) for f in (try fs.readdirSync(sdir) catch then []) when /^step-.*\.json$/.test(f)) catch then null
@@ -887,9 +988,9 @@ module.exports = (M, opts={}) ->
           value = try M.theLowdown(requestKey)?.value catch then undefined
           return _sendJson(res, 404, {ok: false, error: 'request key did not resolve', request: requestKey}) if value is undefined
           return _sendJson res, 200, {ok: true, request: requestKey, value}
-        # /api/manifest — agent bootstrap (what this pipe offers). Lean vs legacy:
-        # recipe includes are NOT expanded here (steps defined via includes won't
-        # appear), which is fine — no browser code fetches this; it's for agents.
+        # /api/manifest — agent bootstrap (what this pipe offers). Recipe includes
+        # ARE expanded (via _parseRecipe), so steps/artifacts defined in an
+        # included base recipe appear. No browser code fetches this; it's for agents.
         if pathname is '/api/manifest'
           cwd = opts.baseDir ? process.cwd()
           recipeManifest = (name) ->
@@ -917,7 +1018,7 @@ module.exports = (M, opts={}) ->
             active_pipe: _workspacePipeName(cwd)
             recipes: {available: recipeNames, by_name: byName}
             sqlite_requests: sqliteRequests
-            includes_expanded: false
+            includes_expanded: true
           }}
         # /api/memo — the browser routes sys/* (and non-ui/*) here. Backed by the ONE
         # shared memo M; sys/* is now in-process (rule above), so JSON-faithful. (3.4)

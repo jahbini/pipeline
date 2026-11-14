@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL (2026-11-07 sweep).** Written for `ui_server.coffee` (deleted 2026-10-30). The `/api/*` surface described here largely survived INTO the fused node (`meta/ui.coffee` owns the routes; run lifecycle hooks live in `pipe_ui_runner.coffee`). Read as route-contract background, not file guidance.
+
 # UI as agent surface
 
 Area: `ui_server.coffee` + the `/api/*` HTTP surface

@@ -1,3 +1,5 @@
+> **NOTE (2026-11-07 sweep).** The panel SYSTEM is current, but "ui_server" below = the fused node (`pipe_ui_runner.coffee` + `meta/ui.coffee`) since the 2026-10-30 cutover; panels are served by the project plugin.
+
 # UI panels — the plugin surface
 
 _Landed 2026-09-09. Framework-orbit. Same three-tier

@@ -1,3 +1,5 @@
+> **NOTE (2026-11-07 sweep):** since the 2026-10-30 cutover the runner + UI are ONE fused node (`pipe_ui_runner.coffee` + `meta/ui.coffee` from @jahbini/pipeline); `pipeline_runner.coffee`/`ui_server.coffee` below are the pre-cutover names. Concepts (DAG, overrides, pipes layout) unchanged. Ports: `pipeline/GPT/ports.md`.
+
 <!-- 2026-08-22: model paths under $MODELS supersede any `build/model[4]` mentions below. See GPT/model_paths.md for the current convention. -->
 
 # Pipeline Runner — Universal Starting Point
@@ -64,11 +66,13 @@ The substrate (the parts that should *not* change per project):
   - UI-driven `state/ui-control.json` → materialized to
     `<CWD>/control_override.yaml` at launch
   All four layers are deep-merged. The recipe-scoped layer is the UI's
-  edit surface; status-2 Claude (per `/CLAUDE.md`) also writes there.
+  edit surface, and the layer Claude writes for recipe tuning. (A former
+  `/CLAUDE.md` "status" system was never jahbini's directive — CLAUDE.md
+  files carry no authority; see `GPT/CONVENTIONS.md` "Authority".)
   (Earlier drafts of this doc mentioned a per-user `override.<user>.yaml`
   layer — that came from the publicist project and was never implemented
   in this runner. Don't reintroduce it without adding the resolver code.)
-- **Pipe-local UI** (`ui_server.coffee` + `ui/index.html`):
+- **Pipe-local UI** (the fused node's `meta/ui` + `ui/index.html`):
   - left column: Pipeline Death, Outputs, Diary Files, Steps, Latest Err, Latest Log
   - right column: Pipe, Run, Recipe And Overrides controls
   - recipe-discovered form fields via `UI_checkbox` / `UI_dropdown` /
@@ -141,8 +145,8 @@ shape is:
 
 ```
 new_project/
-  pipeline_runner.coffee        # copy from writeStory/publicist
-  ui_server.coffee              # copy
+  # (2026-11-07: do NOT copy runner/UI files — depend on @jahbini/pipeline
+  #  and launch `pipe_ui_runner.coffee`; ui_server/pipeline_runner are gone)
   ui/index.html                 # copy (includes today's collapsibles +
                                 #  fullscreen pane expand + merge polling)
   config/<recipe>.yaml          # the new recipe(s)
@@ -160,8 +164,8 @@ new_project/
 A new "agent" / "_ite" recipe is added by:
 1. dropping a YAML under `config/`
 2. dropping its step scripts wherever the YAML's `run:` paths resolve
-3. listing the recipe name in the UI's `pipelines: [...]` array in
-   `ui_server.coffee` (writeStory) or the equivalent place
+3. nothing else — the fused node discovers recipes from `config/*.yaml`
+   (the old hardcoded `pipelines: [...]` array died with `ui_server.coffee`)
 
 ---
 
@@ -199,7 +203,7 @@ Naming clarifications worth keeping in mind:
   references; do not promote them back over the `_ite` versions.
 - `pipe/` is **singular** (per-project we have many pipes but the directory
   itself is named `pipe`, not `pipes`). The earlier `pipes/` plural was
-  renamed in June 2026 — `ui_server.coffee`'s `PIPE_ROOT` reflects this.
+  renamed in June 2026 — the serving layer's `PIPE_ROOT` reflects this.
 - `config/` is the per-tier directory name across CWD, BASE, and EXEC.
 
 Three resolution tiers, applied uniformly across recipes, scripts, and (now)
@@ -247,7 +251,7 @@ coverage lives in `test/base_tier_probe.coffee` under "substituteBraces".
 
 When working on this codebase, mentally separate:
 
-- **Framework orbit** — `pipeline_runner.coffee`, `ui_server.coffee`,
+- **Framework orbit** — the fused node (`pipe_ui_runner.coffee`, `meta/ui.coffee`),
   `ui/index.html`, the memo machinery, the override resolver, the SQLite
   helpers. Changes here are 🌐 branch-portable AND project-portable;
   any improvement should be considered for both writeStory and publicist

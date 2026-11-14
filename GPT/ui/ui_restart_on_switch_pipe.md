@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL (2026-11-07 sweep).** Describes the pre-cutover `ui_server.coffee` switch-pipe respawn. The BEHAVIOR survives in the fused node: the writer plugin's `/pipe/<name>` deep-link writes `state/current_pipe.txt` + respawns the node in the target pipe CWD (`writer/ui/project.coffee handleDeepLinkPipe`). Mechanics below are pre-cutover.
+
 # Prompt — make "Switch Pipe UI" restart the UI (incl. in-place)
 
 Hand this to the pipeline UI bot. It is framework-orbit UI infrastructure (applies

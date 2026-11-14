@@ -162,7 +162,7 @@ path = require 'path'
       # and schedules the retry.
       #
       # The pre-staged fallback symlink at `dstAbs -> raw` REMAINS
-      # in place — so downstream RECIPES (oracle_ite, reembed_clean,
+      # in place — so downstream RECIPES (oracle_ite,
       # train_lora — none of which depend on quantize_model in the
       # DAG) continue to load raw fp16 weights via session_api's
       # fallback. Only THIS step is failed.

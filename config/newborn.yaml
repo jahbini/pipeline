@@ -15,8 +15,14 @@
 #
 # Sub-recipe origins (mirror those in elementary.yaml):
 #   reset.yaml    → reset_base_environment_ite, download_model,
-#                    seed_story_sqlite, quantize_model
+#                    import_canonical_corpus_ite, quantize_model
 #   storacle.yaml → storacle (one prompt-generation call)
+#
+# 2026-11-09 (a): the seed stage now imports the frozen canonical corpus
+# (import_canonical_corpus_ite) exactly like elementary.yaml, replacing the
+# stale seed_story_sqlite md-ingest (which read data/stories.md). A fresh
+# pipe is now seeded the way the updated (canonical-corpus/KAG) system
+# expects — no per-pipe data/stories.md required.
 
 run:
   # Model paths are pipe-level facts. The pipe's override.yaml MUST
@@ -30,10 +36,8 @@ run:
   training_dir: build/train
 
 artifacts:
-  stories_md:
-    source: data/stories.md
-  story_seed_ids:
-    target: out/story_seed_ids.json
+  canonical_corpus_import:
+    target: out/canonical_corpus_import.json
   entrance_certificate:
     target: out/certificate.yaml
 
@@ -51,15 +55,16 @@ download_model:
   makes: []
   download_dir: ${run.loraLand}
 
-seed_story_sqlite:
-  run: kag_oracle_ite/seed_story_sqlite.coffee
+import_canonical_corpus_ite:
+  run: base_ite/import_canonical_corpus_ite.coffee
   depends_on: [download_model]
-  needs: [stories_md]
-  makes: [story_seed_ids]
+  needs: []
+  makes: [canonical_corpus_import]
+  force_corpus_reimport: false
 
 quantize_model:
   run: model/quantize_model.coffee
-  depends_on: [download_model, seed_story_sqlite]
+  depends_on: [download_model, import_canonical_corpus_ite]
   needs: []
   makes: []
   src_dir:       ${run.loraLand}

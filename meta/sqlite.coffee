@@ -59,6 +59,7 @@
   with `^...$`.
 ###
 path = require 'path'
+fs   = require 'fs'
 { DatabaseSync } = require 'node:sqlite'
 
 module.exports = (M, opts={}) ->
@@ -648,6 +649,69 @@ module.exports = (M, opts={}) ->
             throw new Error "sqlite meta expected object or array for .csv"
 
     REQUESTS = [
+      {
+        # importCanonicalCorpus{force?} — reuse the frozen, model-agnostic
+        # corpus annotations instead of recomputing oracle+simplify per pipe.
+        # ATTACHes <BASE>/data/canonical_corpus.sqlite and copies stories +
+        # kag_entries + story_simplifications into THIS pipe's db. Idempotent:
+        # a per-pipe corpus_import_meta marker records the imported
+        # corpus_version; re-import is a no-op unless the version changed or
+        # {force}. Model-SPECIFIC artifacts (embeddings, LoRA) are NOT touched.
+        name: 'importCanonicalCorpus'
+        regex: /^importCanonicalCorpus(?:\{([^}]*)\})?$/
+        allowedSuffixes: ['json']
+        read: (db, arg) ->
+          force = String(arg ? '').toLowerCase() is 'force'
+          base  = opts.basePath ? path.resolve(baseDir, '..', '..')
+          canonPath = path.join(base, 'data', 'canonical_corpus.sqlite')
+          unless (try fs.existsSync(canonPath) catch then false)
+            alt = path.join(process.env.HOME ? '', 'writer', 'data', 'canonical_corpus.sqlite')
+            canonPath = alt if (try fs.existsSync(alt) catch then false)
+          throw new Error "[importCanonicalCorpus] canonical_corpus.sqlite not found (looked at #{canonPath})" unless (try fs.existsSync(canonPath) catch then false)
+
+          db.exec "ATTACH DATABASE '#{canonPath.replace(/'/g, "''")}' AS canon"
+          try
+            canonVersion = db.prepare("SELECT v FROM canon.corpus_meta WHERE k='corpus_version'").get()?.v ? 'unknown'
+            db.exec "CREATE TABLE IF NOT EXISTS corpus_import_meta (k TEXT PRIMARY KEY, v TEXT)"
+            prior = db.prepare("SELECT v FROM corpus_import_meta WHERE k='imported_version'").get()?.v ? null
+            if prior is canonVersion and not force
+              return {ok: true, skipped: true, version: canonVersion, reason: 'pipe already at canonical corpus version'}
+
+            # Ensure the model-agnostic tables exist (a fresh pipe may lack them).
+            db.exec "CREATE TABLE IF NOT EXISTS stories (story_id TEXT PRIMARY KEY, title TEXT, text TEXT)"
+            db.exec "CREATE TABLE IF NOT EXISTS kag_entries (story_id TEXT NOT NULL, entry_index INTEGER NOT NULL, doc_id TEXT, paragraph_index TEXT, chunk_index INTEGER, start_paragraph INTEGER, end_paragraph INTEGER, keyword TEXT, headline TEXT, chunk_text TEXT, entry_json TEXT, PRIMARY KEY (story_id, entry_index))"
+            db.exec "CREATE TABLE IF NOT EXISTS story_simplifications (story_id TEXT PRIMARY KEY, simple_text TEXT NOT NULL, model TEXT, created_at TEXT)"
+            db.exec "CREATE TABLE IF NOT EXISTS chunk_simplifications (story_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, simple_text TEXT NOT NULL, model TEXT, created_at TEXT, PRIMARY KEY (story_id, chunk_index))"
+            db.exec "CREATE INDEX IF NOT EXISTS idx_chunk_simplifications_story_id ON chunk_simplifications (story_id)"
+
+            # stories: fill only if missing (identical across pipes — same jim.md).
+            db.exec "INSERT OR IGNORE INTO stories (story_id, title, text) SELECT story_id, title, text FROM canon.stories"
+            # kag_entries + simplifications: wholesale replace with canonical.
+            db.exec "DELETE FROM kag_entries"
+            db.exec "INSERT INTO kag_entries (story_id, entry_index, doc_id, paragraph_index, chunk_index, start_paragraph, end_paragraph, keyword, headline, chunk_text, entry_json) SELECT story_id, entry_index, doc_id, paragraph_index, chunk_index, start_paragraph, end_paragraph, keyword, headline, chunk_text, entry_json FROM canon.kag_entries"
+            db.exec "DELETE FROM story_simplifications"
+            db.exec "INSERT INTO story_simplifications (story_id, simple_text, model, created_at) SELECT story_id, simple_text, model, created_at FROM canon.story_simplifications"
+            # chunk_simplifications (2026-11-07) — the per-CHUNK plain-language
+            # retellings build_lora_dataset_ite trains from. MISSING from the
+            # original canonical build (the 8b-base zero-training-rows gap);
+            # canonical now carries them (donor: the src pipe in corpus_meta).
+            # Guard: a pre-fix canonical file lacks the table — import the old
+            # tables rather than erroring, so stale canonicals still work.
+            canonHasChunks = (db.prepare("SELECT COUNT(*) c FROM canon.sqlite_master WHERE type='table' AND name='chunk_simplifications'").get()?.c ? 0) > 0
+            if canonHasChunks
+              db.exec "DELETE FROM chunk_simplifications"
+              db.exec "INSERT INTO chunk_simplifications (story_id, chunk_index, simple_text, model, created_at) SELECT story_id, chunk_index, simple_text, model, created_at FROM canon.chunk_simplifications"
+
+            nStories = db.prepare("SELECT COUNT(*) c FROM stories").get()?.c ? 0
+            nKag     = db.prepare("SELECT COUNT(*) c FROM kag_entries").get()?.c ? 0
+            nSimpl   = db.prepare("SELECT COUNT(*) c FROM story_simplifications").get()?.c ? 0
+            nChunkS  = db.prepare("SELECT COUNT(*) c FROM chunk_simplifications").get()?.c ? 0
+            db.prepare("INSERT OR REPLACE INTO corpus_import_meta (k, v) VALUES ('imported_version', ?)").run(canonVersion)
+            db.prepare("INSERT OR REPLACE INTO corpus_import_meta (k, v) VALUES ('imported_at', ?)").run(new Date().toISOString())
+            {ok: true, imported: true, version: canonVersion, stories: nStories, kag_entries: nKag, simplifications: nSimpl, chunk_simplifications: nChunkS}
+          finally
+            try db.exec "DETACH DATABASE canon" catch then null
+      }
       {
         name: 'storyByID'
         regex: /^storyByID\{([^}]+)\}$/
@@ -1516,66 +1580,10 @@ module.exports = (M, opts={}) ->
         write: null
       }
 
-      # --- Clean re-embeddings (kag_embeddings_clean) ---------------------
-      # Same shape as the kag_embeddings triad but reading/writing the
-      # `kag_embeddings_clean` table (see schema block above). Populated
-      # by reembed_chunks_clean using raw-text embeddings; retrieval
-      # (generate_prompt_llm) reads these first.
-      {
-        name: 'kagEmbeddingCleanRegister'
-        regex: /^kagEmbeddingCleanRegister\{([^}]+)\}$/
-        allowedSuffixes: ['json']
-        read: null
-        write: (db, value, tupleArg) ->
-          throw new Error "sqlite meta kagEmbeddingCleanRegister write expects object" unless value? and typeof value is 'object' and not Array.isArray(value)
-          [argStory, argChunk] = String(tupleArg).split '|'
-          storyID  = value.story_id ? argStory
-          chunkIdx = if value.chunk_index? then Number(value.chunk_index) else Number(argChunk)
-          throw new Error "sqlite meta kagEmbeddingCleanRegister story_id mismatch" unless storyID is argStory
-          throw new Error "sqlite meta kagEmbeddingCleanRegister chunk_index mismatch" unless chunkIdx is Number(argChunk)
-
-          emb = value.embedding
-          if emb? and typeof emb is 'object' and emb.type is 'Buffer' and Array.isArray(emb.data)
-            emb = Buffer.from emb.data
-          throw new Error "sqlite meta kagEmbeddingCleanRegister embedding must be Buffer-like" unless Buffer.isBuffer(emb)
-
-          db.prepare("""
-            INSERT INTO kag_embeddings_clean (story_id, chunk_index, dim, embedding, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(story_id, chunk_index) DO UPDATE SET
-              dim        = excluded.dim,
-              embedding  = excluded.embedding,
-              created_at = excluded.created_at
-          """).run(
-            storyID
-            chunkIdx
-            Number(value.dim ? (emb.length / 4))
-            emb
-            value.created_at ? new Date().toISOString()
-          )
-          { ok: true, story_id: storyID, chunk_index: chunkIdx, bytes: emb.length }
-      }
-
-      {
-        name: 'kagAllCleanEmbeddings'
-        regex: /^kagAllCleanEmbeddings$/
-        allowedSuffixes: ['jsonl']
-        read: (db) ->
-          rows = db.prepare("""
-            SELECT story_id, chunk_index, dim, embedding, created_at
-            FROM kag_embeddings_clean
-            ORDER BY story_id ASC, chunk_index ASC
-          """).all()
-          for row in rows
-            {
-              story_id: row.story_id
-              chunk_index: row.chunk_index
-              dim: row.dim
-              embedding_b64: Buffer.from(row.embedding).toString('base64')
-              created_at: row.created_at
-            }
-        write: null
-      }
+      # (kagEmbeddingCleanRegister / kagAllCleanEmbeddings request keys
+      #  REMOVED 2026-11-07 — chunking eliminated, jahbini directive;
+      #  pipeline/GPT/rag_vs_kag.md. The kag_embeddings_clean table DDL +
+      #  reset DELETEs stay for schema compatibility with existing DBs.)
 
       # --- Whole-story simplifications (2026-09-12) ---------------------
       # Per-whole-story plain-language retellings for LoRA style
@@ -1652,40 +1660,8 @@ module.exports = (M, opts={}) ->
       # (2026-09-12: achievementTestRegister/Run/History/Grade meta
       # rules removed with the rest of the achievement_test design.)
 
-      # Anti-join: stories that have at least one row in kag_entries
-      # (i.e. oracle-tagged) but do NOT have full-coverage in
-      # kag_embeddings_clean. "Full coverage" is defined as
-      # COUNT(DISTINCT chunk_index) in clean ≥ COUNT(DISTINCT chunk_index)
-      # in kag_entries for that story. Missing / partial → work pending.
-      #
-      # Return shape matches storiesMissingKag: rows carry
-      # {story_id, title, text} so the reader can embed each chunk
-      # without a second query.
-      {
-        name: 'storiesMissingCleanEmbeddings'
-        regex: /^storiesMissingCleanEmbeddings$/
-        allowedSuffixes: ['jsonl', 'txt', 'csv']
-        read: (db) ->
-          db.prepare("""
-            SELECT
-              stories.story_id,
-              stories.title,
-              stories.text
-            FROM stories
-            WHERE EXISTS (
-              SELECT 1 FROM kag_entries WHERE kag_entries.story_id = stories.story_id
-            )
-            AND (
-              SELECT COUNT(DISTINCT chunk_index) FROM kag_embeddings_clean
-              WHERE kag_embeddings_clean.story_id = stories.story_id
-            ) < (
-              SELECT COUNT(DISTINCT chunk_index) FROM kag_entries
-              WHERE kag_entries.story_id = stories.story_id
-            )
-            ORDER BY stories.story_id ASC
-          """).all()
-        write: null
-      }
+      # (storiesMissingCleanEmbeddings request key REMOVED 2026-11-07 —
+      #  chunking eliminated; pipeline/GPT/rag_vs_kag.md.)
 
       # --- Generic pipeline-run lifecycle ---------------------------------
       # `runRegister{<id>}.json` (write-only)  — INSERT or REPLACE a runs row
@@ -2331,7 +2307,7 @@ module.exports = (M, opts={}) ->
     ]
 
     M.addMetaRule "sqlite",
-      /^(?:storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|oracleReset|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|kagEmbeddingCleanRegister\{[^}]+\}|kagAllCleanEmbeddings|storiesMissingCleanEmbeddings|storySimplificationRegister\{[^}]+\}|storySimplification\{[^}]+\}|storySimplificationsMissing|chunkSimplificationRegister\{[^}]+\}|chunkSimplification\{[^}]+\}|chunkSimplificationsForStory\{[^}]+\}|storacleObservationRegister\{[^}]+\}|storacleObservationNoteUpdate\{[^}]+\}|storacleObservationsAll|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval)\.(json|jsonl|txt|csv)$/i,
+      /^(?:importCanonicalCorpus(?:\{[^}]*\})?|storyByID\{[^}]+\}|partsFor\{[^}]+\}|kagFor\{[^}]+\}|kagByKeyword\{[^}]+\}|oracleFailureFor\{[^}]+\}|expandedPartsFor\{[^}]+\}|storiesWithKag\{[^}]+\}|storiesMissingKag|allStories|trainedStories|loraStoryUsage|loraTrainingRun\{[^}]+\}|loraTrainingRuns|loraCycleReset|sqliteResetAll|oracleReset|runRegister\{[^}]+\}|runUpdate\{[^}]+\}|runById\{[^}]+\}|runHistory|changesSince\{[^}]+\}|kagEmbeddingRegister\{[^}]+\}|kagEmbedding\{[^}]+\}|kagAllEmbeddings|storySimplificationRegister\{[^}]+\}|storySimplification\{[^}]+\}|storySimplificationsMissing|chunkSimplificationRegister\{[^}]+\}|chunkSimplification\{[^}]+\}|chunkSimplificationsForStory\{[^}]+\}|storacleObservationRegister\{[^}]+\}|storacleObservationNoteUpdate\{[^}]+\}|storacleObservationsAll|evaluationRegister\{[^}]+\}|evaluation\{[^}]+\}|evaluationHistory|evaluationLatest|evaluationsByPromptHash\{[^}]+\}|corpusHealth|trainingHistoryJoinEval)\.(json|jsonl|txt|csv)$/i,
       (key, value) ->
         debugLog "meta key", key, "write?", value isnt undefined
 
@@ -2395,7 +2371,7 @@ module.exports.requestNames = [
   'runRegister',        'runUpdate',        'runById',         'runHistory'
   'changesSince'
   'kagEmbeddingRegister', 'kagEmbedding',   'kagAllEmbeddings'
-  'kagEmbeddingCleanRegister', 'kagAllCleanEmbeddings', 'storiesMissingCleanEmbeddings'
+
   'storySimplificationRegister', 'storySimplification', 'storySimplificationsMissing'
   'chunkSimplificationRegister', 'chunkSimplification', 'chunkSimplificationsForStory'
   'storacleObservationRegister', 'storacleObservationNoteUpdate', 'storacleObservationsAll'

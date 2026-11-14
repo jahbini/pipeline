@@ -16,17 +16,13 @@
   recipe-definition time.
 ###
 
-fs   = require 'fs'
 path = require 'path'
-yaml = require 'js-yaml'
 
 @step =
   desc: "Write ungraded entrance certificate so human can run storacle."
 
   action: (L) ->
     pipeName = path.basename(process.cwd())
-    outDir = path.join(process.cwd(), 'out')
-    fs.mkdirSync outDir, {recursive: true}
 
     cert =
       pipe:  pipeName
@@ -42,8 +38,12 @@ yaml = require 'js-yaml'
       created_at: new Date().toISOString()
       created_by: 'mark_entrance_pending_ite'
 
-    certPath = path.join(outDir, 'certificate.yaml')
-    fs.writeFileSync certPath, yaml.dump(cert), 'utf8'
-    console.log "[#{L.stepName}] wrote ungraded entrance certificate → #{certPath}"
+    # entrance_certificate is a makes-target (out/certificate.yaml). Hand it to
+    # the ledger so the meta/yaml device materializes it. Writing the file via
+    # fs.writeFileSync here (the prior behavior) was CLOBBERED by the runner
+    # materializing the never-set memo value as the literal string `undefined`
+    # — the 2026-11-09 "undefined certificate" bug. L.make is the contract.
+    L.make 'entrance_certificate', cert
+    console.log "[#{L.stepName}] wrote ungraded entrance certificate → out/certificate.yaml"
     L.done?()
     return

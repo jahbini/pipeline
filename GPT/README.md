@@ -90,8 +90,9 @@ Current repository assumptions worth preserving:
   The same-named files in the repo BASE directory
   (`/writeStory/override.yaml`, `/writeStory/experiment.yaml`, etc.) are
   meaningless stale leftovers — do not read or write them. Only
-  `config/`, the runner, `ui_server.coffee`, `scripts/`, `agents/`, and
-  `GPT/` live at the repo base and are shared across pipes.
+  `config/`, the runner (`pipe_ui_runner.coffee` — the fused node;
+  `ui_server.coffee` was deleted in the 2026-10-30 cutover), `scripts/`,
+  `agents/`, and `GPT/` live at the repo base and are shared across pipes.
 - the `_ite` recipes are the production covering set of capabilities. Recipes
   without the `_ite` suffix (e.g. `full`, `story`, `train_lora`,
   `train_markdown`, `dialog_reword`, `kag_oracle`, `story_kag_chat`, `test`)
@@ -123,7 +124,7 @@ Current repository assumptions worth preserving:
   `override/<pipeline>.yaml` and then never re-read it; that silently froze
   later `override.yaml` edits and is the bug this fixed.)
 - recipe-scoped `override/<pipeline>.yaml` is the higher human layer and the
-  surface the UI writes (`ui_server.coffee` `readOverride`). Prefer it for
+  surface the UI writes (the fused node's `meta/ui` serving layer). Prefer it for
   per-recipe human overrides; it wins over legacy `override.yaml` on conflicts.
 - `control_override.yaml` is UI-owned run control (highest precedence), not a
   replacement for recipe-scoped human overrides
@@ -203,7 +204,8 @@ WORKING DISCIPLINE (human directive, May 2026):
 - the UI should not poll every 2 seconds all the time; it polls continuously
   while EITHER a pipeline run OR a merge job is active, and stops otherwise
   so the user can edit fields without the UI yanking values back from disk
-  (see `GPT/ui/ui_server.md` for the full polling gate rule)
+  (see `GPT/ui/ui_server.md` — historical doc, but the polling-gate rule it
+  states still governs the fused node's UI)
 - the two native generation paths live on sibling git branches:
   - `main` (this branch): `gypsy/` is populated. `rusty/` is empty.
     The production native addon is gypsy (`metal/metal_llm.node`, built

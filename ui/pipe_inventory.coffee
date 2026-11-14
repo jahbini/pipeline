@@ -45,7 +45,8 @@ INVENTORY_BASH = '''
     if [ -f "$db" ]; then
       kag_rows=$(sqlite3 "$db" "SELECT COUNT(DISTINCT doc_id) FROM kag_entries" 2>/dev/null || echo 0)
       kag_total=$(sqlite3 "$db" "SELECT COUNT(*) FROM kag_entries" 2>/dev/null || echo 0)
-      emb_clean_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM kag_embeddings_clean" 2>/dev/null || echo 0)
+      # (chunking removed 2026-11-07 — emb_clean column kept as 0 for TSV
+      #  position stability; pipeline/GPT/rag_vs_kag.md)
     fi
     oracle_remaining="-"
     lora_remaining="-"
@@ -53,8 +54,8 @@ INVENTORY_BASH = '''
     if [ -f "$db" ]; then
       oracle_remaining=$(sqlite3 "$db" "SELECT COUNT(*) FROM stories WHERE NOT EXISTS (SELECT 1 FROM kag_entries WHERE kag_entries.story_id=stories.story_id)" 2>/dev/null || echo -)
       [ -z "$oracle_remaining" ] && oracle_remaining="-"
-      reembed_remaining=$(sqlite3 "$db" "SELECT COUNT(*) FROM stories WHERE EXISTS (SELECT 1 FROM kag_entries WHERE kag_entries.story_id=stories.story_id) AND (SELECT COUNT(DISTINCT chunk_index) FROM kag_embeddings_clean WHERE kag_embeddings_clean.story_id=stories.story_id) < (SELECT COUNT(DISTINCT chunk_index) FROM kag_entries WHERE kag_entries.story_id=stories.story_id)" 2>/dev/null || echo -)
-      [ -z "$reembed_remaining" ] && reembed_remaining="-"
+      # (reembed_remaining query removed 2026-11-07 — chunking eliminated;
+      #  column kept as "-" for TSV position stability)
       lora_remaining=$(sqlite3 "$db" "SELECT COUNT(*) FROM stories WHERE NOT EXISTS (SELECT 1 FROM lora_training_run_stories WHERE lora_training_run_stories.story_id=stories.story_id)" 2>/dev/null || echo -)
       [ -z "$lora_remaining" ] && lora_remaining="-"
     fi

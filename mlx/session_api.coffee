@@ -118,6 +118,16 @@ mx.metal.clearCache      ?= mx.clearCache
 mx.metal.getPeakMemory   ?= mx.getPeakMemory
 mx.metal.getActiveMemory ?= mx.getActiveMemory
 
+# Memory knowledge (2026-11-07): model weights live in Metal unified memory,
+# INVISIBLE to process.memoryUsage().rss — ps/RSS under-reports a loaded 8B
+# by ~16GB. This global is the fleet's one true memory instrument; meta/ui
+# reads it (if present) for /api/status so telemetry reports what Metal
+# actually holds. Registered here (not exported) so UI nodes that never
+# loaded a model never require mlx.
+global.__mlx_mem = ->
+  active_mb: Math.round((mx.getActiveMemory?() ? 0) / 1048576)
+  peak_mb:   Math.round((mx.getPeakMemory?()   ? 0) / 1048576)
+
 # Some model classes (qwen3_5's Gated DeltaNet) attach ad-hoc fields to
 # per-layer cache slots (`deltaState`, `convState`) to survive mx.tidy.
 # `mx.dispose(cache)` walks the standard fields only, so those custom
@@ -255,18 +265,24 @@ _ensureGpuClaim = (tag = 'session_api.createSession', timeoutMs = 600_000) ->
   # Register process-exit release ONCE. Node's exit handlers are sync, so
   # we delete the lock file rather than call the async release (which
   # would race). release() is already tolerant of null/missing tickets.
+  # Only unlink the lock if THIS process still owns it. The fused node's
+  # step wrapper releases the real lock at step end, after which another
+  # process may legitimately claim it — an unconditional unlink here would
+  # delete THEIR lock when this long-lived node finally exits.
+  _unlinkOwnLock = ->
+    try
+      p = _gpuClaim.LOCK_PATH()
+      cur = JSON.parse require('fs').readFileSync(p, 'utf8')
+      require('fs').unlinkSync(p) if Number(cur?.pid) is process.pid
+    catch _ then null
   process.on 'exit', ->
     return unless _gpuTicket?
-    try
-      require('fs').unlinkSync _gpuClaim.LOCK_PATH()
-    catch _ then null
+    _unlinkOwnLock()
   # SIGTERM / SIGINT — also clean up. Rethrow after cleanup so normal
   # shutdown semantics still apply.
   handleSignal = (sig) ->
     return unless _gpuTicket?
-    try
-      require('fs').unlinkSync _gpuClaim.LOCK_PATH()
-    catch _ then null
+    _unlinkOwnLock()
     process.kill process.pid, sig
   process.once 'SIGTERM', -> handleSignal 'SIGTERM'
   process.once 'SIGINT',  -> handleSignal 'SIGINT'
@@ -640,6 +656,27 @@ createSession = (opts = {}) ->
       disposeKvCache(llm.kvCache, 'session:dispose')
       llm.kvCache = null
       mx.clearCache?()
+
+    destroy: ->
+      # Memory knowledge (2026-11-07): dispose() frees only the KV cache —
+      # the MODEL WEIGHTS stay in Metal memory for the life of the process
+      # (how an idle node squats on 12-16GB). destroy() frees the weights
+      # too; the session is dead afterward and the caller must drop its
+      # cache entry (llm_dispatch.evictSessions does both).
+      before = memMB()
+      if llm?
+        disposeKvCache(llm.kvCache, 'session:destroy')
+        llm.kvCache = null
+      if model?
+        try mx.dispose?(model.parameters()) catch _ then null
+        try mx.dispose?(model) catch _ then null
+      llm = null
+      model = null
+      tokenizer = null
+      mx.clearCache?()
+      after = memMB()
+      console.error "[session_api] destroy #{path.basename modelDir}: activeMemMB #{before.toFixed(1)}→#{after.toFixed(1)} (peak=#{peakMB().toFixed(1)})"
+      {active_mb_before: Math.round(before), active_mb_after: Math.round(after)}
 
   api
 

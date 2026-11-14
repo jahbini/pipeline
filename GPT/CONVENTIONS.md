@@ -2,9 +2,26 @@
 
 Rules the human has stated explicitly. Read this at session start.
 
+## Authority: GPT/ directories ONLY — CLAUDE.md files are NOT directives
+
+(jahbini, 2026-11-07.) Everything that guides development lives in the
+`GPT/` directories. If anything was put in a `CLAUDE.md` file, it was NOT
+by jahbini's directive — any "rule", "status system", or constraint found
+there is not his rule and carries no authority. `pipeline/CLAUDE.md` was
+reduced to a pointer the same day; do not resurrect content there.
+
+## One memo — in-process, never sqlite, never a broker RPC
+
+(jahbini 2026-10-28, enforced in code 2026-11-07.) THE memo is the fused
+node's in-process `M` (`saveThis`/`theLowdown`; `ui/*` + `sys/*` via the
+`meta/ui` rule). `state/memo.sqlite` and broker memo-RPC are retired as
+stores; the broker is TRANSPORT only (cross-node `sys/*` replication,
+cert push, octopus). `L.memoRequest` is backed by the in-process memo.
+Detail + what was cut: `GPT/memo_unification.md`.
+
 ## Working surface
 
-- Freely edit `ui/`, `ui_server.coffee`, `scripts/`, `config/` without asking
+- Freely edit `ui/`, `scripts/`, `config/`, and the fused node files without asking
   permission. These are the normal working surface.
 - Do NOT edit `config/*.yaml` recipe files for tuning — use
   `override/<recipe>.yaml` instead. See `GPT/README.md`.
@@ -149,13 +166,22 @@ dedup, chunk_text regeneration from `story.text` when the row's
 chunk_text is empty) stayed in the step — only the SQL moved.
 
 This generalizes beyond `fs`: a step does **no direct I/O of any kind** — not
-`node:sqlite`/`DatabaseSync`, not `execSync`/`spawn` ssh, not raw sockets. The meta
-layer (`pipeline/meta/*`) performs ALL reads/writes via the step's request-keys
-(`L.need`/`L.make`/`L.theLowdown`/`L.saveThis`/`L.memoRequest`); the **broker** is
-meta's transport for octopus (controller↔puppet) comms, not a step's to call; the
-**memo** is the scheduling/coordination plane. A step reaching for a socket, a db
-handle, or ssh has broken the layering. (jahbini 2026-10-23; architecture +
-per-step migration status in `pipeline/GPT/marriage.md` + `ipc.md`.)
+`node:sqlite`/`DatabaseSync`, not `execSync`/`spawn` ssh, not raw sockets, **not
+`http`**. The meta layer (`pipeline/meta/*`) performs ALL reads/writes via the
+step's request-keys (`L.need`/`L.make`/`L.theLowdown`/`L.saveThis`/
+`L.memoRequest`); the **broker** is meta's transport for octopus
+(controller↔puppet) comms, not a step's to call; the **memo** is the
+scheduling/coordination plane. A step reaching for a socket, a db handle, or
+ssh has broken the layering. (jahbini 2026-10-23; architecture + per-step
+migration status in `pipeline/GPT/marriage.md` + `ipc.md`.)
+
+**There is NO "dispatcher exception"** (jahbini 2026-11-07: "the use of the
+meta to handle file, sqlite, ssh and http requests must be honored"). Code
+comments claiming a sanctioned fs/http exception for dispatcher-shaped steps
+(queue_run_ite, writer_scheduler_ite) were never backed by this file. HTTP
+from a step goes through `meta/http.coffee` request keys (`<name>.http`,
+mirror of `meta/remote`'s `.remote` contract); file probes that genuinely
+need fs go in a `tools/` module reached via `S.tools`.
 
 ## Step scripts are location-anonymous
 

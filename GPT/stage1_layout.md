@@ -1,3 +1,5 @@
+> **HISTORICAL (2026-11-07 sweep)** — mlxCoffee Stage 1 alignment log, pre-cutover. `pipeline_runner.coffee`/`ui_server.coffee` no longer exist in this repo (fused node since 2026-10-30).
+
 > **Provenance note.** Authored 2026-07-22 in `~/development/mlxCoffee/GPT/`
 > as design record for mlxCoffee aligning its on-disk layout to
 > `@jahbini/pipeline` (this repo, the exemplar). Ported verbatim on

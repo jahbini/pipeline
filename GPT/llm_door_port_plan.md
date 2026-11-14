@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL (2026-11-07 sweep, pre-cutover port log).** Dated working log; `pipeline_runner.coffee` is deleted (fused into `pipe_ui_runner.coffee`). callLLM/callMLX are both async now (`GPT/async_fused_node.md`).
+
 <!-- 2026-08-22: model paths under $MODELS supersede any `build/model[4]` mentions below. See GPT/model_paths.md for the current convention. -->
 
 # LLM-door port plan — folding mlxCoffee's `callLLM` into @jahbini/pipeline

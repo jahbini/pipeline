@@ -49,7 +49,7 @@ remote_peers:
       - "cd ~/writer && coffee node_modules/@jahbini/pipeline/mcp/pipe_server.coffee"
     env:                           # merged over process.env
       UI_HOST: "127.0.0.1"
-      UI_PORT: "4311"
+      UI_PORT: "8100"
       PIPE_MCP_ALLOW_CONTROL: "1"  # needed for control tools
 ```
 

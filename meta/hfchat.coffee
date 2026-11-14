@@ -177,6 +177,11 @@ module.exports = (M, opts = {}) ->
             rejected = Promise.reject(err)
             rejected.catch -> null
             latest.notifier = rejected
+          # Explicit return (2026-11-07) — the implicit return handed the
+          # rejected promise back to the chain, re-raising it as an
+          # UNHANDLED rejection (process-fatal under Node's default
+          # --unhandled-rejections=throw). Same latent bug as meta/remote.
+          return
 
       # Return undefined so saveThis leaves entry.value cleared.
       undefined

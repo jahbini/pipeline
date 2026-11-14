@@ -34,7 +34,7 @@ per-pipe duplication of a 15GB base download.
 ## How the paths get pinned
 
 `${VAR}` expansion is performed by the pipeline runner (`loadYamlSafe`
-in `pipeline_runner.coffee` — 2026-08-19 addition). Recipes and
+in the runner (now `pipe_ui_runner.coffee`) — 2026-08-19 addition). Recipes and
 overrides can use `${MODELS}` in any string value and it's replaced
 with the env var's current value at load time.
 

@@ -1,3 +1,5 @@
+> **HISTORICAL (2026-11-07 sweep)** — integration log from the Stage-2 era; "pipeline_runner.coffee" = today's fused `pipe_ui_runner.coffee` runRecipe. The chat_llm recipe itself is still current.
+
 <!-- 2026-08-22: model paths under $MODELS supersede any `build/model[4]` mentions below. See GPT/model_paths.md for the current convention. -->
 
 > **Provenance note.** Authored 2026-07-22 in `~/development/mlxCoffee/GPT/`.

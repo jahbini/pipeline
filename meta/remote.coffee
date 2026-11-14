@@ -43,7 +43,7 @@
           args: [mini.local, "cd ~/writer && coffee \
                  node_modules/@jahbini/pipeline/mcp/pipe_server.coffee"]
           env:                       # optional; merged over process.env
-            UI_PORT: "4311"
+            UI_PORT: "8100"
             PIPE_MCP_ALLOW_CONTROL: "1"
 
   Clients are lazy-spawned per peer on first use and cached for the
@@ -168,6 +168,12 @@ module.exports = (M, opts = {}) ->
             rejected = Promise.reject(err)
             rejected.catch -> null
             latest.notifier = rejected
+          # Explicit return (2026-11-07) — the implicit return handed the
+          # rejected promise back to the chain, re-raising it as an
+          # UNHANDLED rejection (process-fatal under Node's default
+          # --unhandled-rejections=throw). Found via meta/http's probe;
+          # same latent bug here since this file was written.
+          return
 
       # Return undefined so saveThis leaves entry.value cleared until
       # the response lands.

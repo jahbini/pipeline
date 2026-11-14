@@ -45,12 +45,17 @@ verified. The legacy `com.jahbini.puppeteer-ui` launchd job is unloaded + its pl
 runs the same pair for dev. `pipeline_runner.coffee`, `ui_server.coffee`, `run_worker.js` are
 deleted from the repo (kept as `.deprecated-20261030` on the mini for a short rollback window).
 
-**PORTS DRIFT — verify live, don't trust old numbers.** The launchd JOB NAMES are stable
-(`com.jahbini.pipe-ui-{puppeteer,writer}`); the ports they bind have moved (were 4300/4311,
-then 5400/5411). **Verified on the mini 2026-11-03: puppeteer = 8000, writer = 6100** (puppet
-fleet ~5512+). Check reality with `launchctl list | grep pipe-ui` +
-`lsof -nP -iTCP -sTCP:LISTEN | grep node`; this line is a dated snapshot, not a guarantee.
-package.json bins/scripts (pipeline + puppeteer + writer) now point at `pipe_ui_runner.coffee`.
+**PORTS ARE NOW PLANNED — `pipeline/GPT/ports.md` (jahbini ruling 2026-11-07).**
+Puppeteer 8000; controlled services 8100, 8200, …; each service's pipes base+1..base+99
+by AGE (oldest lowest). The launchd JOB NAMES are stable (`com.jahbini.pipe-ui-{puppeteer,writer}`).
+Laptop is live on the plan; the mini cutover is pending (writer plist 6100→8100) — until it
+lands, verify the mini live (`launchctl list | grep pipe-ui` + `lsof -nP -iTCP -sTCP:LISTEN | grep node`).
+package.json bins/scripts (pipeline + puppeteer + writer) point at `pipe_ui_runner.coffee`.
+
+**ONE MEMO ENFORCED IN CODE 2026-11-07 — `pipeline/GPT/memo_unification.md`.** The zombie
+broker-RPC memo plane and the stale `state/memo.sqlite` are retired; `L.memoRequest` is
+in-process; `sys/*` persists to `state/sys_memo.json`; the broker is TRANSPORT only. Any
+Stage B/C/D prose below that treats broker-RPC memo reads/writes as current is historical.
 
 **Two cooperating taskmasters, one event loop, no 'kill':** the UI service and the DAG
 runner share the one in-process memo + meta and cooperate by STATE, never by process
@@ -477,10 +482,10 @@ Rule: `puppeteer/GPT/rules/puppeteer_decides_restart.md`; detail in
 > the recorded `experiment.yaml` (defaulting to `puppet`/existing port
 > when absent). The design below is the live contract, not a proposal.
 
-Role and ports are **not** hardcoded (today they're the arbitrary 4300 /
-4311 in each `project.coffee`'s `portDefault`). They come from a new
-**`puppeteer` override layer**, which the runner already records into
-`experiment.yaml` for free:
+Role and ports are **not** hardcoded ad hoc — `portDefault`s now follow
+the planned scheme (`GPT/ports.md`: controller 8000, services 8100/8200/…,
+pipes base+1..99 by age). Role + port come from the **`puppeteer` override
+layer**, which the runner records into `experiment.yaml` for free:
 
 - `experiment.yaml` is the runner's **generated record** of the fully
   resolved config — `createExperimentObject` deep-merges
@@ -495,10 +500,10 @@ Role and ports are **not** hardcoded (today they're the arbitrary 4300 /
 # <project>/override/puppeteer.yaml
 puppeteer:
   role: controller          # 'controller' (= puppeteer, hosts broker+memo+UI) | 'puppet'
-  ui_port: 4300             # this node's HTTP/SSE UI port
+  ui_port: 8000             # this node's HTTP/SSE UI port (plan: GPT/ports.md)
   puppets:                  # controllers only: who to bring up over SSH
-    - { host: mac-mini.local, user: theaiguy, base: ~/writer,  ui_port: 4311 }
-    - { host: mac-mini.local, user: theaiguy, base: ~/notebookie, ui_port: 4312 }
+    - { host: mac-mini.local, user: theaiguy, base: ~/writer,  ui_port: 8100 }
+    - { host: mac-mini.local, user: theaiguy, base: ~/notebookie, ui_port: 8200 }
 ```
 
 Flow:

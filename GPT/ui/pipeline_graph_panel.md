@@ -1,3 +1,5 @@
+> **NOTE (2026-11-07 sweep).** Routes now live in the fused node (`meta/ui.coffee` serves `/api/pipeline_svg`); "ui_server.coffee" below is the pre-cutover host.
+
 # Pipeline Graph Panel — SVG DAG in the framework UI
 
 Ported from `~/writer/` on 2026-08-10. This makes the interactive

@@ -24,9 +24,6 @@
   Optional context knobs (all default OFF so bare-minimum calls behave
   exactly as they did pre-augmentation):
 
-    use_chunks (bool)    → prepend top-K clean-embedding passages
-                            retrieved via cosine over kag_embeddings_clean.
-                            RAG lite.
     use_kag (bool)       → prepend the story's kag_entries rows
                             (keyword,headline pairs) as inline context.
     adapter_path (str)   → path to a LoRA adapter dir or file. Empty
@@ -117,31 +114,9 @@ readKagContext = (L, storyId) ->
   return '' unless lines.length
   "Story-derived context (KAG):\n" + lines.join("\n") + "\n\n"
 
-# Top-K clean-embedding retrieval. Off unless use_chunks=true. Mirrors
-# the retrieval in generate_prompt_llm.coffee. Reads from
-# `kag_embeddings_clean` via the `kagAllCleanEmbeddings.jsonl` view.
-retrievePassages = (L, queryText, modelDir, topK) ->
-  return {augmented: '', passages: []} unless topK > 0 and queryText?.length
-  qEmb = (await L.callLLM {op: 'embed', modelDir: modelDir, prompt: queryText, raw: true})?.embedding
-  return {augmented: '', passages: []} unless qEmb?
-  rows = L.theLowdown('kagAllCleanEmbeddings.jsonl')?.value ? []
-  rows = L.theLowdown('kagAllEmbeddings.jsonl')?.value ? [] unless rows.length
-  return {augmented: '', passages: []} unless rows.length
-  scored = []
-  for r in rows when r?.embedding_b64?
-    emb = L.tools.embedding_blob.blobToFloatArray Buffer.from(r.embedding_b64, 'base64')
-    scored.push {story_id: r.story_id, chunk_index: r.chunk_index, cos: L.tools.embedding_blob.cosineSimilarity(qEmb, emb)}
-  scored.sort (a, b) -> b.cos - a.cos
-  passages = []
-  for s in scored
-    break if passages.length >= topK
-    story = L.theLowdown("storyByID{#{s.story_id}}.json")?.value
-    continue unless story?.text?
-    passages.push {story_id: s.story_id, title: (story.title ? s.story_id), chunk_index: s.chunk_index, cos: s.cos}
-  return {augmented: '', passages: passages} unless passages.length
-  contextBlock = ("From \"#{p.title}\" (chunk #{p.chunk_index}, cos=#{p.cos.toFixed(3)}):" for p in passages).join "\n"
-  augmented = "Related passages (from clean embeddings):\n#{contextBlock}\n\n"
-  {augmented, passages}
+# (Chunk/RAG retrieval REMOVED — jahbini directive 2026-11-07,
+# pipeline/GPT/rag_vs_kag.md. KAG keyword context is the retrieval
+# mechanism; per-model chunk embeddings are eliminated.)
 
 # Coerce a UI checkbox value (boolean OR string "true"/"false"/"1"/"0").
 truthy = (v) ->
@@ -167,9 +142,7 @@ resolveAdapterPath = (raw) ->
     storyId   = String(L.param('story_id', '') ? '').trim()
     modelDir  = L.param 'quantized_model_dir', null
     llmConfig = L.param 'llm', null
-    useChunks = truthy L.param('use_chunks', false)
     useKag    = truthy L.param('use_kag', false)
-    ragTopK   = Math.max(0, Number(L.param('rag_top_k', 4)) or 0)
     adapterRaw = L.param 'adapter_path', null
     adapterPath = resolveAdapterPath adapterRaw
 
@@ -202,23 +175,18 @@ resolveAdapterPath = (raw) ->
     for placeholder, idx in FRAGMENT_PLACEHOLDERS
       prompt = prompt.split(placeholder).join(fragmentTexts[idx])
 
-    # Optional prefix blocks — KAG first (structured signals), then
-    # chunks (retrieval passages). Human's prompt template goes last.
+    # Optional prefix block — KAG (structured signals). Human's prompt
+    # template goes last.
     prefixParts = []
     kagBlock = ''
-    passages = []
     if useKag and storyId.length
       kagBlock = readKagContext L, storyId
       prefixParts.push kagBlock if kagBlock.length
-    if useChunks
-      retrieval = await retrievePassages L, prompt, modelDir, ragTopK
-      passages = retrieval.passages
-      prefixParts.push retrieval.augmented if retrieval.augmented.length
     effectivePrompt = if prefixParts.length then prefixParts.join('') + prompt else prompt
 
     fragmentSummary = ("F#{i + 1}=#{fragmentTexts[i].length}" for i in [0...5]).join(' ')
     console.log "[storacle] story_id=#{storyId or '(none)'} (story=#{storyText.length} chars, groups=#{storyGroups.length}, #{fragmentSummary})"
-    console.log "[storacle] flags: use_chunks=#{useChunks} (top-#{ragTopK}, #{passages.length} retrieved) use_kag=#{useKag} (#{kagBlock.length} chars) adapter=#{adapterPath ? '(none — base model)'}"
+    console.log "[storacle] flags: use_kag=#{useKag} (#{kagBlock.length} chars) adapter=#{adapterPath ? '(none — base model)'}"
     console.log "[storacle] template=#{template.length} → effective prompt=#{effectivePrompt.length} chars"
     console.log "[storacle] modelDir: #{modelDir}"
 
@@ -253,13 +221,10 @@ resolveAdapterPath = (raw) ->
       model_dir: modelDir
       adapter_path: adapterPath ? null
       story_id: storyId
-      use_chunks: useChunks
       use_kag: useKag
-      rag_top_k: ragTopK
       story_chars: storyText.length
       fragment_char_counts: (fragmentTexts[i].length for i in [0...5])
       kag_context_chars: kagBlock.length
-      retrieved_passages: passages.map (p) -> {story_id: p.story_id, chunk_index: p.chunk_index, cos: p.cos}
       template_chars: template.length
       template_text: template
       prompt_chars: effectivePrompt.length

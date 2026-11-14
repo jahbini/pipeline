@@ -61,7 +61,7 @@ Same convention as `~/puppeteer/config/remote_launch.yaml`'s peer table.
 ```bash
 #!/usr/bin/env bash
 # Push every file under ~/pipeline/mlx/, ~/pipeline/meta/,
-# ~/pipeline/pipeline_runner.coffee, ~/writer/ui_server.coffee,
+# ~/pipeline/pipe_ui_runner.coffee, the ui/project.coffee plugins,
 # ~/writer/bin/*.sh from laptop to mac-mini. Idempotent, delta only.
 #
 # Runs in ~3s over LAN. Use after any edit that debugging cares about.
@@ -75,8 +75,11 @@ rsync -aq /Users/jahbini/pipeline/tools/   $HOST:pipeline/tools/
 rsync -aq /Users/jahbini/pipeline/scripts/ $HOST:pipeline/scripts/
 rsync -aq /Users/jahbini/pipeline/mcp/     $HOST:pipeline/mcp/
 
-scp -q /Users/jahbini/pipeline/pipeline_runner.coffee $HOST:pipeline/pipeline_runner.coffee
-scp -q /Users/jahbini/writer/ui_server.coffee          $HOST:writer/ui_server.coffee
+scp -q /Users/jahbini/pipeline/pipe_ui_runner.coffee  $HOST:pipeline/pipe_ui_runner.coffee
+# (pipeline_runner.coffee + ui_server.coffee deleted in the 2026-10-30 cutover;
+#  the project plugins ride along too:)
+scp -q /Users/jahbini/puppeteer/ui/project.coffee     $HOST:puppeteer/ui/project.coffee
+scp -q /Users/jahbini/writer/ui/project.coffee        $HOST:writer/ui/project.coffee
 rsync -aq /Users/jahbini/writer/bin/ $HOST:writer/bin/
 
 echo "synced $(date +%H:%M:%S)"
@@ -89,19 +92,19 @@ echo "synced $(date +%H:%M:%S)"
 - `~/writer/data/` — the shared data directory (2026-08-26 move); commit
   it once and both machines pull it
 
-## What needs a UI restart after sync
+## What needs a node recycle after sync (fused world, 2026-11-07)
 
-- **Editing `writer/ui_server.coffee`** → restart the running ui_server.
-  Node caches modules; the process must exit and relaunch.
+- **Step scripts + recipes + tools** — **no restart needed.** The fused
+  node cache-busts step scripts per run and resolves tools per step.
+- **`pipe_ui_runner.coffee`, `meta/*`, `mlx/*`, `ipc/*`, `ui/project.coffee`**
+  — RESIDENT in the long-lived node; a change needs a node recycle, GATED
+  on run state ([[taskmasters-cooperate-no-kill]] — never while
+  `ui/run.status == running`):
   ```sh
-  curl -s -X POST http://127.0.0.1:4311/api/shutdown_ui
-  # It respawns via handleSwitchPipe's exec trick
-  # OR kill the `coffee ui_server.coffee` process and re-run `npm run ui`
+  launchctl kickstart -k gui/$(id -u)/com.jahbini.pipe-ui-writer     # or -puppeteer
   ```
-
-- **Editing anything else** (model classes, meta devices, step scripts,
-  runner) — **no restart needed.** Each pipeline launch spawns a fresh
-  `pipeline_runner` process which `require`s the current files.
+  Pipe nodes (81xx): `POST <puppeteer>/api/stop_puppet {pipe}` when idle;
+  they respawn lazily with the new code.
 
 ## Overnight-reboot durability
 
@@ -114,7 +117,7 @@ Everything above survives a reboot:
 
 **What gets wiped on reboot:**
 - `/private/tmp/claude-*` scratchpads — don't rely on scripts stored there
-- The running ui_server + pipeline_runner processes — restart them manually
+- The running fused nodes — launchd respawns the pair; manual/dev nodes restart by hand
 - pnpm caches — nothing to preserve
 
 ## Rebuilding a broken venv (2026-09-07 incident)

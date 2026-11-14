@@ -5,7 +5,7 @@ practice._
 
 The pipeline's resolver already supports three tiers for both
 recipes and step scripts (CWD > BASE > EXEC — see `resolveConfigPath`
-and `resolveStepScript` in `pipeline_runner.coffee`). This doc names
+and `resolveStepScript` in the fused runner (`pipe_ui_runner.coffee`)). This doc names
 when work moves between them.
 
 ## The three tiers

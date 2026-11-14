@@ -1,7 +1,9 @@
 # UI plugin system — `${CWD}/ui/project.coffee`
 
-**Introduced**: 2026-10-08. **Status**: live on the mac-mini (puppeteer
-+ writer both run under `pipeline/ui_server.coffee` + their `ui/project.coffee`).
+**Introduced**: 2026-10-08. **Status (2026-11-07)**: live everywhere — puppeteer
++ writer + every pipe node run under the FUSED node (`pipeline/pipe_ui_runner.coffee`
++ `meta/ui.coffee`, which loads the project's `ui/project.coffee`). `ui_server.coffee`
+was deleted in the 2026-10-30 cutover; the plugin CONTRACT below is unchanged.
 
 ## Why
 
@@ -22,8 +24,9 @@ module.exports =
                                # project can chdir based on sticky state
                                # (puppeteer uses this for its
                                # state/current_pipe.txt pointer).
-  portDefault:  number         # optional. Overrides the library's 4311
-                               # default when `UI_PORT` is unset.
+  portDefault:  number         # optional. Overrides the library default
+                               # when `UI_PORT` is unset. Port plan (GPT/
+                               # ports.md): puppeteer 8000, writer 8100.
   init: (ctx) ->               # required. Returns:
     routes:         [routes]   #   array of {method, path|pathPrefix, handler}
     augmentStatus:  async(status) -> void   # optional. Mutates /api/status
@@ -39,7 +42,7 @@ root. This is important: after `/api/switch_pipe` respawns with
 `CWD=pipes/<name>` (which has no `ui/project.coffee`), the walk-up finds
 the project-root plugin two levels up. The parent of the resolved
 plugin becomes `BASE_ROOT` when the npm `node_modules/@jahbini/pipeline`
-heuristic doesn't fire (direct `coffee ~/pipeline/ui_server.coffee`
+heuristic doesn't fire (direct `coffee ~/pipeline/pipe_ui_runner.coffee`
 launches).
 
 ## Context passed to `init`
@@ -103,28 +106,24 @@ memo modules the library ships at `pipeline/ipc/`.
 ## File layout
 
 ```
-pipeline/ui_server.coffee             library (serves all projects)
-pipeline/ipc/{broker,broker_client,memo,status_source,wire}.coffee
-                                      ↑ loaded by runner/UI; see ipc.md
+pipeline/pipe_ui_runner.coffee        the fused node (serves all projects)
+pipeline/meta/ui.coffee               the serving layer (routes, SSE, plugin mount)
+pipeline/ipc/{broker,broker_client,wire}.coffee
+                                      ↑ TRANSPORT only since 2026-11-07
+                                        (memo_unification.md); ipc.md is obsolete
 puppeteer/ui/project.coffee            puppeteer-specific plugin
 puppeteer/ui/index.html               puppeteer's static UI
 writer/ui/project.coffee               writer-specific plugin
 writer/ui/index.html                  writer's static UI
 ```
 
-## Launch
-
-Both projects now launch via:
+## Launch (2026-11-07)
 
 ```
-coffee ~/pipeline/ui_server.coffee [net]
+UI_PORT=<port> UI_BIND_MODE=net coffee ~/pipeline/pipe_ui_runner.coffee
 ```
 
-from the project root. The old `puppeteer/ui_server.coffee` and
-`writer/ui_server.coffee` are deprecated as of 2026-10-08.
-
-On the mac-mini, puppeteer is launchd-managed via
-`~/Library/LaunchAgents/com.jahbini.puppeteer-ui.plist` with
-`ProgramArguments` pointing at `/Users/theaiguy/pipeline/ui_server.coffee`
-and `WorkingDirectory=/Users/theaiguy/puppeteer`. The pre-cutover plist
-is preserved as `.before-cutover` for rollback.
+from the project root (ports per `GPT/ports.md`). On the mac-mini the pair
+is launchd-managed as `com.jahbini.pipe-ui-puppeteer` / `com.jahbini.pipe-ui-writer`
+(WorkingDirectory = the project root; UI_PORT in EnvironmentVariables). Pipe
+nodes are spawned lazily by the puppeteer's `/api/ensure_puppet_pipe`.

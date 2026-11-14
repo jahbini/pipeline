@@ -64,6 +64,7 @@ Standard library plus `js-yaml`; nothing else gets shipped to npm.
 ###
 fs        = require 'fs'
 path      = require 'path'
+util      = require 'util'
 yaml      = require 'js-yaml'
 { spawn, spawnSync, execSync } = require 'child_process'
 CoffeeScript = require 'coffeescript'
@@ -1783,6 +1784,11 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
     active.names.add n
     S.markRunning n
     try uiRecorder?.event type:'step', phase:'running', step:n catch then null
+    try _runLogger?.stepStart(n) catch then null
+    # ui/step/<n> memo stamp (2026-11-08): the ui meta rule pushes every
+    # ui/* write over SSE, so the browser re-renders on step transitions
+    # instead of polling the filesystem (MARRIAGE — one memo, no 2s loop).
+    try M.saveThis "ui/step/#{n}", {status: 'running', at: Date.now()} catch then null
 
     # octopus Stage D: if this step took the GPU lease (lazily, on its
     # first L.callLLM), release it BEFORE the step resolves so the next
@@ -1807,6 +1813,8 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
           S.markDone n
         M.saveThis "done:#{n}", true
         try uiRecorder?.event type:'step', phase:'finished', step:n, status:'done' catch then null
+        try _runLogger?.stepEnd(n, 'done') catch then null
+        try M.saveThis "ui/step/#{n}", {status: 'done', at: Date.now()} catch then null
         settle -> res(true)
       else
         shutdownInfo =
@@ -1820,6 +1828,8 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
         M.saveThis "pipeline:shutdown", shutdownInfo
         M.saveThis "done:#{n}", false
         try uiRecorder?.event type:'step', phase:'finished', step:n, status:'failed', error:String(errMsg ? "failed") catch then null
+        try _runLogger?.stepEnd(n, 'failed', String(errMsg ? 'failed')) catch then null
+        try M.saveThis "ui/step/#{n}", {status: 'failed', at: Date.now(), error: String(errMsg ? 'failed')} catch then null
         settle -> rej new Error(String(errMsg ? "failed"))
 
     # **Script needed here — fail directly if it is missing.** No fallback
@@ -1896,7 +1906,22 @@ runStep = (n, def, exp, M, S, active, resolveArtifact, artifactSpecFor, uiRecord
       _releaseGpu = (t) ->
         try (_gpuClaim.release t if t and _gpuClaim)
         _pubGpu null
-      L.memoRequest = M.ipc?.memoRequest ? (-> Promise.reject(new Error 'no_memo'))
+      # ONE MEMO (2026-11-07): L.memoRequest is served by the in-process M —
+      # the same store the browser (/api/ui, /api/memo), the UI taskmaster,
+      # and sys/* cross-node replication all share. It previously pointed at
+      # M.ipc.memoRequest = broker RPC, which has had NO responder since the
+      # fused boot stopped hosting a sqlite Memo — every step call silently
+      # fell to its catch-default. Same op vocabulary as meta/ui's shim.
+      L.memoRequest = (op, args = {}) ->
+        new Promise (resolve, reject) ->
+          try
+            switch op
+              when 'get'        then resolve {value: M.theLowdown(args.key)?.value}
+              when 'put'        then M.saveThis(args.key, args.value); resolve {ok: true, value: args.value}
+              when 'del'        then (try delete M.MM[args.key]); resolve {ok: true}
+              when 'get_prefix' then resolve {entries: ({key: k, value: e.value} for own k, e of M.MM when k.indexOf(args.prefix ? '') is 0)}
+              else resolve {}
+          catch err then reject err
       L.leaseHost   = _hostSlug
       L.withGpu = (fn) ->
         t = await _claimGpu "#{_pipeSlug}.#{n}"
@@ -2147,12 +2172,149 @@ The full life of a run, in the order things happen:
      right code and update `ui-run.json`. If a shutdown was
      written mid-flight, honor it immediately.
 ###
+# ── per-run / per-step log capture (jahbini directive 2026-11-08) ──────────
+# The fused cutover lost per-run log files (they were artifacts of the old
+# spawn-with-redirection launch path), leaving ONE merged node stream that is
+# impossible to read per step. This restores EXPLICIT structure:
+#   logs/<recipe>_<HH_MM>.log            run master — every line tagged [step]
+#   logs/<recipe>_<HH_MM>__<step>.log    one file per step, plain
+#   logs/<recipe>_<HH_MM>[__<step>].err  error lines only
+# Step boundaries get START/END banners (status + timestamps). The console
+# tee is installed ONCE and always passes through to the real console, so
+# the node's own log (puppet_node.log / launchd log) is unchanged. Writes
+# are buffered + async (async_fused_node.md — never block the shared loop);
+# per-file append chains keep line order. One run per node (the UI gates
+# concurrency), so a single module-level _runLogger is sufficient.
+_runLogger = null
+_origConsole = null
+_installConsoleTee = ->
+  return if _origConsole?
+  _origConsole =
+    log:   console.log.bind(console)
+    info:  console.info.bind(console)
+    warn:  console.warn.bind(console)
+    error: console.error.bind(console)
+  mk = (name, isErr) -> (args...) ->
+    _origConsole[name] args...
+    try _runLogger?.consoleLine(util.format(args...), isErr) catch then null
+  console.log   = mk('log', false)
+  console.info  = mk('info', false)
+  console.warn  = mk('warn', false)
+  console.error = mk('error', true)
+
+createRunLogger = (cwd, tag, activeNamesFn) ->
+  logsDir = path.join cwd, 'logs'
+  try fs.mkdirSync logsDir, {recursive: true} catch then null
+  buffers = {}          # filename -> [lines]
+  tails   = {}          # filename -> promise chain (append ordering)
+  timer   = null
+  flush = ->
+    timer = null
+    pend = buffers
+    buffers = {}
+    for own file, lines of pend when lines.length
+      do (file, lines) ->
+        p = path.join logsDir, file
+        tails[file] = (tails[file] ? Promise.resolve()).then -> new Promise (r) ->
+          fs.appendFile p, lines.join('\n') + '\n', -> r()
+    null
+  schedule = ->
+    return if timer?
+    timer = setTimeout flush, 150
+    timer.unref?()
+  push = (file, text) ->
+    (buffers[file] ?= []).push text
+    schedule()
+  stamp = -> new Date().toISOString().slice 11, 19
+  names = -> Array.from(activeNamesFn?() ? [])
+
+  tag: tag
+  consoleLine: (text, isErr) ->
+    ns = names()
+    t = stamp()
+    if ns.length is 1
+      push "#{tag}__#{ns[0]}.log", "#{t} #{text}"
+      push "#{tag}__#{ns[0]}.err", "#{t} #{text}" if isErr
+      push "#{tag}.log", "#{t} [#{ns[0]}] #{text}"
+    else
+      who = ns.join('+') or 'runner'
+      push "#{tag}.log", "#{t} [#{who}] #{text}"
+    push "#{tag}.err", "#{t} [#{ns.join('+') or 'runner'}] #{text}" if isErr
+    null
+  stepStart: (n) ->
+    hdr = "════ step #{n} START #{new Date().toISOString()} ════"
+    push "#{tag}__#{n}.log", hdr
+    push "#{tag}.log", hdr
+    null
+  stepEnd: (n, status, detail = null) ->
+    ftr = "════ step #{n} END (#{status}#{if detail then ": #{detail}" else ''}) #{new Date().toISOString()} ════"
+    push "#{tag}__#{n}.log", ftr
+    push "#{tag}.log", ftr
+    push "#{tag}__#{n}.err", ftr if status is 'failed'
+    null
+  runStart: (recipe) ->
+    push "#{tag}.log", "████ run #{recipe} (#{tag}) START #{new Date().toISOString()} ████"
+    null
+  runEnd: (status) ->
+    push "#{tag}.log", "████ run END (#{status}) #{new Date().toISOString()} ████"
+    flush()
+    null
+
+# ── memory knowledge (2026-11-07): idle ⇒ no model resident ────────────────
+# jahbini's rule, made structural: "if it's idle, it's not using, period" +
+# "KEEP THE UI". The node never dies for memory's sake — the MODEL is what
+# gets evicted. When the last active run ends, a grace timer starts; if no
+# new run began by the time it fires, every cached MLX session is destroyed
+# (weights freed, Metal cache cleared) via global.__mlx_runtime (registered
+# by mlx/llm_dispatch on first model load; absent ⇒ nothing resident). A
+# continuous-loop relaunch inside the grace window cancels the timer, so a
+# busy pipe never thrashes reload cycles.
+MODEL_EVICT_GRACE_MS = Number(process.env.MODEL_EVICT_GRACE_MS ? 60_000)
+_evictTimer = null
+_runsActive = 0
+_noteRunStarted = ->
+  _runsActive += 1
+  if _evictTimer?
+    clearTimeout _evictTimer
+    _evictTimer = null
+_noteRunEnded = ->
+  _runsActive = Math.max 0, _runsActive - 1
+  return unless _runsActive is 0
+  clearTimeout _evictTimer if _evictTimer?
+  _evictTimer = setTimeout ->
+    _evictTimer = null
+    return unless _runsActive is 0
+    rt = global.__mlx_runtime
+    return unless rt? and (try rt.sessionCount?() catch then 0) > 0
+    Promise.resolve(rt.evictSessions()).then(
+      ((r) -> console.log "[memory] idle eviction: #{r?.evicted ? 0} session(s) freed, metal active #{r?.metal?.active_mb ? '?'}MB"),
+      ((e) -> console.error "[memory] idle eviction failed: #{e?.message ? e}"))
+  , MODEL_EVICT_GRACE_MS
+  _evictTimer.unref?()
+
 # runRecipe — the DAG-runner taskmaster. Runs ONE recipe to completion against
 # the INJECTED shared Memo (the fused node's one memo), writes ui/run status
 # into it, and calls `done(result)` on completion. It NEVER process.exit()s —
 # that would kill the long-lived UI taskmaster sharing this process.
 # (MARRIAGE fuse, 2026-10-29.)
 runRecipe = (M, runOpts={}, done=(->)) ->
+  # Memory knowledge: bracket the run so the idle-eviction grace timer only
+  # runs between runs. done() can be reached from several exits — guard once.
+  _noteRunStarted()
+  _userDone = done
+  _doneNoted = false
+  done = (result) ->
+    unless _doneNoted
+      _doneNoted = true
+      _noteRunEnded()
+      # Close the run log even on early exits that bypass finalizeRunStatus
+      # (prior-shutdown return, etc.) — otherwise the console tee keeps
+      # appending runner chatter to a dead run's master log.
+      try
+        _runLogger?.runEnd String(result?.status ? 'ended')
+        _runLogger = null
+      catch then null
+    _userDone result
   # No cross-process single-instance guard — the fused node IS the one process;
   # the UI taskmaster gates concurrency before calling runRecipe.
   pythonEnv = validatePythonEnvironment(CWD)
@@ -2238,14 +2400,27 @@ runRecipe = (M, runOpts={}, done=(->)) ->
   # to FK its evaluations row to the runs row, and by any future step
   # that needs to scope its outputs to "this run."
   M.saveThis "run/current_run_id", runId
+  # Per-run / per-step log capture (2026-11-08): mint the run tag the old
+  # spawn path used to get from HH_MM/LOGDIR env, wire the logger (step
+  # attribution reads `active.names`, assigned below — closure is fine),
+  # and stamp logdir/hh_mm back into ui-run.json so the UI's Latest
+  # Log/Err panels point at THIS run's files again.
+  _pad2 = (x) -> String(x).padStart(2, '0')
+  _now  = new Date()
+  runHHMM   = process.env.HH_MM ? "#{_pad2 _now.getHours()}_#{_pad2 _now.getMinutes()}"
+  runLogTag = process.env.LOGDIR ? "#{pipelineName}_#{runHHMM}"
+  M.saveThis "env/HH_MM", runHHMM unless process.env.HH_MM?
+  _runLogger = createRunLogger CWD, runLogTag, (-> active?.names)
+  _installConsoleTee()
+  _runLogger.runStart pipelineName
   runPayload =
     id: runId
     pipeline: pipelineName
     pid: process.pid
     cwd: CWD
     exec: EXEC
-    hh_mm: process.env.HH_MM ? null
-    logdir: process.env.LOGDIR ? null
+    hh_mm: runHHMM
+    logdir: runLogTag
     started_at: startedAt
     status: 'running'
   U.saveRun runPayload
@@ -2258,7 +2433,7 @@ runRecipe = (M, runOpts={}, done=(->)) ->
       pipeline: pipelineName
       started_at: startedAt
       status: 'running'
-      logdir: process.env.LOGDIR ? null
+      logdir: runLogTag
       pid: process.pid
       cwd: CWD
   catch err
@@ -2268,6 +2443,10 @@ runRecipe = (M, runOpts={}, done=(->)) ->
   # Updates both `state/ui-run.json` (via U.updateRun) and the SQLite row.
   finalizeRunStatus = (status, extra = {}) ->
     finishedAt = new Date().toISOString()
+    try
+      _runLogger?.runEnd status
+      _runLogger = null
+    catch then null
     patch = Object.assign {status, finished_at: finishedAt}, extra
     U.updateRun patch
     try
@@ -2296,7 +2475,7 @@ runRecipe = (M, runOpts={}, done=(->)) ->
         started_at:    startedAt
         completed_at:  finishedAt
         duration_sec:  Math.round((Date.parse(finishedAt) - Date.parse(startedAt)) / 1000)
-        logdir:        process.env.LOGDIR ? null
+        logdir:        runLogTag
         shutdown_by:   extra.shutdown?.by ? null
         shutdown_reason: extra.shutdown?.reason ? null
       fs.writeFileSync manifestPath, JSON.stringify(manifest, null, 2), 'utf8'
@@ -2666,6 +2845,34 @@ bootFusedNode = (opts={}) ->
     console.error "[mqtt] boot broker failed (continuing without MQTT): #{err?.message ? err}"
 
   running = false
+
+  # ── Continuous / cooldown-relaunch loop (2026-11-05) ────────────────
+  # When the Run panel's `continuous` toggle is on, re-fire the SAME recipe
+  # after a cooldown each time a run finishes `done` — the oracle_ite
+  # launch→exit→cool→relaunch pattern, revived for the fused node. For the
+  # voyage this walks the whole arc one bounded chapter per fire, hands-free.
+  # STOP conditions: continuous toggled off, the run failed, or the recipe set
+  # the opt-in `ui/loop_complete` flag (celarien_generate_ite sets it at 24/24)
+  # so the loop halts instead of spinning on no-op runs.
+  _continuousTimer = null
+  _readUiControl = -> try JSON.parse(fs.readFileSync(path.join(CWD, 'state', 'ui-control.json'), 'utf8')) catch then {}
+  _maybeContinuous = (recipe, result) ->
+    (clearTimeout(_continuousTimer) if _continuousTimer?); _continuousTimer = null
+    return unless result?.status is 'done'          # never loop on a failure
+    ctl = _readUiControl()
+    return unless ctl.continuous is true
+    return if (try (M.theLowdown('ui/loop_complete')?.value is true) catch then false)
+    delayMs = Math.max(1, Number(ctl.continuous_delay_seconds ? 60)) * 1000
+    console.log "🔁 continuous: re-firing #{recipe} after #{Math.round(delayMs / 1000)}s cooldown"
+    _continuousTimer = setTimeout (->
+      _continuousTimer = null
+      return unless (_readUiControl().continuous is true)   # re-check after cooldown
+      # fresh:true — a continuous cycle RE-RUNS the whole recipe (re-scan /
+      # regenerate), it does not resume-skip done steps. Resume-by-default is
+      # for manual/crash re-launch; the continuous loop's intent is repetition.
+      M.ui.onLaunch {pipeline: recipe, fresh: true}
+    ), delayMs
+
   # The UI taskmaster calls this to launch the DAG taskmaster. Fire-and-track:
   # run status streams via the `ui/run` memo key → SSE. Returns immediately.
   M.ui.onLaunch = (req) ->
@@ -2676,7 +2883,21 @@ bootFusedNode = (opts={}) ->
     # restart:true (from /api/step_restart) preserves on-disk DAG state so the
     # runner's restart_here protocol can keep upstream steps and only redo the
     # target + downstream. A normal Run does the opposite: fresh-run clear.
+    # RESUME-BY-DEFAULT (jahbini 2026-11-06, replaces the 2026-10-29 fresh-run
+    # default). A normal Run now PRESERVES on-disk DAG state, so the startup
+    # restore (§h/§i) seeds done:<step>=true for completed steps and re-runs
+    # only failed/crashed/unfinished ones — the original crash-resume design.
+    #   restart:true  → restart_here protocol (preserve state, don't rewrite
+    #                   control_override; the runner redoes the flagged step +
+    #                   downstream). From /api/step_restart.
+    #   fresh:true    → explicit from-scratch: wipe pipeline.json + every
+    #                   step-<name>.json so the whole recipe re-executes. The
+    #                   UI's "erase state" button + the continuous re-fire use
+    #                   this. (Equivalent to clicking /api/clear_pipeline_state
+    #                   then Run.)
+    #   (neither)     → RESUME.
     restart = payload.restart is true
+    fresh   = payload.fresh is true
     unless restart
       # Persist the selection so the status panel's _controlPipeline() and the DAG
       # read a consistent recipe/ui_values (legacy /api/launch wrote this too).
@@ -2685,15 +2906,16 @@ bootFusedNode = (opts={}) ->
         obj.ui_values = payload.ui_values if payload.ui_values? and typeof payload.ui_values is 'object'
         fs.writeFileSync path.join(CWD, 'control_override.yaml'), yaml.dump(obj), 'utf8'
       catch err then null
-      # Fresh-run semantics (jahbini 2026-10-29): a Run clears prior DAG state
-      # (pipeline.json + every step-<name>.json) so the whole recipe re-executes
-      # rather than restoring done-flags and skipping. No crash-resume memoization.
-      try fs.unlinkSync path.join(CWD, 'pipeline.json') catch then null
-      sdir = path.join(CWD, 'state')
-      for f in (try fs.readdirSync(sdir) catch then []) when /^step-.*\.json$/.test(f)
-        try fs.unlinkSync path.join(sdir, f) catch then null
+      if fresh
+        try fs.unlinkSync path.join(CWD, 'pipeline.json') catch then null
+        sdir = path.join(CWD, 'state')
+        for f in (try fs.readdirSync(sdir) catch then []) when /^step-.*\.json$/.test(f)
+          try fs.unlinkSync path.join(sdir, f) catch then null
+    # Reset the opt-in continuous stop-signal for the new run; a recipe that
+    # finishes its loop (e.g. celarien_generate_ite at 24/24) re-sets it true.
+    try M.saveThis 'ui/loop_complete', false catch then null
     running = true
-    try runRecipe M, {recipe}, (result) -> running = false
+    try runRecipe M, {recipe}, (result) -> running = false; _maybeContinuous(recipe, result)
     catch err then running = false; return {ok: false, error: String(err?.message ? err)}
     {ok: true, status: (if restart then 'restarted' else 'launched'), pid: process.pid, override: {pipeline: recipe}}
   port = Number(opts.port ? process.env.UI_PORT ? 4300)

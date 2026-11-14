@@ -2,14 +2,14 @@
 
 **File**: `mcp/pipe_server.coffee`
 **Transport**: MCP over stdio (`@modelcontextprotocol/sdk`)
-**Backend**: HTTP proxy to a running `ui_server.coffee`
+**Backend**: HTTP proxy to a running fused node (`pipe_ui_runner.coffee`)
 
 ## Purpose
 
 Exposes the pipeline UI's HTTP surface as MCP tools + resources so a
 remote agent (typically `puppeteer` via `meta/remote.coffee`) can
 drive a peer host without any UI-specific client code. Every tool
-here is a thin wrapper around a `ui_server.coffee` route; no state
+here is a thin wrapper around a fused-node route; no state
 lives in this file.
 
 ## Environment
@@ -17,7 +17,7 @@ lives in this file.
 | var | default | meaning |
 |---|---|---|
 | `UI_HOST` | `127.0.0.1` | Host to proxy HTTP to. |
-| `UI_PORT` | `4311` | Port `ui_server` is bound on. |
+| `UI_PORT` | `8100` | Port the target node is bound on (plan: `GPT/ports.md`). |
 | `PIPE_MCP_ALLOW_CONTROL` | unset | When `1`, the control tools below are registered. Read tools are always registered. |
 
 ## Read tools (always on)
@@ -43,7 +43,7 @@ lives in this file.
 
 | tool | maps to | notes |
 |---|---|---|
-| `launch` | `POST /api/launch` | Launch the active pipe. Idempotent via `ensureSingleInstance` in ui_server. |
+| `launch` | `POST /api/launch` | Launch the active pipe. Idempotent via `ensureSingleInstance` in the node. |
 | `kill` | `POST /api/kill` | SIGTERM the active run. |
 | `switch_pipe` | `POST /api/switch_pipe` | Switch to a different pipe or restart in place. Body passed through verbatim; typical payload `{name: <pipe>}`. |
 | `control` | `POST /api/control` | Write `control_override.yaml` — recipe selector + UI dropdown knobs in one call. Body accepts `{pipeline, scene, arrival, disturbance, reflection, realization, ui_values, control_override_text, continuous, continuous_delay_seconds}`. Setting `{pipeline: "<recipe>"}` flips the active recipe for the pipe. Combine with `ui_values` to preset dropdown knobs. |

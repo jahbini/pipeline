@@ -289,6 +289,14 @@ trainLoRA = (opts) ->
     tStart = Date.now()
 
     for step in [1..iters]
+      # UI liveness (jahbini 2026-11-08): yield to the shared event loop once
+      # per iteration (~1.3s of native compute each on an 8B). Without this
+      # the fused node could not serve ONE HTTP request for the entire
+      # training — status frozen, file clicks dead, pipeline graph blank,
+      # run-log flushes buffered until the end. One setImmediate per step
+      # costs ~nothing and lets HTTP/SSE/log flushes run between steps.
+      # (Makes trainLoRA async; both callers already treat it as a promise.)
+      await new Promise (r) -> setImmediate r
       b = buildBatch trainTokenized, batchSize, rng, padId
       # Scope the whole forward+backward+update in mx.tidy so every intermediate
       # it creates — logits, activations, dequantized frozen weights, the grad
@@ -346,6 +354,18 @@ trainLoRA = (opts) ->
     tLoss = evaluate model, testTokenized, {batchSize, batches: Math.min(valBatches, Math.ceil(testTokenized.length / batchSize)), rng, padId}
     log "test_loss=#{tLoss.toFixed 4}"
     results.testLoss = tLoss
+
+  # Memory knowledge (2026-11-08): the training path loads its model DIRECTLY
+  # (not through llm_dispatch's session cache), so the run-end evictSessions
+  # pass finds nothing while ~6GB of weights sit in Metal for the node's
+  # life. Training is over — the adapter is on disk — so free the weights
+  # here, same discipline as session_api.destroy().
+  before = (mx.metal.getActiveMemory?() ? 0) / (1024 * 1024 * 1024)
+  try mx.dispose?(model.parameters()) catch _ then null
+  try mx.dispose?(model) catch _ then null
+  mx.metal.clearCache?()
+  after = (mx.metal.getActiveMemory?() ? 0) / (1024 * 1024 * 1024)
+  log "model freed: metal active #{before.toFixed 2}GB → #{after.toFixed 2}GB"
 
   results
 

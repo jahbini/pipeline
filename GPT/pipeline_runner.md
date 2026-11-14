@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL CONTRACT DOC (2026-11-07 sweep).** `pipeline_runner.coffee` was deleted in the 2026-10-30 cutover; the DAG runner is `pipe_ui_runner.coffee`'s `runRecipe` + `Memo`, which inherited this contract. The doctrines here (no fallbacks, no prechecks; needs/makes; override layers) REMAIN BINDING — only the file/line references are stale. The memo is in-process (`GPT/memo_unification.md`).
+
 # pipeline_runner.coffee — framework-orbit contract
 
 Working memory for the runner core. Framework orbit: changes here are

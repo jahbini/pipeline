@@ -1,3 +1,5 @@
+> **ENFORCED 2026-11-07:** the sqlite memo + broker-RPC store are now retired IN CODE — broker = transport only. See `GPT/memo_unification.md`.
+>
 > # ⚠️ OBSOLETE FRAMING — superseded by the MARRIAGE merge goal ([[marriage]])
 >
 > The goal is **ONE process = the UI + `pipeline_runner`**, a single recursive

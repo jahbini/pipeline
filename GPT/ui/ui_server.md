@@ -1,3 +1,5 @@
+> **⚠ HISTORICAL (2026-11-07 staleness sweep).** `ui_server.coffee` was DELETED in the 2026-10-30 cutover; serving lives in the fused node (`pipe_ui_runner.coffee` + `meta/ui.coffee` + the project plugin). Concepts below (polling gate, route shapes) largely survived and still govern the fused UI, but every "ui_server.coffee" file/line reference is pre-cutover. Ports per `GPT/ports.md`.
+
 Area: `ui_server.coffee` + `ui/index.html`
 
 **2026-10-08 cutover; 2026-10-16 cleanup**: `pipeline/ui_server.coffee`

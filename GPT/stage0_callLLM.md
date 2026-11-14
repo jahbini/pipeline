@@ -1,3 +1,5 @@
+> **HISTORICAL design log (2026-11-07 sweep)** — Stage 0 record; the dispatcher it describes lives on in `mlx/llm_dispatch.coffee`, hosted by the fused node (not `pipeline_runner.coffee`, deleted 2026-10-30).
+
 <!-- 2026-08-22: model paths under $MODELS supersede any `build/model[4]` mentions below. See GPT/model_paths.md for the current convention. -->
 
 > **Provenance note.** Authored 2026-07-22 in `~/development/mlxCoffee/GPT/`

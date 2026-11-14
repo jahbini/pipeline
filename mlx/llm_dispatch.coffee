@@ -36,6 +36,37 @@ getSession = (modelDir, opts = {}) ->
   sessions.set key, sessionPromise
   sessionPromise
 
+# --- eviction (memory knowledge, 2026-11-07) -------------------------------
+# A model is a GPU resource held for an ACTIVE run — idle means NOTHING
+# resident ("if it's idle, it's not using, period"). evictSessions() destroys
+# every cached session (weights + KV + Metal cache freed) and empties the
+# cache; the node keeps serving UI/SSE/memo at its ~50MB JS heap. The next
+# callLLM reloads on demand. Callers: pipe_ui_runner's run-end grace timer,
+# meta/ui's POST /api/evict_model, the puppeteer reaper (via that endpoint).
+evictSessions = ->
+  n = 0
+  entries = Array.from sessions.entries()
+  sessions.clear()
+  for [key, p] in entries
+    s = try (await p) catch then null
+    try
+      await s?.destroy?()
+      n += 1
+    catch err
+      console.error "[llm_dispatch] evict #{key}: #{err?.message ? err}"
+  stats = try global.__mlx_mem?() catch then null
+  console.error "[llm_dispatch] evicted #{n} session(s); metal active now #{stats?.active_mb ? '?'}MB"
+  {evicted: n, metal: stats}
+
+# Registry for the UI taskmaster. meta/ui reads this (if present) to report
+# REAL Metal memory in /api/status and to serve /api/evict_model — without
+# ever require'ing mlx into a node that never loaded a model. Absent registry
+# ⇒ zero models resident in this process, by construction.
+global.__mlx_runtime =
+  evictSessions: evictSessions
+  sessionCount: -> sessions.size
+  memStats: -> (try global.__mlx_mem?() catch then null)
+
 # --- per-op handlers -------------------------------------------------------
 # All handlers take the full params dict and return whatever their underlying
 # function returns. No translation to Python-CLI stdout format.
@@ -130,4 +161,4 @@ dispatch = (params) ->
     when 'quantize' then quantizeOp params
     else throw new Error "callLLM: unknown op '#{params.op}' (expected train|generate|fuse|embed|quantize)"
 
-module.exports = {dispatch, getSession}
+module.exports = {dispatch, getSession, evictSessions}
